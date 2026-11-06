@@ -16,6 +16,7 @@ Reach for it when the build is too big for one agent [session](https://www.aiher
 | Decided, and the work fits one [context window](https://www.aihero.dev/ai-coding-dictionary/context-window) | [implement](https://aihero.dev/skills-implement): skip the spec |
 | Decided, and the work spans several sessions | `/to-spec`, then [to-tickets](https://aihero.dev/skills-to-tickets) |
 | A [wayfinder](https://aihero.dev/skills-wayfinder) map has cleared | `/to-spec #<map_issue>` |
+| You grilled an [improve-codebase-architecture](https://aihero.dev/skills-improve-codebase-architecture) candidate | `/to-spec A2` (its ID), in the same session |
 
 ## Prerequisites
 
@@ -48,13 +49,13 @@ Often you should. The spec is worth its step only on multi-session work. Its val
 Give it the main map issue, `/to-spec #<map_issue>`, not the individual decision tickets. [wayfinder](https://aihero.dev/skills-wayfinder) produces decisions spread across a map, not deliverables. `to-spec` collapses them into one document you can build from. If you loop the map straight into `/implement`, you lose that step.
 
 **Is the spec for me to review, or is it just for the agent?**
-Mostly for the agent, and it reads that way: complete, dense, and full of references. Read the seams and the out-of-scope section. In those two places, a wrong decision is cheapest to catch now and most expensive to find later. People do complain about reading the whole thing, and there is no summary mode. But if the spec surprises you, the grilling was too shallow; the spec is not too long.
+Mostly for the agent, and it reads that way: complete, dense, and full of references. Read the seams and the out-of-scope section. In those two places, a wrong decision is cheapest to catch now and most expensive to find later. It is leaner than it used to be: one user story per distinct behaviour, no boilerplate on what makes a good test, and no empty sections. There is still no summary mode. If the spec surprises you, the grilling was too shallow; the spec is not too long.
 
 **Do I keep the spec frozen once tickets start, or let the agent rewrite it?**
 Nothing keeps it in sync. In practice it is a snapshot of what you knew at that moment, and it goes out of date the first time implementation teaches you something. Treat it as disposable after the work ships. Your `GLOSSARY.md` and ADRs are the files meant to last. If you learn something during implementation that should last, put it there, not in an edited spec.
 
 **My work is a refactor or a module boundary, not a feature. Does the template fit?**
-Less well, and this is a known limitation. The template relies heavily on user stories, which do not fit architectural work. You end up writing stories nobody asked for around decisions that are really about interfaces and invariants. Use the implementation-decisions and testing-decisions sections instead. Record the lasting architectural decisions as ADRs through [grill-with-docs](https://aihero.dev/skills-grill-with-docs), not in the spec.
+Better than it did. Stories are one per distinct behaviour and any section with nothing to say is left out, so a refactor spec can carry few or no stories and lean on the implementation-decisions and testing-decisions sections. Record the lasting architectural decisions as ADRs through [grill-with-docs](https://aihero.dev/skills-grill-with-docs), not in the spec.
 
 **Will it check the tracker for related work, or cite the ADRs it's respecting?**
 No to both. It reads and follows the ADRs for the area it touches, but it does not link them. It also does not search the tracker for overlapping issues before it writes, so a spec can duplicate work that someone already filed, and nothing warns you. If the area is busy, search the tracker yourself first.

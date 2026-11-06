@@ -1,42 +1,38 @@
 ---
 name: implement-spec
-description: "Implement the result of /to-spec and /to-tickets in code."
+description: "Implement a Ticket batch from /to-spec and /to-tickets in code, with parallel implementer subagents."
 disable-model-invocation: true
 ---
 
-You have been provided a spec. This spec should have tickets associated with it, describing how to implement the spec.
+Implement one **Ticket batch** of a spec on a single **integration branch**. If no issue tracker is configured, tell the user to run `/setup-matt-pocock-skills`.
 
-The issue tracker should have been provided to you. If not, tell the user to run `/setup-matt-pocock-skills`.
+## Ticket batch
 
-The goal is the entire spec implemented on a single **integration branch**, with every ticket resolved the way the issue tracker closes work.
+Arguments: a spec reference, plus optionally a label or milestone and/or a count N.
 
-The tickets are not a list of steps. They are a **task graph** with blocking relationships between them. This means there is always a **frontier** of tickets which are ready to be grabbed.
+- Label or milestone only: every Ticket carrying it, run until all are done.
+- N only: the next N ready Tickets of the spec.
+- Both: the next N ready Tickets carrying the label.
+- Neither: the next 1 ready Ticket.
 
-Start every subagent with a fresh context window.
+A Ticket is ready when every blocker is merged into the integration branch. N is a fixed total: Tickets unblocked mid-run join only if they are in a label-only batch. Never work a Ticket outside the batch. A batch Ticket whose unfinished blocker is outside the batch is skipped and listed in the final report. State the resolved batch (numbers and titles) before starting.
 
-Communication to and from subagents should be sparse. Communicate primarily through **context pointers**: to the spec, tickets, research notes, and previous commits. Don't duplicate information already available via pointers.
+## Rules
 
-**Implementer subagents** should be run in the background where possible for maximum concurrency.
+- Tickets form a **task graph**; the **frontier** is the batch Tickets that are ready. Track merges yourself; the tracker's blocked-by count lags until issues close.
+- At most 3 implementer subagents at once (the user may override), run in the background, each with a fresh context window, its own worktree, and its own branch.
+- Talk to subagents through **context pointers** (spec, Ticket, notes path, commits), never pasted content. Ask for a report under 100 words: branch, test result, anything blocking.
 
 ## Steps
 
-1. Read the spec and tickets to understand the task graph.
-
-2. (optional) Use an **exploration subagent** to conduct any exploration required by the tickets - relevant codebase files or external documentation. Ensure the exploration subagent can save files - it should save its markdown notes in a directory outside the repo, accessible by all future subagents. This lets **implementer subagents** focus on implementation rather than exploration.
-
-3. Create the integration branch. If the issue tracker closes work through PRs, or the user asks for one, open a draft PR after the first merge in step 5 (a branch with no commits ahead of main can't open one), marked as closing the spec and tickets.
-
-4. Use a fresh **implementer subagent** for each ticket, each in its own worktree on its own branch. Each implementer subagent:
-   - confirms its worktree is based on the integration branch before starting, and resets onto it if not;
-   - calls the Skill tool with `tdd` to build the ticket;
-   - merges the integration branch tip into its own branch before reporting done
-
-5. Once an **implementer subagent** completes, merge its work to the integration branch with a **merger subagent**.
-
-6. If this changes the **frontier** of available tickets, kick off more **implementer subagents** to work on the new tickets. This allows for maximum concurrency.
-
-7. Once all tickets are complete, call the Skill tool with `code-review` on the integration branch. Fix all issues raised by the code review in a single fresh **implementer subagent**.
-
-8. If a draft PR exists, mark it ready for review. Otherwise, resolve each ticket the way the issue tracker closes work, and report the integration branch.
-
-9. Clean up all **implementer subagent** worktrees.
+1. Read the spec and the batch Tickets.
+2. (Optional) If Tickets need shared exploration, dispatch one exploration subagent with a fresh context window to save markdown notes to a directory outside the repo; pass its path to implementers.
+3. Create the integration branch, or reuse it if a prior batch made one. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
+4. For each frontier Ticket, start an implementer subagent that:
+   - confirms its worktree is based on the integration branch tip, resetting onto it if not;
+   - calls the Skill tool with `tdd` to build the Ticket;
+   - merges the integration branch tip into its branch before reporting done.
+5. On each report, merge the branch into the integration branch yourself. Only on a conflict you can't resolve trivially, dispatch a merger subagent with a fresh context window.
+6. Start implementers for any newly ready batch Tickets, within the cap.
+7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done). Report: integration branch, Tickets done, Tickets skipped and why. Review is a separate stage: suggest `/code-review`.
+8. Remove the implementer worktrees.

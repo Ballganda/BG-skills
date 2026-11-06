@@ -13,7 +13,7 @@ Type `/code-review`, or the agent reaches for it automatically when you ask to r
 | A diff exists and you want to know if it is built right *and* is the right thing | `code-review` |
 | You want bugs hunted in the diff: null paths, races, off-by-one | Claude Code's own built-in review, not this one (see the name clash below) |
 | Nothing is written yet and you want it written test-first | [tdd](https://aihero.dev/skills-tdd) |
-| A whole spec needs building, review included | [implement](https://aihero.dev/skills-implement), which calls this skill itself |
+| A whole spec needs building | [implement](https://aihero.dev/skills-implement) or [implement-spec](https://aihero.dev/skills-implement-spec) first, then this skill as the next stage |
 | The whole codebase has drifted, not one diff | [improve-codebase-architecture](https://aihero.dev/skills-improve-codebase-architecture) |
 | Something is broken and you do not know why | [diagnosing-bugs](https://aihero.dev/skills-diagnosing-bugs) |
 
@@ -21,7 +21,7 @@ You must supply the fixed point. If you do not, the skill asks for one rather th
 
 ## Prerequisites
 
-The Standards axis needs nothing. It reads whatever the repo documents (`CODING_STANDARDS.md`, `CONTRIBUTING.md`, and the like) and falls back on a built-in baseline when the repo documents nothing.
+The Standards axis needs nothing. It reads a fixed set of files (`CLAUDE.md`, `AGENTS.md`, `CODING_STANDARDS.md`, `CONTRIBUTING.md`, `docs/agents/*`, and the standards files they link to), with no repo-wide search, so a standard kept anywhere else must be linked from one of them. It falls back on a built-in baseline when the repo documents nothing.
 
 The Spec axis needs a spec to exist and be findable. It looks in this order:
 
@@ -62,11 +62,11 @@ This is a known open bug. Several people have reproduced it, in more than one ha
 
 **Should I run it in the same [session](https://www.aihero.dev/ai-coding-dictionary/session) that wrote the code?**
 
-Prefer a fresh one. As one reader put it: "Same context reviewing itself isn't review, it's confirmation bias with a slash command." An agent that reviews in the authoring session has every assumption that shaped the code in its context. An independent reviewer would not have that context. This is also why people ask for [implement](https://aihero.dev/skills-implement) without its built-in review step, because that step runs the review inside the session that just wrote the diff. The independent version is to invoke `/code-review` yourself from a clean session.
+Prefer a fresh one. As one reader put it: "Same context reviewing itself isn't review, it's confirmation bias with a slash command." An agent that reviews in the authoring session has every assumption that shaped the code in its context. An independent reviewer would not have that context. This is also why [implement](https://aihero.dev/skills-implement) and [implement-spec](https://aihero.dev/skills-implement-spec) no longer review their own work. Invoke `/code-review` yourself from a clean session.
 
 **After every ticket, or once at the end?**
 
-Both work, and the skill does not decide for you. Per-ticket keeps each diff small enough that the Spec axis has one clear spec to check against, which is the mode `implement` uses. Batching to the end of a branch catches interactions between tickets that the per-ticket passes each miss. If you are unsure, review per ticket and run one final pass against the branch point.
+Both work, and the skill does not decide for you. Per-ticket keeps each diff small enough that the Spec axis has one clear spec to check against, which suits running it after each `implement`. Batching to the end of a branch catches interactions between tickets that the per-ticket passes each miss. If you are unsure, review per ticket and run one final pass against the branch point.
 
 **Can I trust the findings?**
 
@@ -78,7 +78,7 @@ Each fix adds new code to review, and the judgement-call half of the Standards a
 
 **Does it review my uncommitted work?**
 
-No. It diffs `<fixed-point>...HEAD`. The three-dot form measures from the merge-base and excludes staged and working-tree changes. If `implement` has not made an interim commit, the review cannot see the work that is about to go into the next commit. Commit first, then review, then amend or add a fixup.
+No. It diffs `<fixed-point>...HEAD`. The three-dot form measures from the merge-base and excludes staged and working-tree changes. Commit first, then review, then amend or add a fixup. `implement` and `implement-spec` both commit before they stop, so a review run after them sees the work.
 
 ## It's working if
 
@@ -92,7 +92,7 @@ No. It diffs `<fixed-point>...HEAD`. The three-dot form measures from the merge-
 
 `code-review` is the review step near the tail of the build chain: `grill-with-docs → to-spec → to-tickets → implement → code-review → retro`. It also stands alone on any branch or PR you point it at.
 
-- [implement](https://aihero.dev/skills-implement) is the closest neighbour. It drives the build and calls this skill as its own closing review before committing. [implement-spec](https://aihero.dev/skills-implement-spec) does the same once, over the whole integration branch.
+- [implement](https://aihero.dev/skills-implement) and [implement-spec](https://aihero.dev/skills-implement-spec) are the closest neighbours. They build and commit, then suggest this skill as the next stage; neither calls it.
 - [retro](https://aihero.dev/skills-retro) comes after it and tunes it. When a session shows the review missing a class of mistake, `retro` proposes the check or the `CODING_STANDARDS.md` rule the Standards axis then reads.
 - [pr](https://aihero.dev/skills-pr) writes the pull request body once the reviewed work goes up.
 - [to-spec](https://aihero.dev/skills-to-spec) and [to-tickets](https://aihero.dev/skills-to-tickets) produce the document the Spec axis checks against, so a vague spec makes that axis vague.
