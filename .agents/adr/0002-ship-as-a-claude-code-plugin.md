@@ -51,3 +51,9 @@ On Codex 0.161.0, the `@mattpocock` marketplace install loads the promoted model
 `@mattpocock` is now the lead route on Codex, Copilot and VS Code, at the cost of a one-time opt-in on Copilot. Claude Code stays on `claude-plugins-official`, as in the 2026-08-05 update, because it auto-updates by default and needs no `marketplace add`.
 
 The version invariant above now applies to every managed route. `npm run version` already keeps it by running `scripts/sync-plugin-version.mjs`. `marketplace.json` has no `version` field, so it can't drift.
+
+## Update, 2026-11-06: Claude Code installs from this repo's marketplace
+
+This repo is now a fork, renamed `bg-skills` and owned as `Ballganda/BG-skills`. The `claude-plugins-official` listing from the 2026-08-05 update belongs to the upstream project: it ships upstream's plugin from upstream's repo. Installing from it would give a fork user the upstream plugin, not this one.
+
+Claude Code therefore moves onto the same route as every other managed install: `claude plugin marketplace add Ballganda/BG-skills`, then `claude plugin install bg-skills@bg-skills`. `.claude-plugin/marketplace.json` is no longer just a fallback; it is the route for every agent. The cost is a one-time opt-in: Claude Code leaves auto-update off for marketplaces other than its official ones, so the user enables it once from `/plugin`. The install wording lives in [.agents/install-block.md](../install-block.md).

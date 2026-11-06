@@ -1,10 +1,10 @@
 ---
-name: setup-matt-pocock-skills
+name: bg-setup
 description: "Configure this repo for the engineering skills: set up its issue tracker, triage label vocabulary, and domain doc layout. Run once before first use of the other engineering skills."
 disable-model-invocation: true
 ---
 
-# Setup Matt Pocock's Skills
+# BG Setup
 
 Scaffold the per-repo config the engineering skills read: the **issue tracker**, the **triage labels** for the five canonical roles, and the **domain docs** layout. Every skill reads these files on every run, so write only what this repo uses. Explore, present findings, confirm, then write.
 
@@ -28,7 +28,7 @@ Read what exists; don't assume:
 
 Summarise what's present and missing, then take the sections in order, one answer each. Lead each with the recommended answer so the user can accept it in a word. Skip a section exploration already settled (B without `triage`, C without monorepo signals).
 
-**Section A: Issue tracker.** Where this repo's issues live; `to-spec`, `to-tickets`, `triage` and others read and write it. Propose GitHub if a remote points at GitHub, GitLab if one points at `gitlab.com` or a self-hosted GitLab. Otherwise offer:
+**Section A: Issue tracker.** Where this repo's issues live; `spec-gen`, `ticket-gen`, `triage` and others read and write it. Propose GitHub if a remote points at GitHub, GitLab if one points at `gitlab.com` or a self-hosted GitLab. Otherwise offer:
 
 - **GitHub**: the repo's GitHub Issues, via `gh`.
 - **GitLab**: the repo's GitLab Issues, via [`glab`](https://gitlab.com/gitlab-org/cli).

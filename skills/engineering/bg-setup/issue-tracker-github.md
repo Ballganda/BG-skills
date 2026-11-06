@@ -2,7 +2,7 @@
 
 Issues and specs live as GitHub issues in `<owner>/<repo>`. Use `gh`; inside a clone it infers the repo from `git remote -v`.
 
-File issues only into the user's own repo, never into `mattpocock/skills` (the repo these skills come from) unless the user owns it. In a fork, `gh` can default to the upstream parent: before the first `gh issue create` of a session, check `gh repo view --json nameWithOwner` and confirm with the user if it is not their repo.
+File issues only into the user's own repo, never into `Ballganda/BG-skills` (the repo these skills come from) unless the user owns it. In a fork, `gh` can default to the upstream parent: before the first `gh issue create` of a session, check `gh repo view --json nameWithOwner` and confirm with the user if it is not their repo.
 
 ## Operations
 
@@ -17,7 +17,7 @@ File issues only into the user's own repo, never into `mattpocock/skills` (the r
 - **Labels**: `gh issue edit <n> --add-label "..."` / `--remove-label "..."`.
 - **Close**: `gh issue comment <n> --body "<why>"`, then `gh issue close <n>` (on an already-closed issue, `gh issue close --comment` drops the comment and still exits 0).
 
-**PRs as a request surface: no.** (`/triage` reads this flag. To turn it on, re-run `/setup-matt-pocock-skills` and answer yes.)
+**PRs as a request surface: no.** (`/triage` reads this flag. To turn it on, re-run `/bg-setup` and answer yes.)
 
 <!-- if: prs -->
 ## PR triage

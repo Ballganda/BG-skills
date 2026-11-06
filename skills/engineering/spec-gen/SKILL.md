@@ -1,10 +1,10 @@
 ---
-name: to-spec
+name: spec-gen
 description: "Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed."
 disable-model-invocation: true
 ---
 
-Synthesize the current conversation and codebase understanding into a spec. Do NOT interview the user. If no issue tracker or triage labels are configured, tell the user to run `/setup-matt-pocock-skills`.
+Synthesize the current conversation and codebase understanding into a spec. Do NOT interview the user. If no issue tracker or triage labels are configured, tell the user to run `/bg-setup`.
 
 ## Process
 

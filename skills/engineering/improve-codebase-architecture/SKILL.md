@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Scan a codebase for deepening opportunities, list them as ID'd markdown candidates ready for /to-spec, then grill through whichever one you pick.
+description: Scan a codebase for deepening opportunities, list them as ID'd markdown candidates ready for /spec-gen, then grill through whichever one you pick.
 disable-model-invocation: true
 ---
 
@@ -41,7 +41,7 @@ In chat, a markdown list, one entry per candidate:
 
 Add a small before/after diagram (ASCII or Mermaid) only when it says more than the text. Surface an ADR-contradicting candidate only when the friction justifies reopening the ADR. End with **Top recommendation**: the ID and one line on why.
 
-Don't propose interfaces yet. Ask: "Which of these would you like to explore?" The IDs let the user carry one straight into `/to-spec`.
+Don't propose interfaces yet. Ask: "Which of these would you like to explore?" The IDs let the user carry one straight into `/spec-gen`.
 
 ## 3. Grilling loop
 

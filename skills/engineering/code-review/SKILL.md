@@ -8,7 +8,7 @@ Two-axis review of the diff between `HEAD` and a fixed point:
 - **Standards**: does the code conform to this repo's documented coding standards?
 - **Spec**: does the code faithfully implement the originating issue / spec?
 
-Each axis runs in its own parallel sub-agent with a fresh context window, so neither can mask the other. If no issue tracker is configured, tell the user to run `/setup-matt-pocock-skills`.
+Each axis runs in its own parallel sub-agent with a fresh context window, so neither can mask the other. If no issue tracker is configured, tell the user to run `/bg-setup`.
 
 ## Process
 

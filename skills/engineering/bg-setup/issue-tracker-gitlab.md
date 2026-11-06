@@ -17,7 +17,7 @@ File issues only into the user's own project, never into an upstream it was fork
 - **Close**: `glab issue note <n> --message "<why>"`, then `glab issue close <n>` (`close` takes no comment).
 - **Merge requests**: `glab mr create` / `view` / `note` / ..., shaped like `gh pr ...` with `mr` for `pr` and `note --message` for `comment --body`.
 
-**MRs as a request surface: no.** (`/triage` reads this flag. To turn it on, re-run `/setup-matt-pocock-skills` and answer yes.)
+**MRs as a request surface: no.** (`/triage` reads this flag. To turn it on, re-run `/bg-setup` and answer yes.)
 
 <!-- if: prs -->
 ## MR triage

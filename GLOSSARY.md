@@ -1,26 +1,26 @@
-# Matt Pocock Skills
+# BG Skills
 
-A collection of agent skills (slash commands and behaviors) loaded by Claude Code. Skills are organized into buckets and consumed by per-repo configuration emitted by `/setup-matt-pocock-skills`.
+A collection of agent skills (slash commands and behaviors) loaded by Claude Code. Skills are organized into buckets and consumed by per-repo configuration emitted by `/bg-setup`.
 
 ## Language
 
 **Issue tracker**:
-The tool that hosts a repo's issues: GitHub Issues, Linear, a local `.scratch/` markdown convention, or similar. Skills like `to-tickets`, `to-spec`, and `triage` read from and write to it.
+The tool that hosts a repo's issues: GitHub Issues, Linear, a local `.scratch/` markdown convention, or similar. Skills like `ticket-gen`, `spec-gen`, and `triage` read from and write to it.
 _Avoid_: backlog manager, backlog backend, issue host
 
 **Issue**:
-A single tracked unit of work inside an **Issue tracker**: a bug, task, spec, or slice produced by `to-tickets`.
+A single tracked unit of work inside an **Issue tracker**: a bug, task, spec, or slice produced by `ticket-gen`.
 _Avoid_: ticket (use only when quoting external systems that call them tickets, for a **Ticket**, or for a **Decision ticket**, see below)
 
 **Decision ticket**:
 A `wayfinder` unit: a child **Issue** of a `wayfinder:map` holding a *question* whose resolution is a decision, not a slice of a build to execute. The **decision** qualifier is what keeps it distinct from an implementation ticket; `wayfinder` introduces the term, then uses "ticket".
 
 **Ticket**:
-An **Issue** produced by `to-tickets`: a tracer-bullet vertical slice that declares the Tickets blocking it.
+An **Issue** produced by `ticket-gen`: a tracer-bullet vertical slice that declares the Tickets blocking it.
 _Avoid_: task, story, slice (as a noun for the Issue)
 
 **Ticket batch**:
-The set of **Tickets** one `implement-spec` run is allowed to work: those carrying a given label or milestone, or the next N ready Tickets (N defaults to 1). Nothing outside the batch is touched.
+The set of **Tickets** one `implement` run is allowed to work: those carrying a given label or milestone, or the next N ready Tickets (N defaults to 1). Nothing outside the batch is touched.
 _Avoid_: group, wave, sprint
 
 **Triage role**:
