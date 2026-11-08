@@ -5,7 +5,7 @@ Before exploring, read:
 - **`GLOSSARY.md`** at the repo root.
 - ADRs in **`.agents/adr/`** that touch the area you're working in.
 
-If any of these don't exist, **proceed silently**: don't flag their absence or suggest creating them. `/domain-modeling` (via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when a term or decision is resolved.
+If any of these don't exist, **proceed silently**: don't flag their absence or suggest creating them. `/domain-modeling` (via `/grill` and `/improve-codebase-architecture`) creates them lazily when a term or decision is resolved.
 
 ## Use the glossary's vocabulary
 

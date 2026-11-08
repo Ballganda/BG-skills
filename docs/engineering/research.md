@@ -14,11 +14,11 @@ Reach for it when the next step is *finding something out* from outside the work
 | --- | --- |
 | An external fact a decision is waiting on | `research` |
 | A decision made *with* you, by interview | [grilling](../productivity/grilling.md) |
-| A durable architecture decision, written into `GLOSSARY.md` and ADRs | [grill-with-docs](grill-with-docs.md) |
+| A durable architecture decision, written into `GLOSSARY.md` and ADRs | [grill](grill.md) |
 | To find out whether an approach works in your codebase | [prototype](prototype.md) |
 | A plan too big to hold in one session | [wayfinder](wayfinder.md) |
 
-The line between `research` and `grill-with-docs` is the **shelf life of what comes back**. Research produces short-lived facts, such as what this library's auth mechanism does as of this week. An ADR records a decision you keep. If what you are producing is a decision rather than a fact, you are grilling, not researching.
+The line between `research` and `grill` is the **shelf life of what comes back**. Research produces short-lived facts, such as what this library's auth mechanism does as of this week. An ADR records a decision you keep. If what you are producing is a decision rather than a fact, you are grilling, not researching.
 
 ## Delegated legwork
 
@@ -70,4 +70,4 @@ No, it now fires them for you. In the unreleased changes since v1.1, a charting 
 
 ## Where it fits
 
-`research` is a reach-for-it-anytime standalone. It feeds the thinking skills and is not a step in the build chain. You take its file *into* the flow. [grilling](../productivity/grilling.md) and [grill-with-docs](grill-with-docs.md) ask sharper questions when they already have the facts, and [spec-gen](spec-gen.md) can synthesise against it. [wayfinder](wayfinder.md) is the one skill that invokes it directly. It resolves each research ticket on its map with a `/research` subagent. For the whole map, see [skill-map](skill-map.md).
+`research` is a reach-for-it-anytime standalone. It feeds the thinking skills and is not a step in the build chain. You take its file *into* the flow. [grilling](../productivity/grilling.md) and [grill](grill.md) ask sharper questions when they already have the facts, and [spec-gen](spec-gen.md) can synthesise against it. [wayfinder](wayfinder.md) is the one skill that invokes it directly. It resolves each research ticket on its map with a `/research` subagent. For the whole map, see [skill-map](skill-map.md).

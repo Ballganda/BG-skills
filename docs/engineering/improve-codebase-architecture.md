@@ -75,7 +75,7 @@ Prompt it with the next thing you are building. If a big build is coming up, poi
 
 **Does it work on a large legacy codebase?**
 
-Partly. It works well on big existing codebases that lack consistent structure, and it is the recommended upkeep tool after any one-time structural setup. But users with out-of-control projects report it "helped a little but still doesn't seem to cut it." One developer with an eight-year-old legacy codebase reported that the model went in circles, though the same skill produces a clean graph on a tidy repo. There is no dedicated `/refactor` skill for that case yet. If the codebase has no shared vocabulary, run [grill-with-docs](grill-with-docs.md) first to create one. That usually makes this skill's output much better.
+Partly. It works well on big existing codebases that lack consistent structure, and it is the recommended upkeep tool after any one-time structural setup. But users with out-of-control projects report it "helped a little but still doesn't seem to cut it." One developer with an eight-year-old legacy codebase reported that the model went in circles, though the same skill produces a clean graph on a tidy repo. There is no dedicated `/refactor` skill for that case yet. If the codebase has no shared vocabulary, run [grill](grill.md) first to create one. That usually makes this skill's output much better.
 
 **How is this different from `/codebase-design`?**
 
@@ -110,4 +110,4 @@ The skill does not ship a good answer. People often ask for a `TYPESCRIPT.md` wi
 - [grilling](../productivity/grilling.md) walks the decision tree after you choose a candidate.
 - [domain-modeling](domain-modeling.md) keeps `GLOSSARY.md` and the ADRs current as you make the decision.
 
-Its output is an idea, which goes back into the main build flow at [grill-with-docs](grill-with-docs.md) or [spec-gen](spec-gen.md). Its counterpart at the end of the main flow is [retro](retro.md). This skill improves the code the agent works in, and `retro` improves the environment around it (checks, standards, steering files) after a build. For which skill fits a situation, [skill-map](skill-map.md) is the router over the whole set.
+Its output is an idea, which goes back into the main build flow at [grill](grill.md) or [spec-gen](spec-gen.md). Its counterpart at the end of the main flow is [retro](retro.md). This skill improves the code the agent works in, and `retro` improves the environment around it (checks, standards, steering files) after a build. For which skill fits a situation, [skill-map](skill-map.md) is the router over the whole set.

@@ -8,7 +8,7 @@ The skill is three lines long. That is the design, not an unfinished draft. Skil
 
 You invoke it by typing `/wait-what`. The agent will not reach for it on its own, and it shouldn't. Only you know when you stopped following.
 
-Use it as soon as you notice you're skimming. For example, the agent has started to use jargon it invented, put five acronyms in one sentence, or explained a decision whose premise you never saw. It fixes the conversation you're already in. To stop the jargon arriving at all, use [grill-with-docs](../engineering/grill-with-docs.md), which builds the shared language upfront.
+Use it as soon as you notice you're skimming. For example, the agent has started to use jargon it invented, put five acronyms in one sentence, or explained a decision whose premise you never saw. It fixes the conversation you're already in. To stop the jargon arriving at all, use [grill](../engineering/grill.md), which builds the shared language upfront.
 
 ## The name is the mechanism
 
@@ -39,4 +39,4 @@ No. The convention was renamed to `GLOSSARY.md` / `GLOSSARY-MAP.md`, and the ski
 
 ## Where it fits
 
-You can use `wait-what` at any point, in any conversation, inside any other skill. It repairs one message after the fact. The real fix is a shared language agreed upfront, and that is [grill-with-docs](../engineering/grill-with-docs.md): a grilling session that runs [domain-modeling](../engineering/domain-modeling.md) as it goes, so it records the words you both use in your `GLOSSARY.md`. If you're unsure which skill fits the moment, [skill-map](../engineering/skill-map.md) routes you.
+You can use `wait-what` at any point, in any conversation, inside any other skill. It repairs one message after the fact. The real fix is a shared language agreed upfront, and that is [grill](../engineering/grill.md): a grilling session that runs [domain-modeling](../engineering/domain-modeling.md) as it goes, so it records the words you both use in your `GLOSSARY.md`. If you're unsure which skill fits the moment, [skill-map](../engineering/skill-map.md) routes you.

@@ -13,7 +13,7 @@ You invoke this by typing `/triage` and then describing what you want in plain l
 | What you have | Where to go |
 | --- | --- |
 | A tracker full of raw reports from other people | `/triage` |
-| A rough idea of your own, nothing written down | [grill-with-docs](grill-with-docs.md) |
+| A rough idea of your own, nothing written down | [grill](grill.md) |
 | A settled conversation to turn into a spec | [spec-gen](spec-gen.md) |
 | A spec to split into agent-ready tickets | [ticket-gen](ticket-gen.md) |
 | A confirmed bug that needs a root cause, not a label | [diagnosing-bugs](diagnosing-bugs.md) |

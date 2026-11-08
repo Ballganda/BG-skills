@@ -89,7 +89,7 @@ A worktree holds only what git tracks. Tests that read gitignored fixtures, loca
 `implement-spec` is the build step of the main chain, as the parallel alternative to running [implement](implement.md) once per ticket:
 
 ```txt
-grill-with-docs → spec-gen → ticket-gen → implement-spec → code-review → retro
+grill → spec-gen → ticket-gen → implement-spec → code-review → retro
 ```
 
 Its neighbours are [ticket-gen](ticket-gen.md), which declares the blocking edges it reads as a task graph, and [code-review](code-review.md), the next stage, which you run over the integration branch. [skill-map](skill-map.md) is the router over the whole set when you are not sure which flow you are in.

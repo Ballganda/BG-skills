@@ -1,30 +1,30 @@
 ## What it does
 
-`grill-with-docs` interviews you about a plan or design until you and the agent share one understanding of it, and writes the vocabulary and the hard decisions into your repo while it does. It is the same interview [grill-me](../productivity/grill-me.md) runs (a round of questions, then wait, then the next round), pointed at a codebase.
+`grill` interviews you about a plan or design until you and the agent share one understanding of it, and writes the vocabulary and the hard decisions into your repo while it does. It is the same interview [grill-me](../productivity/grill-me.md) runs (a round of questions, then wait, then the next round), pointed at a codebase.
 
 It is **stateful**. Every other grilling skill leaves the session in your head; this one leaves files on disk. When a term resolves, the skill writes it to `GLOSSARY.md` at once, not in a batch at the end. When a decision passes three gates, the skill writes it as an ADR. That is the whole difference, and it also causes most of the trouble people have with the skill. The artifacts are real files in a real repo, so they can be missing when you expected them, and they can drift when more than one person writes them.
 
 ## When to reach for it
 
-You invoke this by typing `/grill-with-docs`, and the agent won't reach for it on its own.
+You invoke this by typing `/grill`, and the agent won't reach for it on its own.
 
 Reach for it at the start of a change, in a repo, when the plan is still fuzzy and the words for the thing are not settled yet. It is the single-session tool. Which grilling skill you want depends on what is in front of you:
 
 | What you have | Reach for |
 | --- | --- |
 | You aren't working in a working directory at all | [grill-me](../productivity/grill-me.md) |
-| A repo, and a change you can settle in one session | `grill-with-docs` |
+| A repo, and a change you can settle in one session | `grill` |
 | An effort too big to hold in one session (a greenfield build, a large feature) | [wayfinder](wayfinder.md) |
-| A repo with no domain docs at all, and no particular feature in mind | `grill-with-docs`, aimed at the repo rather than a change |
+| A repo with no domain docs at all, and no particular feature in mind | `grill`, aimed at the repo rather than a change |
 | A decision blocked on knowledge in someone else's head | [to-questionnaire](../productivity/to-questionnaire.md) |
 
-The wayfinder split comes down to session count: `/grill-with-docs` for single-session planning, `/wayfinder` for multi-session planning.
+The wayfinder split comes down to session count: `/grill` for single-session planning, `/wayfinder` for multi-session planning.
 
 ## Prerequisites
 
 The skill writes into your repo, so you need to be somewhere it is safe to write. Resolved terms go to a `GLOSSARY.md` glossary at the root, or to the relevant context's `GLOSSARY.md`, if a `GLOSSARY-MAP.md` at the root marks the repo as multi-context. Decisions go to `docs/adr/`. The skill creates both only when it needs them. Nothing exists until the first term or decision is settled, so you set up nothing in advance.
 
-It also needs two other skills present, because its own `SKILL.md` is one line that delegates to them. [grilling](../productivity/grilling.md) supplies the interview, and [domain-modeling](domain-modeling.md) supplies the writing. Installing `grill-with-docs` alone gets you a skill that does not work.
+It also needs two other skills present, because its own `SKILL.md` is one line that delegates to them. [grilling](../productivity/grilling.md) supplies the interview, and [domain-modeling](domain-modeling.md) supplies the writing. Installing `grill` alone gets you a skill that does not work.
 
 ## The paper trail
 
@@ -73,10 +73,10 @@ Nobody is happy with the name. There is an open suggestion to rename it `grill-d
 
 ## Where it fits
 
-`grill-with-docs` is the head of the main build chain:
+`grill` is the head of the main build chain:
 
 ```txt
-grill-with-docs → spec-gen → ticket-gen → implement → code-review → retro
+grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
 It comes before anything is written down as a spec. It produces the shared understanding and settled vocabulary that [spec-gen](spec-gen.md) then synthesises without interviewing you again. Its close neighbours are [grill-me](../productivity/grill-me.md), the same interview with no repo and no files, and [domain-modeling](domain-modeling.md), the glossary-and-ADR discipline it drives; both use the [grilling](../productivity/grilling.md) primitive for the interview. Upstream of it, [wayfinder](wayfinder.md) charts efforts too large for one session and can hand parts of the map back down to it. When you're unsure which skill or flow fits, [skill-map](skill-map.md) routes you.

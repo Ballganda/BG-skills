@@ -90,7 +90,7 @@ No. It diffs `<fixed-point>...HEAD`. The three-dot form measures from the merge-
 
 ## Where it fits
 
-`code-review` is the review step near the tail of the build chain: `grill-with-docs → spec-gen → ticket-gen → implement → code-review → retro`. It also stands alone on any branch or PR you point it at.
+`code-review` is the review step near the tail of the build chain: `grill → spec-gen → ticket-gen → implement → code-review → retro`. It also stands alone on any branch or PR you point it at.
 
 - [implement](implement.md) is the closest neighbour. It builds and commits, then suggests this skill as the next stage; it never calls it.
 - [retro](retro.md) comes after it and tunes it. When a session shows the review missing a class of mistake, `retro` proposes the check or the `CODING_STANDARDS.md` rule the Standards axis then reads.

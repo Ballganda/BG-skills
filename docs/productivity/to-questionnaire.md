@@ -13,7 +13,7 @@ Reach for it when a decision is blocked on knowledge that lives in one other per
 | The answers are in… | Reach for |
 | --- | --- |
 | Your own head, unsharpened | [grill-me](grill-me.md) |
-| The codebase | [grill-with-docs](../engineering/grill-with-docs.md) |
+| The codebase | [grill](../engineering/grill.md) |
 | Someone else's head | `to-questionnaire` |
 | Nobody's head yet, the question needs something to react to | [prototype](../engineering/prototype.md) |
 
@@ -75,4 +75,4 @@ Yes, and plenty of people did before it existed: `OPEN_QUESTIONS.md` files, spre
 
 `to-questionnaire` is a reach-for-it-anytime standalone. You use it where your own knowledge ends and the next move is to ask another person, not to run another skill. That is most often mid-flow, when planning has stalled on something that isn't yours to decide.
 
-Its neighbour is [grill-me](grill-me.md), and the two differ on where the answers live. Grilling gets the answers from you; a questionnaire gets them from someone else. Feed what comes back into another grilling round, or into [grill-with-docs](../engineering/grill-with-docs.md) or [spec-gen](../engineering/spec-gen.md) if the work is heading for a build. When you're unsure which skill fits the moment, [skill-map](../engineering/skill-map.md) routes you.
+Its neighbour is [grill-me](grill-me.md), and the two differ on where the answers live. Grilling gets the answers from you; a questionnaire gets them from someone else. Feed what comes back into another grilling round, or into [grill](../engineering/grill.md) or [spec-gen](../engineering/spec-gen.md) if the work is heading for a build. When you're unsure which skill fits the moment, [skill-map](../engineering/skill-map.md) routes you.

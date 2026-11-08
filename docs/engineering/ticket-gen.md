@@ -13,7 +13,7 @@ You invoke this by typing `/ticket-gen`. The agent won't reach for it on its own
 | You have a spec issue and the build spans several sessions | `/ticket-gen`, or `/ticket-gen #<spec_issue>` |
 | The plan is only in the conversation, never written up | `/ticket-gen` reads the thread directly, no spec needed |
 | The whole change fits in one context window | [implement](implement.md), skip the tickets |
-| Nothing is decided yet | [grill-with-docs](grill-with-docs.md), then [spec-gen](spec-gen.md) |
+| Nothing is decided yet | [grill](grill.md), then [spec-gen](spec-gen.md) |
 | A [wayfinder](wayfinder.md) map has cleared | [spec-gen](spec-gen.md) first, to collapse the map, then `/ticket-gen` |
 
 Tickets that `ticket-gen` produced are agent-ready by construction. Don't run [triage](triage.md) over them. Triage is for work that arrived from someone else.
@@ -93,7 +93,7 @@ The skill stops at the artifact. Run [implement](implement.md), which works one 
 `ticket-gen` is a step in the main build chain:
 
 ```txt
-grill-with-docs → spec-gen → ticket-gen → implement → code-review → retro
+grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
 Upstream is [spec-gen](spec-gen.md), which hands it a settled spec to slice against. Keep both in one context window, with no clear between them. Downstream is [implement](implement.md), which reads the same blocking edges as a task graph and builds each ready ticket in a fresh-context subagent driving [tdd](tdd.md), landing them on one integration branch. [code-review](code-review.md) is the stage after that. When you're unsure which skill or flow fits, [skill-map](skill-map.md) routes you.

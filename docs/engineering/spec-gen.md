@@ -12,7 +12,7 @@ Reach for it when the build is too big for one agent session and must be split a
 
 | Where you are | What to run |
 | --- | --- |
-| You haven't decided anything yet | [grill-with-docs](grill-with-docs.md) first |
+| You haven't decided anything yet | [grill](grill.md) first |
 | Decided, and the work fits one context window | [implement](implement.md): skip the spec |
 | Decided, and the work spans several sessions | `/spec-gen`, then [ticket-gen](ticket-gen.md) |
 | A [wayfinder](wayfinder.md) map has cleared | `/spec-gen #<map_issue>` |
@@ -55,7 +55,7 @@ Mostly for the agent, and it reads that way: complete, dense, and full of refere
 Nothing keeps it in sync. In practice it is a snapshot of what you knew at that moment, and it goes out of date the first time implementation teaches you something. Treat it as disposable after the work ships. Your `GLOSSARY.md` and ADRs are the files meant to last. If you learn something during implementation that should last, put it there, not in an edited spec.
 
 **My work is a refactor or a module boundary, not a feature. Does the template fit?**
-Better than it did. Stories are one per distinct behaviour and any section with nothing to say is left out, so a refactor spec can carry few or no stories and lean on the implementation-decisions and testing-decisions sections. Record the lasting architectural decisions as ADRs through [grill-with-docs](grill-with-docs.md), not in the spec.
+Better than it did. Stories are one per distinct behaviour and any section with nothing to say is left out, so a refactor spec can carry few or no stories and lean on the implementation-decisions and testing-decisions sections. Record the lasting architectural decisions as ADRs through [grill](grill.md), not in the spec.
 
 **Will it check the tracker for related work, or cite the ADRs it's respecting?**
 No to both. It reads and follows the ADRs for the area it touches, but it does not link them. It also does not search the tracker for overlapping issues before it writes, so a spec can duplicate work that someone already filed, and nothing warns you. If the area is busy, search the tracker yourself first.
@@ -76,7 +76,7 @@ A tracker issue may not return a very large spec in full, and there is no local 
 `spec-gen` is a step in the main build chain, but only on the multi-session branch of it:
 
 ```txt
-grill-with-docs → spec-gen → ticket-gen → implement → code-review → retro
+grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
-Upstream, [grill-with-docs](grill-with-docs.md) makes the decisions that this skill only records, and a finished [wayfinder](wayfinder.md) map joins the chain here. Downstream, [ticket-gen](ticket-gen.md) cuts the spec into tracer-bullet tickets for [implement](implement.md) to build. When you're unsure which skill or flow fits, [skill-map](skill-map.md) routes you.
+Upstream, [grill](grill.md) makes the decisions that this skill only records, and a finished [wayfinder](wayfinder.md) map joins the chain here. Downstream, [ticket-gen](ticket-gen.md) cuts the spec into tracer-bullet tickets for [implement](implement.md) to build. When you're unsure which skill or flow fits, [skill-map](skill-map.md) routes you.

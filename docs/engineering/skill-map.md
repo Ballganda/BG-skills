@@ -12,7 +12,7 @@ You invoke this by typing `/skill-map`; the agent won't reach for it on its own.
 | --- | --- |
 | An idea, and no idea where to start | The head of the main flow, and whether the build is small enough to skip the spec |
 | Bugs and requests arriving from other people | The [triage](triage.md) on-ramp, and why tickets you generated yourself don't belong on it |
-| Two skills that look interchangeable | The line between them, and it is usually one concrete test rather than a matter of taste. [grill-me](../productivity/grill-me.md) or [grill-with-docs](grill-with-docs.md) turns on whether you are in a working directory; [grill-with-docs](grill-with-docs.md) or [wayfinder](wayfinder.md) turns on whether the effort fits one session |
+| Two skills that look interchangeable | The line between them, and it is usually one concrete test rather than a matter of taste. [grill-me](../productivity/grill-me.md) or [grill](grill.md) turns on whether you are in a working directory; [grill](grill.md) or [wayfinder](wayfinder.md) turns on whether the effort fits one session |
 | A long session and a decision about the context | The ordered tree over the five options at a phase boundary |
 | A skill you have already picked | Nothing useful. Invoke that skill directly. |
 
@@ -86,6 +86,6 @@ Check the changelog for a rename before assuming it is gone. `writing-great-skil
 
 ## Where it fits
 
-`skill-map` is a **standalone router** that sits over the whole set. It is never a step in a chain. It points into every chain, and the other docs pages link back to it so none of them has to redraw the graph. From here you most often land on [grill-with-docs](grill-with-docs.md), the head of the main flow, or [triage](triage.md), the on-ramp for work that arrived rather than work you started.
+`skill-map` is a **standalone router** that sits over the whole set. It is never a step in a chain. It points into every chain, and the other docs pages link back to it so none of them has to redraw the graph. From here you most often land on [grill](grill.md), the head of the main flow, or [triage](triage.md), the on-ramp for work that arrived rather than work you started.
 
 It is a secondary source over the skills it describes. Where the router and a `SKILL.md` disagree, the `SKILL.md` is right.

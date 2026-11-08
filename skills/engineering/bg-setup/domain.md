@@ -9,7 +9,7 @@ Before exploring, read:
 This repo is multi-context: **`GLOSSARY-MAP.md`** at the root points at one `GLOSSARY.md` per context (`src/<context>/GLOSSARY.md`); read each one relevant to the topic. `docs/adr/` holds system-wide decisions; `src/<context>/docs/adr/` holds context-scoped ones.
 <!-- end -->
 
-If any of these don't exist, **proceed silently**: don't flag their absence or suggest creating them. `/domain-modeling` (via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when a term or decision is resolved.
+If any of these don't exist, **proceed silently**: don't flag their absence or suggest creating them. `/domain-modeling` (via `/grill` and `/improve-codebase-architecture`) creates them lazily when a term or decision is resolved.
 
 ## Use the glossary's vocabulary
 

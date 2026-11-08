@@ -14,7 +14,7 @@ You invoke this by typing `/implement`, and the agent won't reach for it on its 
 | One ticket | `/implement #42`: a batch of one, still built by a subagent |
 | A spec, not yet split up, and the build spans sessions | [ticket-gen](ticket-gen.md) first, then `/implement` |
 | A small spec, or a plan you just agreed in the conversation | `/implement` right there; with no tickets it is a batch of one |
-| Not written down anywhere yet | [grill-with-docs](grill-with-docs.md), or [grill-me](../productivity/grill-me.md) if there's no codebase |
+| Not written down anywhere yet | [grill](grill.md), or [grill-me](../productivity/grill-me.md) if there's no codebase |
 | One concrete behaviour you want test-first, with no spec | [tdd](tdd.md) directly |
 | Already built, and you want it checked | [code-review](code-review.md) directly |
 
@@ -100,7 +100,7 @@ The agent resolved `#2` against another numbered list in context rather than the
 `implement` is the build step of the main chain:
 
 ```txt
-grill-with-docs → spec-gen → ticket-gen → implement → code-review → retro
+grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
 Its neighbours are [ticket-gen](ticket-gen.md), which declares the blocking edges it reads as a task graph; [tdd](tdd.md), which each implementer drives at the seams; and [code-review](code-review.md), the next stage, which you run after it commits. It trusts what the planning skills hand it and does not re-validate their shape, which is why [wayfinder](wayfinder.md) merges onto the chain at [spec-gen](spec-gen.md) rather than looping its map straight into `implement`. [skill-map](skill-map.md) is the router over the whole set when you are not sure which flow you are in.

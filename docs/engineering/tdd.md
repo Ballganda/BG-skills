@@ -88,7 +88,7 @@ No. Run against one ticket, it can propose work that belongs to a sibling ticket
 `tdd` runs inside the build step of the main chain; it is not a step of its own:
 
 ```txt
-grill-with-docs → spec-gen → ticket-gen → implement → code-review → retro
+grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
 [spec-gen](spec-gen.md) agrees the test seams up front, [implement](implement.md) drives `tdd` per ticket, and [code-review](code-review.md) checks afterwards that only the agreed seams were used, and owns the refactoring `tdd` no longer does. Its other neighbour is [codebase-design](codebase-design.md), the shared source of the seam and deep-module vocabulary that `tdd` uses. You can also reach for it on its own, whenever there is a concrete behaviour to build and no full spec in play. When you are unsure which skill fits your situation, [skill-map](skill-map.md) routes you.
