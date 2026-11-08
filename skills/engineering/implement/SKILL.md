@@ -9,7 +9,7 @@ You are the orchestrator, even for a single Ticket. Never implement in your own 
 ## Input
 
 - **Tickets**: resolve a **Ticket batch** (below) and run the Steps. If no issue tracker is configured, tell the user to run `/bg-setup`. For a Ticket reference, fetch it from the issue tracker and state its title first; if the reference is ambiguous, ask.
-- **No Tickets** (work described in chat, or a spec not split into Tickets): a batch of one. Start a single implementer subagent with a fresh context window, hand it the description (or a pointer to the spec), and have it do the implementer work from step 4 in the current checkout, committing to the current branch. Skip the task graph, the integration branch, and the worktree.
+- **No Tickets** (work described in chat, or a spec not split into Tickets): a batch of one. Start a single implementer subagent with a fresh context window, hand it the description (or a pointer to the spec), and have it do the implementer work from step 4 in the current checkout, without the bullets marked *Tickets only*, committing to the current branch. Skip the task graph, the integration branch, and the worktree.
 
 ## Ticket batch
 
@@ -34,10 +34,11 @@ A Ticket is ready when every blocker is merged into the integration branch. N is
 2. (Optional) If Tickets need shared exploration, dispatch one exploration subagent with a fresh context window to save markdown notes to a directory outside the repo; pass its path to implementers.
 3. Create the integration branch, or reuse it if a prior batch made one. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
 4. For each frontier Ticket, start an implementer subagent that:
-   - confirms its worktree is based on the integration branch tip, resetting onto it if not;
+   - *Tickets only*: confirms its worktree is based on the integration branch tip, resetting onto it if not;
    - calls the Skill tool with `tdd` at pre-agreed seams where possible;
    - typechecks and runs the single relevant test file as it goes, and the full suite once at the end;
-   - commits, then merges the integration branch tip into its branch before reporting done.
+   - commits;
+   - *Tickets only*: merges the integration branch tip into its branch before reporting done.
 5. On each report, merge the branch into the integration branch yourself. Only on a conflict you can't resolve trivially, dispatch a merger subagent with a fresh context window.
 6. Start implementers for any newly ready batch Tickets, within the cap.
 7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done). Report: integration branch, Tickets done, Tickets skipped and why.

@@ -1,6 +1,6 @@
 # Engineering
 
-Skills I use daily for code work.
+Skills for daily code work.
 
 ## User-invoked
 

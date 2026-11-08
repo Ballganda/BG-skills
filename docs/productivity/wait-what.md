@@ -24,6 +24,12 @@ The body reuses the leading words already in your global `CLAUDE.md` and your pr
 
 If you have no `GLOSSARY.md` (and no `GLOSSARY-MAP.md` pointing to one for the context at hand), the skill still works. You lose only the domain-vocabulary half.
 
+## Common questions
+
+**My project still has a `CONTEXT.md`. Does `wait-what` read it?**
+
+No. The convention was renamed to `GLOSSARY.md` / `GLOSSARY-MAP.md`, and the skill reads only the new names. Run [bg-setup](../engineering/bg-setup.md): when it finds a legacy `CONTEXT.md` or `CONTEXT-MAP.md`, it offers to `git mv` it to its `GLOSSARY` name.
+
 ## It's working if
 
 - The re-pitch is **shorter and clearer**, not shorter and blunter.
