@@ -2,9 +2,9 @@
 
 The project tool (`tools/decomp.py`) enforces every rule a script can check; the **auditor** checks the rest. A violation fails the attempt, whatever the bytes say.
 
-1. **One file.** A writer changes exactly one file: its ticket's `source`. Everything else is **guarded**: shared headers, expected bytes, the target binary, `tools/`, `decomp.json`, `DECOMP.md`, tickets, the ledger, `PATTERNS.md`, `OPEN.md`. The tool rejects a branch that touches any of them.
+1. **One file.** A writer changes exactly one file: its ticket's `source`. Everything else is **guarded**: shared headers, expected bytes, the target binary, `tools/`, `decomp.json`, `toolchain.json`, `DECOMP.md`, tickets, the ledger, `PATTERNS.md`, `OPEN.md`. The tool rejects a branch that touches any of them.
 2. **No assembly, ever.** No inline assembly in any form, even where the original used it: no `__asm`, `_asm`, `asm`, `_emit`, `__declspec(naked)`, no `.asm` or `.s` file, no machine code stored as data. A function that can only be written in assembly is `asm-origin` and out of scope.
-3. **The contract's compiler and flags.** No per-function or per-file option, `#pragma`, or attribute that changes code generation unless the contract's allowlist names it.
+3. **The contract's compiler and flags.** The tools are the ones `toolchain.json` pins, on the target it pins: when the tool reports an environment failure (exit 6), stop and report it. No other compiler, version, or copy of the target stands in. No per-function or per-file option, `#pragma`, or attribute that changes code generation unless the contract's allowlist names it.
 4. **Bytes straight from the compiler.** No editing objects, no post-processing, no linker or section tricks that place bytes.
 5. **Evidence-backed declarations.** Every field, type, signature, and calling convention comes from the shared headers or from evidence in the binary. When one is missing or wrong, stop and report a `reference-gap`: the shared fix belongs to `decomp-reference`, never to a local copy in the unit file.
 6. **The tool records matches.** Statuses, ledger lines, and match claims come only from `tools/decomp.py`. A report cites the attempt id the tool printed.

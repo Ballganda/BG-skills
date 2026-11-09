@@ -6,7 +6,9 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | --- | --- | --- |
 | `DECOMP.md` | The contract: target, compiler, flags, scope, policies, model roster | `/decomp-setup` only |
 | `decomp.json` | The contract's machine-readable part (commands, guarded paths, allowlists) | `/decomp-setup` only |
-| `IDENTIFY.md` | The compiler investigation: facts, inferences, ranked candidates | `decomp-identify` |
+| `toolchain.json` | The target's hash and each required tool: version banner, required files, source, size, hash, unpack steps | `/decomp-setup` only |
+| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks | `/decomp-setup`, `decomp.py` |
+| `IDENTIFY.md` | The compiler investigation: facts, inferences, ranked candidates, toolchain requirements | `decomp-identify` |
 | `docs/adr/` | Hard-to-reverse decisions (scope, relocation policy, fakematch rule) | `domain-modeling` |
 | `tools/` | `decomp.py` plus the project's adapters | `/decomp-setup` only |
 | `inventory.json` | Every function and unit found in the target | `tools/inventory` |
@@ -19,7 +21,7 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | `PATTERNS.md` | Proven lessons | `/decomp-run` |
 | `OPEN.md` | Recurring unsolved failures | `decomp.py report` |
 
-Two git tags freeze the ground truth: `decomp-setup` freezes `tools/`, `decomp.json`, and `DECOMP.md`; `decomp-start` freezes `inventory.json` and `expected/`. `decomp.py` refuses to verify or revalidate when the integration branch differs from a tag in any path it froze. Only the skill that set a tag moves it, and only with the user's go-ahead.
+Two git tags freeze the ground truth: `decomp-setup` freezes `tools/`, `decomp.json`, `toolchain.json`, and `DECOMP.md`; `decomp-start` freezes `inventory.json` and `expected/`. `decomp.py` refuses to verify or revalidate when the integration branch differs from a tag in any path it froze. Only the skill that set a tag moves it, and only with the user's go-ahead.
 
 ## Units and ids
 
@@ -77,6 +79,8 @@ Run from the project root: `python tools/decomp.py <command>`.
 
 | Command | Does |
 | --- | --- |
+| `doctor` | Check this machine against `toolchain.json`: the target's size and hash, each tool's required files and version banner. Exit 6 on any difference |
+| `provision [--tool <name>] [--force]` | Download each tool that has a source, compare size and SHA-256, then unpack it under `.decomp/toolchain/` |
 | `gen-specs`, `gen-tickets` | Write unit specs and tickets from `inventory.json`; existing status and notes survive |
 | `next [--n N]` | List open tickets in pick order |
 | `claim <id> --by <name>` / `release <id> [--to <status>]` | Take or give back a ticket |
@@ -91,9 +95,11 @@ Run from the project root: `python tools/decomp.py <command>`.
 | `report` | Progress, attribution, learning metrics, early warning; regenerates `OPEN.md`, checks `PATTERNS.md` |
 | `sync` | Push unit checklists and the progress issue to GitHub, when enabled |
 
+`check`, `verify`, and `revalidate` run the `doctor` checks first and build nothing when they fail. `check` skips them while `toolchain.json`, the target, and the tools' files are unchanged since the last pass. Exit 6 always means the machine, not the source: no writer fixes it, and no attempt is recorded.
+
 ## Adapters
 
-`/decomp-setup` writes these for the project's format and toolchain. Each is a command in `decomp.json`, run from a worktree root, with `{placeholders}` filled from the ticket.
+`/decomp-setup` writes these for the project's format and toolchain. Each is a command in `decomp.json`, run from a worktree root, with `{placeholders}` filled from the ticket. `decomp.py` gives each one the target's path as `DECOMP_TARGET` and each tool's folder as `DECOMP_TOOL_<NAME>` (the tool's `name` in `toolchain.json`, upper-cased); an adapter holds no absolute path.
 
 - **inventory**: reads the target, writes `inventory.json` and `expected/`. Shape: `{"units": [{"id", "source", "start", "end", "evidence"}], "functions": [{"address", "size", "unit", "scope", "evidence"}]}`; `scope` is `in`, `library`, `compiler`, `asm-origin`, or `excluded`; `size` follows the tier rule.
 - **build** (`{source}`, `{unit}`, `{obj}`): compiles one unit with the contract's compiler and flags. Exit nonzero on failure, errors on stderr.

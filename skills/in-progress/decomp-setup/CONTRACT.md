@@ -6,7 +6,8 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 # Decomp contract: <target name>
 
 ## Target
-- Path, SHA-256, size.
+- SHA-256 and size (mirrored in `toolchain.json`). Its path is per machine, in `.decomp/local.json`.
+- Edition or patch level, and which other editions are known not to match.
 - Format and architecture.
 - Other modules in the same product, and whether each is in this project.
 
@@ -16,6 +17,9 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 - Global flags: compiler and linker, each with its evidence.
 - Per-unit flags: only where evidence shows the original used them.
 - Pragma and attribute allowlist (regexes, mirrored in `decomp.json`).
+- Provisioning, per tool (mirrored in `toolchain.json`): installed by the agent or the user, the source URL, size, SHA-256, and where the hash comes from.
+- Host: the operating systems the tools run on, and what each needs (a compatibility layer and its version).
+- `doctor` output from this machine, with the Unix time.
 
 ## Scope
 - In scope: which code counts.

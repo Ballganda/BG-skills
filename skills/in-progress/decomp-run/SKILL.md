@@ -23,6 +23,8 @@ Repeat until the requested number of tickets have been attempted, or nothing is 
 
 ### 1. Check health
 
+Run `python tools/decomp.py doctor`. On exit 6, stop and show the user what it printed: the target or a tool on this machine no longer equals the contract, and `/decomp-setup`'s provisioning step restores it.
+
 Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user the contract's compiler or flags are suspect: they rerun `/decomp-setup`, which can start `decomp-identify` again. Read `OPEN.md`.
 
 ### 2. Repair first

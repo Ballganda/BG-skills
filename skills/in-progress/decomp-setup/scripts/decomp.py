@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 TIERS = [("TINY", 25), ("SMALL", 256), ("MEDIUM", 511)]  # else LARGE
@@ -68,6 +69,169 @@ def tier(size):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+# ---------- environment ----------
+
+ENV_EXIT = 6  # the machine's target or toolchain differs from toolchain.json
+_TOOLCHAIN = None
+
+
+def file_sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def local_dir():
+    """The machine-local .decomp/ directory. Worktrees share the main checkout's."""
+    if os.environ.get("DECOMP_LOCAL"):
+        return Path(os.environ["DECOMP_LOCAL"])
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    return Path(common).parent / ".decomp"
+
+
+def toolchain():
+    """toolchain.json (committed requirements) joined with .decomp/local.json (this machine's paths)."""
+    global _TOOLCHAIN
+    if _TOOLCHAIN is None:
+        p = ROOT / "toolchain.json"
+        if not p.exists():
+            die("no toolchain.json; run /decomp-setup", ENV_EXIT)
+        tc = json.loads(p.read_text(encoding="utf-8"))
+        loc = local_dir()
+        lp = loc / "local.json"
+        local = json.loads(lp.read_text(encoding="utf-8")) if lp.exists() else {}
+        tc["target"]["path"] = os.environ.get("DECOMP_TARGET") or local.get("target", "")
+        for t in tc["tools"]:
+            t["root"] = str(Path(local.get("roots", {}).get(t["name"]) or loc / "toolchain" / t["name"]))
+        _TOOLCHAIN = tc
+    return _TOOLCHAIN
+
+
+def tool_env():
+    """Adapters and tool commands find the target and each tool through these variables."""
+    tc = toolchain()
+    env = dict(os.environ, DECOMP_TARGET=tc["target"]["path"])
+    for t in tc["tools"]:
+        env["DECOMP_TOOL_" + re.sub(r"\W", "_", t["name"]).upper()] = t["root"]
+    return env
+
+
+def doctor(full=True):
+    """Stop unless the target and every tool equal toolchain.json. Returns the report lines.
+
+    full=False trusts the last passed check while toolchain.json, the target, and every
+    required file keep the same size and modification time.
+    """
+    tc = toolchain()
+    loc = local_dir()
+    tgt = tc["target"]
+    watched = ([Path(tgt["path"])] if tgt["path"] else []) + [
+        Path(t["root"]) / f for t in tc["tools"] for f in t.get("files", [])]
+    stamp = [sha((ROOT / "toolchain.json").read_bytes()), tgt["path"]]
+    for p in watched:
+        try:
+            st = p.stat()
+            stamp.append(f"{p}:{st.st_size}:{st.st_mtime_ns}")
+        except OSError:
+            stamp.append(f"{p}:missing")
+    stamp = sha("\n".join(stamp).encode())
+    cache = loc / "doctor.json"
+    if not full and cache.exists() and json.loads(cache.read_text(encoding="utf-8")).get("ok") == stamp:
+        return []
+    bad, lines = [], []
+    if not tgt["path"]:
+        bad.append('target: no path; set "target" in .decomp/local.json or DECOMP_TARGET')
+    elif not Path(tgt["path"]).is_file():
+        bad.append(f"target: {tgt['path']} not found")
+    else:
+        size, digest = Path(tgt["path"]).stat().st_size, file_sha(tgt["path"])
+        if size != tgt["size"] or digest != tgt["sha256"]:
+            bad.append(f"target: {tgt['path']} is {size} B sha256 {digest}; "
+                       f"the contract's is {tgt['size']} B sha256 {tgt['sha256']}")
+        else:
+            lines.append(f"target ok: {size} B sha256 {digest[:16]}")
+    env = tool_env()
+    for t in tc["tools"]:
+        missing = [f for f in t.get("files", []) if not (Path(t["root"]) / f).exists()]
+        if missing:
+            bad.append(f"{t['name']}: missing under {t['root']}: {missing}")
+            continue
+        try:
+            r = subprocess.run(t["banner_cmd"].replace("{root}", t["root"]), shell=True, cwd=ROOT, env=env,
+                               capture_output=True, text=True, errors="replace", timeout=300)
+            out = r.stdout + r.stderr
+        except subprocess.TimeoutExpired:
+            out = "(banner command timed out)"
+        if t["banner"] not in out:
+            bad.append(f"{t['name']}: banner lacks '{t['banner']}'; the command printed: {out.strip()[:300]}")
+        else:
+            lines.append(f"{t['name']} ok: {t['banner']}")
+    if bad:
+        cache.unlink(missing_ok=True)
+        for b in bad:
+            print(f"ENVIRONMENT: {b}", file=sys.stderr)
+        die("this machine does not match toolchain.json; nothing was built or recorded. "
+            "Fix it with `decomp.py provision` or the user's own install, never by editing toolchain.json.", ENV_EXIT)
+    loc.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"ok": stamp, "unix": now()}), encoding="utf-8")
+    return lines
+
+
+def cmd_doctor(a):
+    for line in doctor(full=True):
+        print(line)
+    print("doctor: ok")
+
+
+def cmd_provision(a):
+    """Fetch and unpack every tool that has a source, verifying size and SHA-256 first."""
+    tc = toolchain()
+    dl = local_dir() / "downloads"
+    dl.mkdir(parents=True, exist_ok=True)
+    env = tool_env()
+    for t in tc["tools"]:
+        if a.tool and t["name"] != a.tool:
+            continue
+        src, root = t.get("source"), Path(t["root"])
+        if not src:
+            print(f"{t['name']}: no source; the user installs it and names its folder in .decomp/local.json \"roots\"")
+            continue
+        if t.get("files") and all((root / f).exists() for f in t["files"]) and not a.force:
+            print(f"{t['name']}: already unpacked at {root}")
+            continue
+        if not src["url"].startswith("https://"):
+            die(f"{t['name']}: source url must be https")
+        archive = dl / (src.get("file") or src["url"].split("?")[0].rsplit("/", 1)[-1])
+        digest = file_sha(archive) if archive.exists() else None
+        if digest is None or (src.get("sha256") and digest != src["sha256"]):
+            print(f"{t['name']}: downloading {src['url']}")
+            part = archive.with_name(archive.name + ".part")
+            try:
+                with urllib.request.urlopen(src["url"]) as r, open(part, "wb") as f:
+                    shutil.copyfileobj(r, f, 1 << 20)
+            except OSError as e:
+                die(f"{t['name']}: download failed: {e}", ENV_EXIT)
+            part.replace(archive)
+            digest = file_sha(archive)
+        size = archive.stat().st_size
+        if not src.get("sha256"):
+            print(f"{t['name']}: downloaded {archive.name}: {size} B sha256 {digest}")
+            die(f"{t['name']}: toolchain.json has no sha256 for this source. Record the size and hash above "
+                "with where they come from, then run provision again. Nothing was unpacked.", ENV_EXIT)
+        if digest != src["sha256"] or size != src.get("size", size):
+            die(f"{t['name']}: {archive.name} is {size} B sha256 {digest}; toolchain.json says "
+                f"{src.get('size')} B sha256 {src['sha256']}. Nothing was unpacked.", ENV_EXIT)
+        root.mkdir(parents=True, exist_ok=True)
+        for c in t.get("unpack", []):
+            c = c.replace("{archive}", str(archive)).replace("{root}", str(root))
+            if subprocess.run(c, shell=True, cwd=dl, env=env).returncode != 0:
+                die(f"{t['name']}: unpack step failed: {c}", ENV_EXIT)
+        print(f"{t['name']}: unpacked to {root}")
+    print("provisioned; run `decomp.py doctor`")
 
 
 # ---------- tickets ----------
@@ -184,10 +348,11 @@ def build_and_diff(t, tree, report):
     if bad:
         return "guardrail", None, "\n".join(bad)
     obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
-    b = subprocess.run(fill(CFG["build"], t, obj, report), shell=True, cwd=tree, capture_output=True, text=True)
+    env = tool_env()
+    b = subprocess.run(fill(CFG["build"], t, obj, report), shell=True, cwd=tree, env=env, capture_output=True, text=True)
     if b.returncode != 0:
         return "build-fail", None, (b.stderr or b.stdout)[-4000:]
-    d = subprocess.run(fill(CFG["diff"], t, obj, report), shell=True, cwd=tree, capture_output=True, text=True)
+    d = subprocess.run(fill(CFG["diff"], t, obj, report), shell=True, cwd=tree, env=env, capture_output=True, text=True)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -339,6 +504,7 @@ def cmd_release(a):
 
 def cmd_check(a):
     t, _ = read_ticket(a.id)
+    doctor(full=False)
     report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
     result, n, log = build_and_diff(t, os.getcwd(), report)
     print(json.dumps({"result": result, "differ_bytes": n, "report": report}))
@@ -348,6 +514,7 @@ def cmd_check(a):
 
 def cmd_verify(a):
     frozen_check()
+    doctor()
     t, _ = read_ticket(a.id)
     if t["status"] != "claimed":
         die(f"{a.id} is {t['status']}; verify needs a claimed ticket")
@@ -429,6 +596,7 @@ def includes(text):
 
 def cmd_revalidate(a):
     frozen_check()
+    doctor()
     ref = a.ref or CFG["integration_branch"]
     on_integ = ref == CFG["integration_branch"]
     if not on_integ:
@@ -661,16 +829,11 @@ def main():
     if top.returncode != 0:
         die("run inside the decomp project repo")
     ROOT = Path(top.stdout.strip())
-    cfg = ROOT / "decomp.json"
-    if not cfg.exists():
-        die("no decomp.json; run /decomp-setup")
-    CFG = json.loads(cfg.read_text(encoding="utf-8"))
-    CFG.setdefault("integration_branch", "main")
-    CFG.setdefault("frozen", {"decomp-setup": ["decomp.json", "DECOMP.md", "tools"],
-                              "decomp-start": ["inventory.json", "expected"]})
-
     p = argparse.ArgumentParser(prog="decomp.py")
     s = p.add_subparsers(dest="cmd", required=True)
+    s.add_parser("doctor").set_defaults(f=cmd_doctor)
+    x = s.add_parser("provision"); x.add_argument("--tool"); x.add_argument("--force", action="store_true")
+    x.set_defaults(f=cmd_provision)
     s.add_parser("gen-specs").set_defaults(f=cmd_gen_specs)
     s.add_parser("gen-tickets").set_defaults(f=cmd_gen_tickets)
     x = s.add_parser("next"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_next)
@@ -690,6 +853,16 @@ def main():
     s.add_parser("report").set_defaults(f=cmd_report)
     s.add_parser("sync").set_defaults(f=cmd_sync)
     a = p.parse_args()
+    cfg = ROOT / "decomp.json"
+    if cfg.exists():
+        CFG = json.loads(cfg.read_text(encoding="utf-8"))
+    elif a.cmd in ("doctor", "provision"):  # setup provisions before the rest of the system exists
+        CFG = {}
+    else:
+        die("no decomp.json; run /decomp-setup")
+    CFG.setdefault("integration_branch", "main")
+    CFG.setdefault("frozen", {"decomp-setup": ["decomp.json", "toolchain.json", "DECOMP.md", "tools"],
+                              "decomp-start": ["inventory.json", "expected"]})
     a.f(a)
 
 
