@@ -1,4 +1,4 @@
-# Skills For Real Engineers
+# Skills for Engineers
 
 [![skills.sh](https://skills.sh/b/Ballganda/BG-skills)](https://skills.sh/Ballganda/BG-skills)
 
@@ -111,8 +111,10 @@ This is just the same in the AI age. There is a communication gap between you an
 
 **The Fix** is to use:
 
-- [`/grill-me`](./skills/productivity/grill-me/SKILL.md) - for non-code uses
-- [`/grill`](./skills/engineering/grill/SKILL.md) - same as [`/grill-me`](./skills/productivity/grill-me/SKILL.md), but adds more goodies (see below)
+- [`/grill-me`](./skills/productivity/grill-me/SKILL.md): a plain grilling session, for non-code uses
+- [`/grill`](./skills/engineering/grill/SKILL.md): the same session, but it also builds your project's domain model as it goes (see #2)
+
+`/grill` is the start of the build chain: `/grill` → [`/spec-gen`](./skills/engineering/spec-gen/SKILL.md) → [`/ticket-gen`](./skills/engineering/ticket-gen/SKILL.md) → [`/implement`](./skills/engineering/implement/SKILL.md) → [`/code-review`](./skills/engineering/code-review/SKILL.md). It writes no code and no spec. Once you reach a shared understanding, it stops and hands you to `/spec-gen`, which turns the conversation into a spec without interviewing you again.
 
 These are the core skills of this repo. They help you align with the agent before you get started, and think deeply about the change you're making. Use them _every_ time you want to make a change.
 
@@ -142,7 +144,7 @@ This concision pays off session after session.
 
 </details>
 
-This is built into [`/grill`](./skills/engineering/grill/SKILL.md). It's a grilling session, but that helps you build a shared language with the AI, and document hard-to-explain decisions in ADR's.
+This is built into [`/grill`](./skills/engineering/grill/SKILL.md). It's a grilling session that also runs [`domain-modeling`](./skills/engineering/domain-modeling/SKILL.md), so you build a shared language with the AI as you talk: terms land in `GLOSSARY.md`, and hard-to-explain decisions land in ADRs.
 
 It's hard to explain how powerful this is. It might be the single coolest technique in this repo. Try it, and see.
 
@@ -165,11 +167,11 @@ It's time to look at your feedback loops. Without feedback on how the code it pr
 
 **The Fix**: You need the usual tranche of feedback loops: static types, browser access, and automated tests.
 
-For automated tests, a red-green-refactor loop is critical. This is where the agent writes a failing test first, then fixes the test. This helps give the agent a consistent level of feedback that results in far better code.
+For automated tests, a red-green loop is critical. This is where the agent writes a failing test first, then writes only enough code to make it pass. This helps give the agent a consistent level of feedback that results in far better code.
 
-The **[`/tdd`](./skills/engineering/tdd/SKILL.md) skill** is one you can slot into any project. It encourages red-green-refactor and gives the agent plenty of guidance on what makes good and bad tests.
+The **[`/tdd`](./skills/engineering/tdd/SKILL.md) skill** is one you can slot into any project. It agrees the test seams with you before writing any test, works one vertical slice at a time, and gives the agent plenty of guidance on what makes good and bad tests. Refactoring is left to review ([`/code-review`](./skills/engineering/code-review/SKILL.md)), not the red-green loop. [`/implement`](./skills/engineering/implement/SKILL.md) has every implementer subagent use it.
 
-For debugging, the **[`/diagnosing-bugs`](./skills/engineering/diagnosing-bugs/SKILL.md)** skill wraps best debugging practices into a disciplined loop, gated phase by phase.
+For debugging, the **[`/diagnosing-bugs`](./skills/engineering/diagnosing-bugs/SKILL.md)** skill wraps best debugging practices into a disciplined loop, gated phase by phase: no hypotheses until the agent has a command that goes red on your exact bug.
 
 ### #4: We Built A Ball Of Mud
 
@@ -187,9 +189,12 @@ For debugging, the **[`/diagnosing-bugs`](./skills/engineering/diagnosing-bugs/S
 
 This is built in to every layer of these skills:
 
-- [`/spec-gen`](./skills/engineering/spec-gen/SKILL.md) quizzes you about which modules you're touching before creating a spec
+- [`/spec-gen`](./skills/engineering/spec-gen/SKILL.md) explores the modules a spec touches and confirms the test seams with you before publishing it
+- [`/tdd`](./skills/engineering/tdd/SKILL.md) writes tests only at those pre-agreed seams
+- [`/code-review`](./skills/engineering/code-review/SKILL.md) checks the diff against your documented coding standards and a code-smell baseline
+- [`codebase-design`](./skills/engineering/codebase-design/SKILL.md) gives every skill the same deep-module vocabulary: module, interface, depth, seam
 
-And crucially, [`/improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) surveys a codebase for deepening opportunities and hands you the candidates. Run it on your codebase once every few days. It is a survey, not a rescue: on a genuinely old codebase it will find real candidates, but it won't untangle the mud for you.
+And crucially, [`/improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) surveys a codebase for deepening opportunities, hands you the candidates with IDs, and grills you through the one you pick, ready to carry into `/spec-gen`. Run it on your codebase once every few days. It is a survey, not a rescue: on a genuinely old codebase it will find real candidates, but it won't untangle the mud for you.
 
 ### Summary
 
@@ -205,9 +210,9 @@ Skills for daily code work.
 
 **User-invoked**
 
-- **[skill-map](./skills/engineering/skill-map/SKILL.md)**: Ask which skill or flow fits your situation. A router over the user-invoked skills in this repo.
+- **[skill-map](./skills/engineering/skill-map/SKILL.md)**: Ask which skill or flow fits your situation. A router over the skills in this repo.
 - **[grill](./skills/engineering/grill/SKILL.md)**: Grilling session that also builds your project's domain model, sharpening terminology and updating `GLOSSARY.md` and ADRs inline.
-- **[triage](./skills/engineering/triage/SKILL.md)**: Move issues through a state machine of triage roles.
+- **[triage](./skills/engineering/triage/SKILL.md)**: Move issues (and external PRs, if the repo takes them) through a state machine of triage roles: categorise, verify, grill if needed, and write agent-ready briefs.
 - **[improve-codebase-architecture](./skills/engineering/improve-codebase-architecture/SKILL.md)**: Scan a codebase for deepening opportunities, list them as ID'd markdown candidates ready for `/spec-gen`, then grill through whichever one you pick.
 - **[bg-setup](./skills/engineering/bg-setup/SKILL.md)**: Configure this repo for the engineering skills (issue tracker, triage labels, domain doc layout). Run once per repo before using the other engineering skills.
 - **[spec-gen](./skills/engineering/spec-gen/SKILL.md)**: Turn the current conversation into a spec and publish it to the issue tracker. No interview, just synthesizes what you've already discussed.
@@ -221,7 +226,7 @@ Skills for daily code work.
 - **[prototype](./skills/engineering/prototype/SKILL.md)**: Build a throwaway prototype to answer a design question, either a single shareable HTML file for state/logic questions, or several radically different UI variations toggleable from one route.
 - **[diagnosing-bugs](./skills/engineering/diagnosing-bugs/SKILL.md)**: Disciplined diagnosis loop for hard bugs and performance regressions: build a feedback loop that goes red on this bug → minimise → hypothesise → instrument → fix → regression-test.
 - **[research](./skills/engineering/research/SKILL.md)**: Investigate a question against high-trust primary sources and capture the findings as a cited Markdown file in the repo, run as a background agent.
-- **[tdd](./skills/engineering/tdd/SKILL.md)**: Test-driven development with a red-green-refactor loop. Builds features or fixes bugs one vertical slice at a time.
+- **[tdd](./skills/engineering/tdd/SKILL.md)**: Test-driven development with a red-green loop at seams agreed with you up front. Builds features or fixes bugs one vertical slice at a time; refactoring is left to code review.
 - **[domain-modeling](./skills/engineering/domain-modeling/SKILL.md)**: Actively build and sharpen a project's domain model: challenge terms against the glossary, stress-test with edge-case scenarios, and update `GLOSSARY.md` and ADRs inline.
 - **[codebase-design](./skills/engineering/codebase-design/SKILL.md)**: Shared discipline and vocabulary for designing deep modules: a lot of behaviour behind a small interface, placed at a clean seam, testable through that interface.
 - **[code-review](./skills/engineering/code-review/SKILL.md)**: Two-axis review of the diff since a fixed point: **Standards** (does it follow the repo's coding standards, plus a Fowler smell baseline?) and **Spec** (does it faithfully implement the originating issue/spec?), run as parallel sub-agents so neither pollutes the other.
