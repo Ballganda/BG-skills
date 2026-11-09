@@ -10,4 +10,4 @@ Write only what domain-modeling writes (`GLOSSARY.md`, ADRs): no code, config, o
 
 The grilling closing question is also the hand-off: shared understanding reached; ready to turn it into a spec? Type `/spec-gen` when ready. Then stop. A "yes" changes nothing: wait for the user to type `/spec-gen`.
 
-If the user asks you to build or implement mid-session, answer with the closing question instead.
+If the user asks you to build or implement mid-session, don't build and don't claim shared understanding: name the branches still open, then ask whether to turn what's settled into a spec now or keep going. Type `/spec-gen` when ready. Then wait.

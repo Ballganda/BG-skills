@@ -60,7 +60,7 @@ Into the conversation only. This is the most serious open complaint about the sk
 Yes. This is the right skill for a codebase with no ADRs, no domain language and no design principles: invoke it and say "help me document my repo". Users often pair it with [improve-codebase-architecture](improve-codebase-architecture.md) for building or repairing a `GLOSSARY.md`. Expect to steer it. It reads code and asks you about what it finds, and you decide which of the words already in the codebase are the right ones.
 
 **What should I do when the session ends?**
-Type `/spec-gen` in the same conversation. The session ends with one closing question that says so, and the agent waits for you. Answering "yes" is not enough, because [spec-gen](spec-gen.md) is user-invoked and only you can start it. If the change is small enough to build immediately, type `/implement` instead; that choice is yours too.
+Type `/spec-gen` in the same conversation. The session ends with one closing question that says so, and the agent waits for you. Answering "yes" is not enough, because [spec-gen](spec-gen.md) is user-invoked and only you can start it.
 
 **Why didn't it start building when I said "agree all" or "just build it"?**
 Because skipping the spec is the failure this skill now guards against. In one session an agent took "agree all", an answer to a single round, as the end of the interview and started editing files with no spec or tickets. Round answers settle that round only. A request to build mid-session gets the closing question back, so moving on is always something you type.
