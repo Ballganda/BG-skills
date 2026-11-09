@@ -49,7 +49,7 @@ Defaults: each label string equals its role, `needs-triage`, `needs-info`, `read
 
 ### 3. Confirm and edit
 
-Show a draft of the `## Agent skills` block (for the file picked in step 4) and of `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, and `docs/agents/triage-labels.md` (only with `triage`). Let the user edit before writing.
+Show a draft of the `## Agent skills` block (for the file picked in step 4) and of `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, and `docs/agents/triage-labels.md` (only with `triage`). If an existing block holds lines that aren't setup's (see step 4), list them in the draft and ask "Keep these N lines you added?" Let the user edit before writing.
 
 ### 4. Write
 
@@ -61,25 +61,19 @@ Show a draft of the `## Agent skills` block (for the file picked in step 4) and 
 
 Never create `AGENTS.md` when `CLAUDE.md` exists (or vice versa). If an `## Agent skills` block already exists, update it in place rather than appending a duplicate, and leave the surrounding sections alone.
 
-The block:
+The block points; each `docs/agents/*.md` file owns its topic, so restate nothing they define:
 
 ```markdown
 ## Agent skills
 
-### Issue tracker
-
-[one-line summary of where issues are tracked]. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-[one-line summary of the label vocabulary]. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-[one-line summary of layout: "single-context" or "multi-context"]. See `docs/agents/domain.md`.
+- Issue tracker: [host] Issues on `<owner>/<repo>` via `[cli]`. See `docs/agents/issue-tracker.md`.
+- Triage labels: see `docs/agents/triage-labels.md`.
+- Domain docs: see `docs/agents/domain.md`.
 ```
 
-Include `### Triage labels`, and write `docs/agents/triage-labels.md`, only when Section B ran. When it ran on GitHub or GitLab, create each configured label the tracker lacks (`gh label create` / `glab label create`).
+For local markdown or "other", the tracker line names where issues live instead of host and repo. Include the triage line, and write `docs/agents/triage-labels.md`, only when Section B ran.
+
+Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`; add no marker comments. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace those headings and their one-line bodies with the list. Every other non-blank line in the block is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped. When it ran on GitHub or GitLab, create each configured label the tracker lacks (`gh label create` / `glab label create`).
 
 Write the docs from the seed templates in this folder:
 
