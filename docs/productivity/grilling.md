@@ -26,7 +26,7 @@ The **design tree** is the model of the subject: decisions with decisions hangin
 
 Inside a round, every question has a fixed format: numbered and titled behind a `❓`, then the body, then the agent's recommended answer alone on a `➡️` line. This format lets you answer a round by number ("1 yes, 2 the second option, 3 no, here's why") instead of by quoting questions back. The format has one known problem. The recommendation sometimes argues *against* the question as it was worded, so agreeing with the recommendation means answering "no" to the question. When that happens, answer the recommendation and say so.
 
-The other half of the design is the split between facts and decisions. Facts are the skill's own job. When a frontier question needs something the environment can settle, the agent dispatches a sub-agent to find out rather than asking you. The round does not wait for that research; only the questions that depend on it wait. Decisions are yours, and the agent must wait for them. An agent running `grilling` that answers its own decisions has broken the skill. The session ends when the frontier is empty. The agent then waits for you to confirm a shared understanding before it acts on what you agreed.
+The other half of the design is the split between facts and decisions. Facts are the skill's own job. When a frontier question needs something the environment can settle, the agent dispatches a sub-agent to find out rather than asking you. The round does not wait for that research; only the questions that depend on it wait. Decisions are yours, and the agent must wait for them. An agent running `grilling` that answers its own decisions has broken the skill. The session ends when the frontier is empty, and only you can close it. Answering a round, even with "agree all", settles that round and nothing more; the agent moves on to the next round. Once no branch is left open, it asks one **closing confirmation** as a question of its own: have we reached a shared understanding? It acts on nothing you agreed until you answer.
 
 The frontier has one limit. The agent chooses it by judgement; it does not compute it from a graph. So it can put two questions in one round and only later find that one answer should have changed the other. The only guard is to tell it. That reopens the affected branch in the next round.
 
@@ -58,7 +58,7 @@ Into this skill. Round-based questioning shipped briefly as a separate skill, th
 This is the most common objection to rounds, and the frontier answers it. A round only contains questions that do not depend on each other, so no answer in a round can invalidate another question in that round. Your answers still change what comes after them, because the agent works out each next round from scratch. You do lose something, but less than "all questions at once" implies. See the frontier's limit above.
 
 **It ran out of questions and started building.**
-The confirmation gate exists for this. The skill is finished when you say the understanding is shared, not when the frontier empties. Weaker and faster models still skip the gate. Users report this most often on lower-effort or non-frontier models, which collapse "interview until shared understanding" into a couple of questions and an outline. If yours does it, the reliable fix is a line in your own `AGENTS.md` or `CLAUDE.md` telling the agent not to implement without permission.
+The closing confirmation exists for this. The skill is finished when you answer that one closing question, not when the frontier empties and not when you agree with a round. One observed misfire was an agent reading "agree all" on one round as the end of the whole session; the skill now rules that out explicitly. Weaker and faster models still skip the gate. Users report this most often on lower-effort or non-frontier models, which collapse "interview until shared understanding" into a couple of questions and an outline. If yours does it, the reliable fix is a line in your own `AGENTS.md` or `CLAUDE.md` telling the agent not to implement without permission.
 
 **It answered its own questions instead of asking me.**
 That is a bug in the run, and it is the reason the skill's text separates facts from decisions. It happens most when another skill runs `grilling` to resolve a ticket, and the agent takes that task as permission to keep moving. The same constraint is why there is no async mode. People have asked for a variant that reads a GitHub issue and posts one consolidated decision memo, and that is a different skill, because a grilling session that nobody answers has produced the agent's opinion rather than yours.
@@ -79,7 +79,8 @@ This is a real bug, still unfixed, and users report it across harnesses and mode
 - Later rounds ask things the first round could not have asked.
 - It goes and looks facts up (reading files, dispatching a sub-agent) rather than asking you something it could have found out.
 - Research running in the background does not stall the round; only the questions that depend on it wait.
-- It stops at the end and asks you to confirm the understanding is shared, instead of starting work.
+- Answering a round with "agree all" brings the next round, not a wrap-up.
+- It stops at the end with a single closing question asking you to confirm the understanding is shared, and does nothing until you answer.
 - Question count stays high while round count stays low.
 
 ## Where it fits
