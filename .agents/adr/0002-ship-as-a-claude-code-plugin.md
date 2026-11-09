@@ -6,7 +6,7 @@ We ship a native **Claude Code plugin** and, for now, **defer** a native **Codex
 
 ## The constraint: bucketed skills vs. single-path selection
 
-Skills live in bucket folders under `skills/`: `engineering/` and `productivity/` are **promoted** (shipped); `misc/`, `personal/`, `in-progress/`, and `deprecated/` are **not**. A plugin must expose only the promoted set, which spans two of those bucket folders.
+Skills live in bucket folders under `skills/`, some **promoted** (shipped) and some not; [CLAUDE.md](../../CLAUDE.md#buckets) is the one place that lists them. A plugin must expose only the promoted set, which spans more than one bucket folder.
 
 - **Claude Code**: `.claude-plugin/plugin.json` accepts `skills` as an **array of explicit skill-directory paths**. We list the promoted skills one by one, exclude everything else with zero ambiguity, and add `.claude-plugin/marketplace.json` so the repo is its own single-plugin marketplace. Verified end to end: `claude plugin validate . --strict` passes, and `marketplace add` → `install` resolves all promoted skills.
 

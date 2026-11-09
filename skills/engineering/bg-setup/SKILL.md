@@ -73,7 +73,9 @@ The block points; each `docs/agents/*.md` file owns its topic, so restate nothin
 
 For local markdown or "other", the tracker line names where issues live instead of host and repo. Include the triage line, and write `docs/agents/triage-labels.md`, only when Section B ran.
 
-Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`; add no marker comments. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace those headings and their one-line bodies with the list. Every other non-blank line in the block is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped. When it ran on GitHub or GitLab, create each configured label the tracker lacks (`gh label create` / `glab label create`).
+Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`; add no marker comments. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace each heading and setup's own sentence under it (the one pointing at its `docs/agents/` file) with the list. Anything else under those headings, including words added after setup's sentence on the same line, is the user's. The block runs from `## Agent skills` to the next `#` or `##` heading, or the end of the file; every other non-blank line inside it is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped.
+
+When Section B ran on GitHub or GitLab, create each configured label the tracker lacks (`gh label create` / `glab label create`).
 
 Write the docs from the seed templates in this folder:
 
