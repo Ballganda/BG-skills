@@ -1,6 +1,6 @@
 ## What it does
 
-`domain-modeling` builds and sharpens a project's **ubiquitous language** while you are designing. It challenges a term that conflicts with the glossary, asks for a precise word where you used a vague one, and tests a relationship against a concrete scenario until the boundaries are exact.
+`domain-modeling` builds and sharpens a project's **ubiquitous language** while you are designing. It challenges a term that conflicts with the glossary and asks which you mean; if you told it to pick names itself, it still names the clash and says which word it chose. It asks for a precise word where you used a vague one, and tests a relationship against a concrete scenario until the boundaries are exact.
 
 It is the **active** discipline, not the passive one. Any skill can read `GLOSSARY.md` to borrow its vocabulary. This skill is for when you are *changing* the model, which is why it interrupts you. It writes a term into `GLOSSARY.md` at the moment you settle it, in the middle of the conversation, rather than producing a tidy glossary at the end. A glossary written at the end is a summary of a session; the inline version is the session's output.
 

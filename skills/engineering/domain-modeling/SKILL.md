@@ -15,7 +15,7 @@ Create files lazily: `GLOSSARY.md` when the first term is resolved, `docs/adr/` 
 
 ## During the session
 
-- **Challenge against the glossary.** When a term conflicts with `GLOSSARY.md`, call it out to the user at once, even when you settle it yourself: "Your glossary defines 'account' as X, but you mean Y, so I'll call Y a Z."
+- **Challenge against the glossary.** When a term conflicts with `GLOSSARY.md`, call it out at once and ask: "Your glossary defines 'cancellation' as X, but you seem to mean Y. Which is it?" If the user already handed you the naming, still call the clash out, then say which name you picked.
 - **Sharpen fuzzy language.** For a vague or overloaded term, propose a precise canonical one ("Customer or User?").
 - **Probe with scenarios.** Invent edge cases that force the boundaries between concepts to be exact.
 - **Cross-reference with code.** When the user states how something works, check the code and surface any contradiction.
