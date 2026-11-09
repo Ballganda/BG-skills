@@ -21,14 +21,8 @@ Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install comma
 
 ## Agent skills
 
-### Issue tracker
+- Issue tracker: GitHub Issues on `Ballganda/BG-skills` via `gh`. See `docs/agents/issue-tracker.md`.
+- Triage labels: see `docs/agents/triage-labels.md`.
+- Domain docs: see `docs/agents/domain.md`.
 
-GitHub Issues on `Ballganda/BG-skills`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Canonical names, unchanged. See `docs/agents/triage-labels.md`. Issues are judged against [`SCOPE.md`](./SCOPE.md).
-
-### Domain docs
-
-Single-context: `GLOSSARY.md` at the root and ADRs in `.agents/adr/`. See `docs/agents/domain.md`.
+Issues are judged against [`SCOPE.md`](./SCOPE.md).
