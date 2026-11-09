@@ -1,0 +1,304 @@
+{
+  "startedAt": "2026-11-09T05:40:31.600Z",
+  "claudeVersion": "2.1.319",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 1,
+  "casesPassed": "3/3",
+  "costUsd": 5.090165000000001,
+  "cases": [
+    {
+      "name": "grill-adr-worthy",
+      "score": 1,
+      "scoreWithout": 0.5,
+      "graders": {
+        "adr-only-when-all-three": "3/3",
+        "no-adr-for-trivial-decisions": "3/3"
+      },
+      "meanTokens": {
+        "input_tokens": 12,
+        "cache_creation_input_tokens": 11949,
+        "cache_read_input_tokens": 59216,
+        "output_tokens": 3804,
+        "total": 74981
+      },
+      "meanRounds": 1,
+      "meanQuestions": 9.333333333333334,
+      "glossaryWrites": [
+        0,
+        0,
+        0
+      ],
+      "adrWrites": [
+        2,
+        2,
+        2
+      ],
+      "meanTurns": 10,
+      "meanCostUsd": 0.38687380000000005,
+      "runs": [
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 10,
+          "costUsd": 0.35424220000000006,
+          "graders": {
+            "adr-only-when-all-three": true,
+            "no-adr-for-trivial-decisions": true
+          },
+          "tokens": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 11287,
+            "cache_read_input_tokens": 58551,
+            "output_tokens": 3591,
+            "total": 73441
+          },
+          "rounds": 1,
+          "questions": 9,
+          "glossaryWrites": 0,
+          "adrWrites": 2
+        },
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 10,
+          "costUsd": 0.33063859999999995,
+          "graders": {
+            "adr-only-when-all-three": true,
+            "no-adr-for-trivial-decisions": true
+          },
+          "tokens": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 12151,
+            "cache_read_input_tokens": 59453,
+            "output_tokens": 4042,
+            "total": 75658
+          },
+          "rounds": 1,
+          "questions": 11,
+          "glossaryWrites": 0,
+          "adrWrites": 2
+        },
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 10,
+          "costUsd": 0.47574060000000007,
+          "graders": {
+            "adr-only-when-all-three": true,
+            "no-adr-for-trivial-decisions": true
+          },
+          "tokens": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 12408,
+            "cache_read_input_tokens": 59643,
+            "output_tokens": 3780,
+            "total": 75843
+          },
+          "rounds": 1,
+          "questions": 8,
+          "glossaryWrites": 0,
+          "adrWrites": 2
+        }
+      ]
+    },
+    {
+      "name": "grill-small-feature",
+      "score": 1,
+      "scoreWithout": 0,
+      "graders": {
+        "numbered-with-recommendations": "3/3",
+        "whole-frontier": "3/3"
+      },
+      "meanTokens": {
+        "input_tokens": 8,
+        "cache_creation_input_tokens": 7464,
+        "cache_read_input_tokens": 27505,
+        "output_tokens": 1369,
+        "total": 36346
+      },
+      "meanRounds": 1,
+      "meanQuestions": 5.666666666666667,
+      "glossaryWrites": [
+        0,
+        0,
+        0
+      ],
+      "adrWrites": [
+        0,
+        0,
+        0
+      ],
+      "meanTurns": 6,
+      "meanCostUsd": 0.09961300000000001,
+      "runs": [
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 6,
+          "costUsd": 0.10291499999999987,
+          "graders": {
+            "numbered-with-recommendations": true,
+            "whole-frontier": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 7475,
+            "cache_read_input_tokens": 27505,
+            "output_tokens": 1511,
+            "total": 36499
+          },
+          "rounds": 1,
+          "questions": 5,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 6,
+          "costUsd": 0.09490900000000001,
+          "graders": {
+            "numbered-with-recommendations": true,
+            "whole-frontier": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 7452,
+            "cache_read_input_tokens": 27505,
+            "output_tokens": 1155,
+            "total": 36120
+          },
+          "rounds": 1,
+          "questions": 6,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 6,
+          "costUsd": 0.10101500000000013,
+          "graders": {
+            "numbered-with-recommendations": true,
+            "whole-frontier": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 7466,
+            "cache_read_input_tokens": 27505,
+            "output_tokens": 1440,
+            "total": 36419
+          },
+          "rounds": 1,
+          "questions": 6,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    },
+    {
+      "name": "grill-term-clash",
+      "score": 1,
+      "scoreWithout": 0.8333333333333334,
+      "graders": {
+        "clash-called-out": "3/3",
+        "glossary-written-inline": "3/3"
+      },
+      "meanTokens": {
+        "input_tokens": 12,
+        "cache_creation_input_tokens": 11076,
+        "cache_read_input_tokens": 56541,
+        "output_tokens": 2922,
+        "total": 70552
+      },
+      "meanRounds": 1,
+      "meanQuestions": 9.666666666666666,
+      "glossaryWrites": [
+        1,
+        1,
+        1
+      ],
+      "adrWrites": [
+        0,
+        0,
+        0
+      ],
+      "meanTurns": 10,
+      "meanCostUsd": 0.5498289333333334,
+      "runs": [
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 11,
+          "costUsd": 0.5626048,
+          "graders": {
+            "clash-called-out": true,
+            "glossary-written-inline": true
+          },
+          "tokens": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 11858,
+            "cache_read_input_tokens": 57434,
+            "output_tokens": 3154,
+            "total": 72458
+          },
+          "rounds": 1,
+          "questions": 10,
+          "glossaryWrites": 1,
+          "adrWrites": 0
+        },
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 10,
+          "costUsd": 0.5572699999999999,
+          "graders": {
+            "clash-called-out": true,
+            "glossary-written-inline": true
+          },
+          "tokens": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 11807,
+            "cache_read_input_tokens": 57270,
+            "output_tokens": 2973,
+            "total": 72062
+          },
+          "rounds": 1,
+          "questions": 8,
+          "glossaryWrites": 1,
+          "adrWrites": 0
+        },
+        {
+          "score": 1,
+          "passed": true,
+          "error": null,
+          "turns": 9,
+          "costUsd": 0.5296120000000001,
+          "graders": {
+            "clash-called-out": true,
+            "glossary-written-inline": true
+          },
+          "tokens": {
+            "input_tokens": 12,
+            "cache_creation_input_tokens": 9563,
+            "cache_read_input_tokens": 54920,
+            "output_tokens": 2640,
+            "total": 67135
+          },
+          "rounds": 1,
+          "questions": 11,
+          "glossaryWrites": 1,
+          "adrWrites": 0
+        }
+      ]
+    }
+  ]
+}

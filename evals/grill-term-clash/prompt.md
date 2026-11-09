@@ -1,0 +1,1 @@
+/bg-skills:grill Customers should be able to cancel a single item from an order after it has arrived, send it back, and get a refund for that item only. By "cancel an item" I mean exactly that: one delivered line item comes back and is refunded. Pick the canonical name for it yourself, record it, and carry on with the rest of the plan.

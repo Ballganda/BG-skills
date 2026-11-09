@@ -1,2 +1,5 @@
 node_modules
 .claude
+evals/results/*
+!evals/results/baseline/
+evals/results/baseline/report.html

@@ -24,7 +24,7 @@ The skill rests on three ideas.
 
 The **design tree** is the model of the subject: decisions with decisions hanging off them. The **frontier** is the set of decisions whose prerequisites are all settled: the only questions the agent can ask yet. A **round** is one frontier, asked in full and answered in full.
 
-Inside a round, every question has a fixed format: numbered and titled behind a `❓`, then the body, then the agent's recommended answer alone on a `➡️` line. This format lets you answer a round by number ("1 yes, 2 the second option, 3 no, here's why") instead of by quoting questions back. The format has one known problem. The recommendation sometimes argues *against* the question as it was worded, so agreeing with the recommendation means answering "no" to the question. When that happens, answer the recommendation and say so.
+Inside a round, every question has a fixed format: numbered and titled behind a `❓`, then a short body carrying only the decision and its options, then the agent's recommended answer in one line behind a `➡️`. The bodies stay short on purpose: the round repeats every turn, so its length is the biggest cost in a session. When you hand the agent a decision ("pick the name yourself"), the round opens with one line per such decision saying what it chose and why, so a choice made for you is never silent. Every question carries a recommendation, even one that asks for a fact only you know; there the recommendation is the agent's best guess. This format lets you answer a round by number ("1 yes, 2 the second option, 3 no, here's why") instead of by quoting questions back. The format has one known problem. The recommendation sometimes argues *against* the question as it was worded, so agreeing with the recommendation means answering "no" to the question. When that happens, answer the recommendation and say so.
 
 The other half of the design is the split between facts and decisions. Facts are the skill's own job. When a frontier question needs something the environment can settle, the agent dispatches a sub-agent to find out rather than asking you. The round does not wait for that research; only the questions that depend on it wait. Decisions are yours, and the agent must wait for them. An agent running `grilling` that answers its own decisions has broken the skill. The session ends when the frontier is empty, and only you can close it. Answering a round, even with "agree all", settles that round and nothing more; the agent moves on to the next round. Once no branch is left open, it asks one **closing confirmation** as a question of its own: have we reached a shared understanding? It acts on nothing you agreed until you answer.
 
@@ -74,7 +74,7 @@ This is a real bug, still unfixed, and users report it across harnesses and mode
 
 ## It's working if
 
-- A round arrives as a numbered list, each question with its recommendation on a separate `➡️` line, and you can answer the whole round by number.
+- A round arrives as a numbered list, each question short, with a one-line recommendation on a separate `➡️` line, and you can answer the whole round by number.
 - Nothing in a round needs another question in the same round answered first.
 - Later rounds ask things the first round could not have asked.
 - It goes and looks facts up (reading files, dispatching a sub-agent) rather than asking you something it could have found out.
