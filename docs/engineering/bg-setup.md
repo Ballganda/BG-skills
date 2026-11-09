@@ -60,6 +60,10 @@ No. GitHub, GitLab and local markdown under `.scratch/` all ship as ready-made t
 
 The direct answer after v1.1 was yes. The skill's own closing message is softer. It tells you to re-run only to switch trackers or start over. Both are defensible. The seed templates change between versions, so a `docs/agents/issue-tracker.md` from an older release can go out of date against the skills that now read it. Because the docs are trimmed to the repo, re-run setup too when you install `wayfinder`, upgrade `gh` past 2.94, or want external PRs triaged: each adds or swaps a section. If a downstream skill does something different from what the docs describe, re-run setup. It is cheap.
 
+**Will a re-run overwrite lines I added to the `## Agent skills` block?**
+
+No. Setup knows its own lines by their prefixes (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`) and rewrites only those. Any other line in the block is yours: the draft lists them and asks "Keep these N lines you added?" Say yes and they stay unchanged, in their own paragraph below the list; say no and they are removed. It asks again on every re-run. A block in the older format, with a `###` heading per topic, is converted to the list, and your lines in it get the same question.
+
 **It wrote to `CLAUDE.md`, but I'm on Codex.**
 
 This is a known gap, and still open. The file-selection rule is "edit `CLAUDE.md` if it exists, else `AGENTS.md`". It checks which file exists, not which harness is running. In a repo with a `CLAUDE.md` left over from Claude Code, the skill writes its `## Agent skills` block to a file Codex never reads. Users have two workarounds: move the block to `AGENTS.md` by hand, or keep `AGENTS.md` canonical and make `CLAUDE.md` a one-line pointer at it. If neither file exists, the skill asks you which to create instead of picking one. This has confused people who expected it to decide.
@@ -85,7 +89,7 @@ One long-standing complaint says yes, in these words: *"having a skill to set up
 ## It's working if
 
 - `docs/agents/issue-tracker.md` and `docs/agents/domain.md` exist, plus `triage-labels.md` if `triage` is installed.
-- An `## Agent skills` section appears in the instruction file your harness reads, with a one-line summary pointing at each of those files.
+- An `## Agent skills` section appears in the instruction file your harness reads, as a list of up to three pointers (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`). Only the tracker line says more than "see" the file: it names the host and repo. The triage line appears only if `triage` is installed, and the block has no marker comments.
 - The tracker it proposed matches the remote you use, and the label strings match labels that exist in your tracker.
 - Afterwards, `/ticket-gen` publishes without asking you where issues live, and `/triage` applies labels rather than inventing them.
 - Nothing in the skill files themselves changed. If setup edited a `SKILL.md`, something went wrong.
