@@ -5,70 +5,28 @@ description: Build and sharpen a project's domain model. Use when discussing cod
 
 # Domain Modeling
 
-Actively build and sharpen the project's domain model as you design. This is the *active* discipline: challenging terms, inventing edge-case scenarios, and writing the glossary and decisions down the moment they crystallise. (Merely *reading* `GLOSSARY.md` for vocabulary is not this skill: that's a one-line habit any skill can do. This skill is for when you're changing the model, not just consuming it.)
+The *active* discipline: changing the domain model as you design, not just reading `GLOSSARY.md` for vocabulary.
 
-## File structure
+## Where files live
 
-Most repos have a single context:
+One context: `GLOSSARY.md` at the root, ADRs in `docs/adr/`. If a root `GLOSSARY-MAP.md` exists, it points to each context's own `GLOSSARY.md` and `docs/adr/`; system-wide ADRs stay in the root `docs/adr/`.
 
-```
-/
-├── GLOSSARY.md
-├── docs/
-│   └── adr/
-│       ├── 0001-event-sourced-orders.md
-│       └── 0002-postgres-for-write-model.md
-└── src/
-```
-
-If a `GLOSSARY-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
-
-```
-/
-├── GLOSSARY-MAP.md
-├── docs/
-│   └── adr/                          ← system-wide decisions
-├── src/
-│   ├── ordering/
-│   │   ├── GLOSSARY.md
-│   │   └── docs/adr/                 ← context-specific decisions
-│   └── billing/
-│       ├── GLOSSARY.md
-│       └── docs/adr/
-```
-
-Create files lazily: only when you have something to write. If no `GLOSSARY.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
+Create files lazily: `GLOSSARY.md` when the first term is resolved, `docs/adr/` when the first ADR is needed.
 
 ## During the session
 
-### Challenge against the glossary
+- **Challenge against the glossary.** When a term conflicts with `GLOSSARY.md`, call it out to the user at once, even when you settle it yourself: "Your glossary defines 'account' as X, but you mean Y, so I'll call Y a Z."
+- **Sharpen fuzzy language.** For a vague or overloaded term, propose a precise canonical one ("Customer or User?").
+- **Probe with scenarios.** Invent edge cases that force the boundaries between concepts to be exact.
+- **Cross-reference with code.** When the user states how something works, check the code and surface any contradiction.
+- **Update GLOSSARY.md inline**, the moment a term is resolved, using [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md). It is a glossary and nothing else: no implementation details, spec, or scratch notes.
 
-When the user uses a term that conflicts with the existing language in `GLOSSARY.md`, call it out immediately. "Your glossary defines 'cancellation' as X, but you seem to mean Y. Which is it?"
+## Offer ADRs sparingly
 
-### Sharpen fuzzy language
+Offer an ADR only when all three hold:
 
-When the user uses vague or overloaded terms, propose a precise canonical term. "You're saying 'account': do you mean the Customer or the User? Those are different things."
+1. **Hard to reverse**: changing your mind later costs something meaningful.
+2. **Surprising without context**: a future reader will ask "why this way?"
+3. **A real trade-off**: there were genuine alternatives, and one was picked for specific reasons.
 
-### Discuss concrete scenarios
-
-When domain relationships are being discussed, stress-test them with specific scenarios. Invent scenarios that probe edge cases and force the user to be precise about the boundaries between concepts.
-
-### Cross-reference with code
-
-When the user states how something works, check whether the code agrees. If you find a contradiction, surface it: "Your code cancels entire Orders, but you just said partial cancellation is possible. Which is right?"
-
-### Update GLOSSARY.md inline
-
-When a term is resolved, update `GLOSSARY.md` right there. Don't batch these up: capture them as they happen. Use the format in [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
-
-`GLOSSARY.md` should be totally devoid of implementation details. Do not treat `GLOSSARY.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
-
-### Offer ADRs sparingly
-
-Only offer to create an ADR when all three are true:
-
-1. **Hard to reverse**: the cost of changing your mind later is meaningful
-2. **Surprising without context**: a future reader will wonder "why did they do it this way?"
-3. **The result of a real trade-off**: there were genuine alternatives and you picked one for specific reasons
-
-If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
+Missing any one, skip it. Write it using [ADR-FORMAT.md](./ADR-FORMAT.md).
