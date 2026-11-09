@@ -1,6 +1,6 @@
 # Grilling through the harness's native question tool
 
-Grilling sessions (`/grilling`, `/grill-me`, `/grill-with-docs`, and grilling inside other skills) ask their questions as plain chat text. Requests to route them through a harness's built-in question UI (Claude Code's `AskUserQuestion`, a host "question tool", a structured or batched questionnaire mode) are out of scope.
+Grilling sessions (`/grilling`, `/grill-me`, `/grill`, and grilling inside other skills) ask their questions as plain chat text. Requests to route them through a harness's built-in question UI (Claude Code's `AskUserQuestion`, a host "question tool", a structured or batched questionnaire mode) are out of scope.
 
 ## Why this is out of scope
 

@@ -41,8 +41,8 @@ Three operations keep it alive:
 
 The wiki is a historical record. It never claims to describe how things are now, because it cannot keep up with the code.
 
-- Date every claim: "On 2026-10-13, Matt decided..."
-- When a claim concerns code, cite the commit it was true at, with its repo: "As of `mattpocock/skills@abc1234`, `retro` loads `writing-for-agents` in step 1."
+- Date every claim: "On 2026-10-13, Sam decided..."
+- When a claim concerns code, cite the commit it was true at, with its repo: "As of `Ballganda/BG-skills@abc1234`, `retro` loads `writing-for-agents` in step 1."
 - Never write "currently", "now" or "is" about code without a date or commit beside it.
 - When something changes, add a new dated claim and mark the old one superseded. Don't rewrite the old one.
 
@@ -50,8 +50,8 @@ The wiki is a historical record. It never claims to describe how things are now,
 
 Some procedures you run live in other skills, installed beside this one. To run one, read its `SKILL.md` at the path below, relative to this skill's directory, and follow it.
 
-- **Retro** (`../retro/SKILL.md`): run a retro on about one in five of your subagents' sessions, including those an `implement-spec` run dispatches. Pick first the ones where something went wrong. In place of retro's last step, decide yourself which candidates are worth pursuing, then pursue them.
-- **Large chunks of work**: write a spec with `../to-spec/SKILL.md`, break it into tickets with `../to-tickets/SKILL.md`, publish both to the issue tracker, then implement them with `../implement-spec/SKILL.md`.
+- **Retro** (`../../engineering/retro/SKILL.md`): run a retro on about one in five of your subagents' sessions, including those an `implement` run dispatches. Pick first the ones where something went wrong. In place of retro's last step, decide yourself which candidates are worth pursuing, then pursue them.
+- **Large chunks of work**: write a spec with `../../engineering/spec-gen/SKILL.md`, break it into tickets with `../../engineering/ticket-gen/SKILL.md`, publish both to the issue tracker, then implement them with `../../engineering/implement/SKILL.md`.
 
 ## Strategic View
 

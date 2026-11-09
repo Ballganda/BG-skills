@@ -1,33 +1,28 @@
-Skills are organized into bucket folders under `skills/`:
+## Buckets
 
-- `engineering/`: daily code work
-- `productivity/`: daily non-code workflow tools
-- `misc/`: kept around but rarely used, not promoted
-- `in-progress/`: beta: public on purpose, feedback wanted, not shipped in the plugin
-- `deprecated/`: no longer used
+Skills live in `skills/<bucket>/`. **Promoted** (shipped in the plugin): `engineering/` (code work), `productivity/` (non-code workflow). Not promoted: `misc/` (rarely used), `in-progress/` (public beta, feedback wanted), `deprecated/` (retired).
 
-Every skill in `engineering/` or `productivity/` (the **promoted** buckets) must have a reference in the top-level `README.md` and an entry in `.claude-plugin/plugin.json`'s `skills` array (the Claude Code plugin ships exactly the promoted set). Skills in `misc/`, `in-progress/`, and `deprecated/` must not appear in either.
+## Skill lifecycle
 
-Install commands are copied verbatim from [.agents/install-block.md](./.agents/install-block.md). `.claude-plugin/marketplace.json` is the repo's own marketplace. Every agent except Claude Code installs from it to get automatic updates, and Claude Code uses `claude-plugins-official`. Run `claude plugin validate . --strict` after touching either manifest. [ADR 0002](./.agents/adr/0002-ship-as-a-claude-code-plugin.md) records why.
+On adding, renaming, removing, or moving a skill between buckets:
 
-Each skill entry in the top-level `README.md` must link the skill name to its `SKILL.md`.
+- **Promoted only:** list it in the top-level `README.md` (name linked to `SKILL.md`) and in `.claude-plugin/plugin.json`'s `skills`. Unpromoted skills appear in neither.
+- **Bucket `README.md`:** one line, name linked to `SKILL.md`. Promoted READMEs and the top-level one group under **User-invoked** / **Model-invoked**; others use a flat list.
+- **Docs page** (promoted only, also on behaviour change): follow [.agents/writing-docs.md](./.agents/writing-docs.md).
+- **[`skill-map`](./skills/engineering/skill-map/SKILL.md):** update for any user-reachable skill, including changes to how it fits the flows.
+- **Links:** re-run `scripts/link-skills.sh`.
 
-Each bucket folder has a `README.md` that lists every skill in the bucket with a one-line description, with the skill name linked to its `SKILL.md`. The promoted buckets' `README.md`s and the top-level `README.md` group entries into **User-invoked** and **Model-invoked**; non-promoted bucket `README.md`s (`misc/`, `in-progress/`) use a flat list.
+Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install commands: copy verbatim from [.agents/install-block.md](./.agents/install-block.md). After touching `plugin.json` or `marketplace.json`, run `claude plugin validate . --strict` ([ADR 0002](./.agents/adr/0002-ship-as-a-claude-code-plugin.md)).
 
-Skills in `engineering/` and `productivity/` also have a human-facing docs page at `docs/<bucket>/<skill-name>.md` (the docs tree mirrors those two bucket folders under `skills/`). The published URL is `https://aihero.dev/skills-<skill-name>` regardless of bucket: the docs path is repo organisation only. When you add, rename, or change the behaviour of a skill in `engineering/` or `productivity/`, create or re-sync its docs page following [.agents/writing-docs.md](./.agents/writing-docs.md). A finished page carries four sections: **What it does**, **When to reach for it**, **Common questions**, and **It's working if**. `writing-docs.md` holds the template, the section order, and where to hunt for the questions. Skills in the non-promoted buckets (`misc/`, `in-progress/`, `deprecated/`) get **no** docs page. The one exception is a promoted skill removed outright: its page stays, marked archived (see `writing-docs.md`).
+## Writing rules
 
-Every `SKILL.md` is either user-invoked (`disable-model-invocation: true` plus `policy.allow_implicit_invocation: false` in `agents/openai.yaml`, reachable only by the human) or model-invoked (model- or user-reachable). See [.agents/invocation.md](./.agents/invocation.md).
-
-[`ask-matt`](./skills/engineering/ask-matt/SKILL.md) is the router that maps every user-reachable skill and how they relate. The same trigger that re-syncs a docs page applies to it: whenever you add, rename, remove, or change how a user-reachable skill fits the flows, re-read `ask-matt`'s `SKILL.md` and update it so the map stays accurate: a new skill it never mentions, or a stale one it still routes to, is a router that lies.
-
-To (re)link every skill outside `deprecated/` and `misc/` into the local harness skill directories (`~/.claude/skills`, `~/.agents/skills`), run `scripts/link-skills.sh`. Each entry is a symlink into this repo, so a `git pull` keeps installed skills current; re-run the script after adding, removing, or renaming a skill.
-
-No em-dashes anywhere in this repo's prose (`SKILL.md` files, docs, `README.md`, `CHANGELOG.md`, ADRs, changesets, code comments). Where a sentence reaches for one, rewrite it instead with a comma, colon, period, parentheses, or a conjunction, whichever the sentence actually wants; never do a blind character substitution.
-
-Every skill that dispatches a subagent says to start it with a fresh context window. Some harnesses (Codex, for one) fork the parent conversation by default, and a fork inherits the parent's context, which is what the subagent was meant to escape.
+- No em-dashes in any prose (skills, docs, READMEs, changelog, ADRs, changesets, code comments). Rewrite the sentence with a comma, colon, period, parentheses, or conjunction; never substitute blindly.
+- A skill that dispatches a subagent says to start it with a fresh context window: some harnesses (Codex) fork by default, and a fork inherits the context the subagent should escape.
 
 ## Agent skills
 
-### Triage labels
+- Issue tracker: GitHub Issues on `Ballganda/BG-skills` via `gh`. See `docs/agents/issue-tracker.md`.
+- Triage labels: see `docs/agents/triage-labels.md`.
+- Domain docs: see `docs/agents/domain.md`.
 
-Canonical names, unchanged. See `docs/agents/triage-labels.md`. Issues are judged against [`SCOPE.md`](./SCOPE.md).
+Issues are judged against [`SCOPE.md`](./SCOPE.md).
