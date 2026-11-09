@@ -1,0 +1,3 @@
+interface:
+  display_name: "Decomp Standards"
+  short_description: "Shared rules for byte-for-byte decomp"

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Decomp Start"
+  short_description: "List a binary's functions as specs and tickets"
+policy:
+  allow_implicit_invocation: false

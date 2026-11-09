@@ -15,3 +15,12 @@ npx skills@latest add Ballganda/BG-skills --skill=<name>
 - **[claude-handoff](./claude-handoff/SKILL.md)**: Hand the current conversation off to a fresh background agent that picks up the work immediately, seeded with a handoff summary via `claude --bg`. User-invoked.
 - **[setup-ts-deep-modules](./setup-ts-deep-modules/SKILL.md)**: Wire dependency-cruiser into a TypeScript repo so each package is a deep module: implementation hidden in subfolders, reachable only through its entry-point files, tests exercising it through those. User-invoked.
 - **[software-factory](./software-factory/SKILL.md)**: Shared language for designing a software factory: the tasks it runs and the services it plugs into. Call it alongside a grilling session. User-invoked.
+- **[decomp-setup](./decomp-setup/SKILL.md)**: Agree a byte-for-byte decompilation contract and set up the private project that enforces it: compiler identification, guardrail tooling, and a pipeline check. No decomp. User-invoked.
+- **[decomp-start](./decomp-start/SKILL.md)**: Read a set-up target, list every function, and turn them into unit specs and function tickets, mostly by script. User-invoked.
+- **[decomp-run](./decomp-run/SKILL.md)**: Work decomp tickets to verified byte matches with separate writer, auditor, and repair subagents, recording each proven lesson. User-invoked.
+- **[decomp-identify](./decomp-identify/SKILL.md)**: Find a binary's format, architecture, compiler, and flags from evidence in the file.
+- **[decomp-spec-gen](./decomp-spec-gen/SKILL.md)**: Group a decomp inventory into units and write one spec per unit.
+- **[decomp-ticket-gen](./decomp-ticket-gen/SKILL.md)**: Write one ticket per in-scope decomp function, mirrored to GitHub when enabled.
+- **[decomp-match](./decomp-match/SKILL.md)**: Reconstruct one decomp function until the original compiler emits its bytes exactly.
+- **[decomp-reference](./decomp-reference/SKILL.md)**: Repair shared decomp declarations from evidence without breaking any existing match.
+- **[decomp-standards](./decomp-standards/SKILL.md)**: Shared decomp rules: acceptance criterion, guardrails, size tiers, mismatch categories, project layout.

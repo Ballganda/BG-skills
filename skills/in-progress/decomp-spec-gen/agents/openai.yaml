@@ -1,0 +1,3 @@
+interface:
+  display_name: "Decomp Spec Gen"
+  short_description: "Write one spec per decomp unit"

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Decomp Ticket Gen"
+  short_description: "Write one ticket per decomp function"

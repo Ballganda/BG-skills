@@ -1,0 +1,5 @@
+interface:
+  display_name: "Decomp Run"
+  short_description: "Work decomp tickets to verified byte matches"
+policy:
+  allow_implicit_invocation: false

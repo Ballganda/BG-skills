@@ -1,0 +1,3 @@
+interface:
+  display_name: "Decomp Reference"
+  short_description: "Repair shared decomp declarations from evidence"
