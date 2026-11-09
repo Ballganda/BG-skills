@@ -18,3 +18,15 @@ Start from the **first** differing instruction: later differences are often its 
 | `optimization` | Code shape that no change to this function affects | Suspect the contract's flags. Record it and stop; the coordinator watches for a recurring pattern |
 | `unit-order` | The function's bytes match, but its references or alignment differ | Its position in the unit, or a `static` or global defined in the wrong place |
 | `build-fail` | The compiler's first error | Your own syntax or types; a missing shared declaration is a `reference-gap` |
+
+## Relocated operands
+
+The diff masks a relocated operand only when its target is proven to be the original's. Two lines in the report are not ordinary byte differences:
+
+| The report says | It means | Do |
+| --- | --- | --- |
+| Unresolved symbol `<name>` | Neither the symbol map nor a matched function in this object gives `<name>` an address, so the operand cannot be proven | Stop and report a `gap`: the symbol, and the address the original's operand holds. Category `reference-gap` |
+| `<offset>`: `<name>` resolves to `<address>`, the original holds `<other address>` | Your code refers to another callee or global than the original | Find what lives at the original's address (the symbol map, `inventory.json`) and call or reference that. If the map's address for `<name>` is the wrong one, that is a `gap` |
+| Bytes after the function are not padding | Your function is longer than the original, or its extent differs from the ticket's size | Treat the extra instructions as the first difference |
+
+A string or floating-point literal at another address with identical bytes is not a difference: the linker chooses which pooled copy survives.

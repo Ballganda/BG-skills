@@ -3,7 +3,7 @@ name: decomp-reference
 description: Repair shared decomp declarations (struct layouts, field types, signatures, calling conventions) from evidence in the binary, without breaking any existing match. Use when decomp tickets are blocked on a reference gap, or when asked to fix a struct, class, or header in a decomp project.
 ---
 
-You repair the shared declarations every writer compiles against. One wrong field breaks many functions, and one careless change can break functions that already match. Every change rests on evidence and must leave every existing match intact.
+You repair the shared declarations every writer compiles against, and the symbol map every diff resolves against. One wrong field breaks many functions, and one careless change can break functions that already match. Every change rests on evidence and must leave every existing match intact.
 
 Call the Skill tool with `decomp-standards` first.
 
@@ -20,10 +20,13 @@ For each gap in the blocked tickets' notes, collect evidence from **every** func
 - **Structure size**: allocation sizes passed near constructors, array strides, `memset` and copy lengths.
 - **Virtual tables**: pointer arrays in read-only data, RTTI names, the order of methods called through them.
 - **Signatures and conventions**: callers' argument setup and the callee's stack cleanup (`ret N`, `this` in `ecx`).
+- **Symbol addresses**: the operand of every `call`, `jmp`, and data reference to the symbol in the original, read with `disasm`. They must agree.
 
 ## 3. Edit
 
-Edit headers in `include/` only. Every added or changed member carries a trailing comment citing one piece of evidence: `// 0x00401234 mov eax, [ecx+0x1c]`. A member whose meaning is unknown is `unk_<hex offset>`, typed only as wide as its accesses show. Fill a span with no observed accesses as padding of the exact size. Name, type, and signedness come only from evidence; never pick them to make something compile.
+Edit headers in `include/` and `symbols.json`, nothing else. Every added or changed member carries a trailing comment citing one piece of evidence: `// 0x00401234 mov eax, [ecx+0x1c]`. A member whose meaning is unknown is `unk_<hex offset>`, typed only as wide as its accesses show. Fill a span with no observed accesses as padding of the exact size. Name, type, and signedness come only from evidence; never pick them to make something compile.
+
+In `symbols.json`, add or correct one `"<symbol as the object file spells it>": "0x<address in the original>"` entry per gap. JSON holds no comments, so the evidence (the referencing instruction and its address) goes in the commit message, one line per entry. Never pick an address to make a diff pass: a wrong one breaks the matches that already resolve through it, and `revalidate` shows it.
 
 ## 4. Prove it breaks nothing
 
@@ -33,4 +36,4 @@ Edit headers in `include/` only. Every added or changed member carries a trailin
 
 ## 5. Report
 
-Reply in at most 60 words: your branch, the headers changed, the tickets each gap fix unblocks, and the final `revalidate` line. The coordinator re-runs `revalidate` itself before merging, then releases the lock.
+Reply in at most 60 words: your branch, the headers and symbols changed, the tickets each gap fix unblocks, and the final `revalidate` line. The coordinator re-runs `revalidate` itself before merging, then releases the lock.

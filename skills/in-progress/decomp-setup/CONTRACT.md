@@ -6,8 +6,10 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 # Decomp contract: <target name>
 
 ## Target
-- SHA-256 and size (mirrored in `toolchain.json`). Its path is per machine, in `.decomp/local.json`.
-- Edition or patch level, and which other editions are known not to match.
+- Accepted editions (mirrored in `toolchain.json`). Per edition: its name, its SHA-256 and size or the number of probes it must match, and how it was told apart from the others. The target's path is per machine, in `.decomp/local.json`.
+- Probes: each file offset and length, and why that range was chosen.
+- Per accepted edition, the functions it holds differently (`differs`), each address with its evidence. None: say so.
+- Known-wrong editions: name, SHA-256, and the message `doctor` prints, saying what the user should do.
 - Format and architecture.
 - Other modules in the same product, and whether each is in this project.
 
@@ -15,10 +17,12 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 - Compiler: exact product and version, with its version banner.
 - Linker: exact version, with its banner.
 - Global flags: compiler and linker, each with its evidence.
-- Per-unit flags: only where evidence shows the original used them.
+- Default compiler: its tool name in `toolchain.json` (mirrored in `decomp.json`).
+- Per-unit compilers and flags: only where evidence shows the original used them, each unit with its evidence (compilers mirrored in `decomp.json`).
 - Pragma and attribute allowlist (regexes, mirrored in `decomp.json`).
 - Provisioning, per tool (mirrored in `toolchain.json`): installed by the agent or the user, the source URL, size, SHA-256, and where the hash comes from.
-- Host: the operating systems the tools run on, and what each needs (a compatibility layer and its version).
+- Host: the operating systems the tools run on, and each host prerequisite (an archive tool, a compatibility layer) with its version command and the string it must print (mirrored in `toolchain.json`). The user installs these.
+- Wrapper: the one script in `tools/` every tool invocation goes through, and what it sets.
 - `doctor` output from this machine, with the Unix time.
 
 ## Scope
@@ -28,7 +32,8 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 
 ## Matching
 - Diff adapter and the tool under it.
-- Relocation policy: how an operand that the linker fills in compares (ADR).
+- Relocation policy: the default in `decomp-standards`' layout, or a named departure with its ADR.
+- Symbol map: what `inventory` seeds it with for this format.
 - Fakematch rule: `forbidden`, or `allowed with a // fakematch: comment` (ADR).
 - Permuter: allowed or not, and if allowed, its output is fakematch-governed.
 

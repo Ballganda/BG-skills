@@ -22,7 +22,9 @@ Read, in this order:
 
 List every type, field, callee, global, and calling convention the function touches. Next to each, write where it comes from: a shared header, or an address and instruction in the disassembly.
 
-If any is missing from the headers, or contradicts them, **stop**: report a `gap` naming the declaration and the evidence. A local stand-in would hide the gap from every other function that needs the same declaration.
+A callee or global also needs its address in `symbols.json`: without it the diff cannot prove your call reaches the right target.
+
+If any is missing from the headers or the symbol map, or contradicts them, **stop**: report a `gap` naming the declaration and the evidence. A local stand-in would hide the gap from every other function that needs the same declaration.
 
 ## 3. Write
 
@@ -32,9 +34,9 @@ Write the function in the unit's source file, at its address-order position, dir
 
 Run `python tools/decomp.py check <id>` and read the result:
 
-- **Exit 6, `ENVIRONMENT:` lines**: the machine's target or toolchain differs from the contract. Nothing you write fixes it: stop and report it in `note`, with `local: build-fail`.
+- **Exit 6, `ENVIRONMENT:` lines**: the machine's target or toolchain differs from the contract, this machine's edition holds the function differently, or the unit's compiler is not provisioned. Nothing you write fixes it: stop and report it in `note`, with `local: build-fail`.
 - **`build-fail`**: fix your own source. If the error is a missing or wrong shared declaration, that is a `gap`: stop.
-- **`guardrail`**: the scan quotes the line. Rewrite it within the guardrails.
+- **`guardrail`**: the scan quotes the line and names the rule. Rewrite it within the guardrails: a trigraph, a line continuation, or a `%:` directive is refused whatever it spells, so write the plain form.
 - **`differ`**: open the diff report and find the **first** differing instruction. Read [MISMATCH.md](MISMATCH.md) for its category, write two or three ranked hypotheses (each with the change it predicts will remove the difference), then make **one** change per iteration. Progress is a falling `differ_bytes`; a change that does not lower it is reverted, unless it moves the first difference later.
 - **`bytes-match`**: done.
 

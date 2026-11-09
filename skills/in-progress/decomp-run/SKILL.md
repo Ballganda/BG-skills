@@ -11,7 +11,7 @@ You are the coordinator. You never write reconstruction source. Three roles stay
 - **The tool** (`tools/decomp.py`) builds, compares, and records. It is the tester and the only judge of bytes.
 - **Auditors** read a writer's diff against the guardrails and nothing else.
 
-Repairs to shared declarations go to one `decomp-reference` subagent at a time.
+Repairs to shared declarations and the symbol map go to one `decomp-reference` subagent at a time.
 
 Run from the decomp project root, on the integration branch. If there is no `decomp-start` tag, tell the user to run `/decomp-start` and stop. Call the Skill tool with `decomp-standards` first. Read `DECOMP.md`'s Models and Tracking sections once.
 
@@ -23,7 +23,7 @@ Repeat until the requested number of tickets have been attempted, or nothing is 
 
 ### 1. Check health
 
-Run `python tools/decomp.py doctor`. On exit 6, stop and show the user what it printed: the target or a tool on this machine no longer equals the contract, and `/decomp-setup`'s provisioning step restores it.
+Run `python tools/decomp.py doctor`. On exit 6, stop and show the user what it printed: the target, a host prerequisite, or a tool on this machine no longer equals the contract, and `/decomp-setup`'s provisioning step restores it. Note the edition it prints: on an edition with a `differs` list, `check` and `verify` exit 6 for those tickets, so `release` them and leave them for a machine with an edition that holds them unchanged.
 
 Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user the contract's compiler or flags are suspect: they rerun `/decomp-setup`, which can start `decomp-identify` again. Read `OPEN.md`.
 

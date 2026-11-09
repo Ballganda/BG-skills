@@ -39,7 +39,7 @@ Tag every failed attempt with exactly one, the one that best explains the first 
 | Category | The first difference comes from |
 | --- | --- |
 | `build-fail` | the source does not compile, for a reason local to it |
-| `reference-gap` | a missing or wrong shared declaration (field, type, signature, convention) |
+| `reference-gap` | a missing or wrong shared declaration (field, type, signature, convention) or symbol map entry |
 | `signedness` | signed versus unsigned (`movsx`/`movzx`, `jl`/`jb`, `sar`/`shr`) |
 | `width` | integer promotion, truncation, or operand size |
 | `operator` | a comparison, arithmetic, or logical operator |

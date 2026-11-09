@@ -19,7 +19,7 @@ Find out what built a binary, from the binary. The user usually does not know, a
 4. **Code idioms.** Sample functions across the code section and read their prologues, epilogues, calls, and stack checks for the flag signals in SIGNALS.md: optimisation level, frame pointer use, security checks, exception model, instruction set, inlining, whole-program optimisation.
 5. **Rank candidates.** Each candidate is a compiler version plus a flag set, with the evidence for it and against it.
 6. **Probes.** For each candidate, the cheapest experiment that would confirm or kill it: compile a snippet with the candidate and compare an idiom (prologue shape, security check, exception handler) to the target. Run a probe only when the toolchain is already installed; otherwise list it with what to install.
-7. **Toolchain requirements.** For the top candidate (and the runner-up, when confidence is not `high`), name every tool a matching build needs: compiler, linker, the platform headers its sources include, and what a disassembler and object reader for this format need. For each, give the exact product and version, the version string it prints, and the vendor's official source (call the Skill tool with `research`; a tool the vendor no longer offers is recorded as such). Then look for each on this machine and run its version command: record `installed` with the string it printed, `wrong version` with the string, or `missing`. State what the host needs when the tool was built for another system (old Windows compilers run under Wine on Linux and macOS).
+7. **Toolchain requirements.** For the top candidate (and the runner-up, when confidence is not `high`), name every tool a matching build needs: compiler, linker, the platform headers its sources include, and what a disassembler and object reader for this format need. For each, give the exact product and version, the version string it prints, and the vendor's official source (call the Skill tool with `research`; a tool the vendor no longer offers is recorded as such). Then look for each on this machine and run its version command: record `installed` with the string it printed, `wrong version` with the string, or `missing`. List the host prerequisites the same way: what unpacks the vendor's image (an archive tool) and what runs a tool built for another system (old Windows compilers run under Wine on Linux and macOS), each with its version command, the string it prints, and its status on this machine. When the signals of steps 2 to 4 differ between regions of the code (another prologue shape, another runtime helper version, another linker record), list a second compiler build with the address ranges it covers and the evidence: some units were built with it.
 
 ## Output
 
@@ -43,9 +43,14 @@ Target: <path>, SHA-256 <hash>, <size> B. Investigated <Unix time>.
 
 ## Toolchain requirements
 Host: <what this machine's system needs to run the tools>
+| Host prerequisite | Version command | Version string | On this machine |
+| --- | --- | --- | --- |
+| <archive tool, compatibility layer> | `<command>` | `<string>` | installed / wrong version `<string>` / missing |
+
 | Tool | Exact version | Version string | Official source | On this machine |
 | --- | --- | --- | --- | --- |
 | <tool> | <version> | `<string>` | <URL, size, published hash or "none published"> | installed / wrong version `<string>` / missing |
+| <second compiler build, when regions differ> | <version> | `<string>` | <source> | <status>; covers <address ranges>, from <evidence> |
 
 ## Exclusion signals
 - <runtime or library code found>, at <addresses>, from <evidence>
@@ -54,6 +59,6 @@ Host: <what this machine's system needs to run the tools>
 - <what is still unknown, and what would settle it>
 ```
 
-**Done when** every signal in SIGNALS.md for this format is recorded as present or absent, every candidate has a probe, every required tool has a status on this machine, and every unknown names what would settle it. Reply to whoever started you with the top candidate, its confidence, and the path to `IDENTIFY.md`, in under 60 words.
+**Done when** every signal in SIGNALS.md for this format is recorded as present or absent, every candidate has a probe, every required tool and host prerequisite has a status on this machine, and every unknown names what would settle it. Reply to whoever started you with the top candidate, its confidence, and the path to `IDENTIFY.md`, in under 60 words.
 
 When any required tool is missing or the wrong version, add the recommended toolchain to the reply, one line per tool with its version and source, and the two ways forward: the user installs it themselves, or they ask the agent to install it and set it up for the project. You still download nothing here. The install is `decomp-setup`'s provisioning step, which gets the user's approval of each file and records the result.
