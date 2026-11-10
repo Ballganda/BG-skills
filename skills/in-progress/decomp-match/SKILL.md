@@ -14,7 +14,7 @@ Read, in this order:
 1. The ticket. Its notes are earlier attempts on this function: never repeat an approach a note records without new evidence.
 2. `DECOMP.md`'s Toolchain and Matching sections, including the fakematch rule.
 3. `PATTERNS.md`: proven idioms for this compiler.
-4. The original's disassembly: the `disasm` adapter command from `decomp.json`, with the ticket's `expected` and `address`.
+4. The original's disassembly: `python tools/decomp.py disasm <id>`.
 5. The unit's source file, and the shared headers it includes.
 6. `python tools/decomp.py similar <id>`: the closest solved functions. Read their source as guidance, not as a substitute for reading this one.
 
