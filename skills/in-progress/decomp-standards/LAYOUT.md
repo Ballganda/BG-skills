@@ -98,7 +98,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `note <id> <text>` | Append an attempt note to a ticket |
 | `similar <id>` | Closest matched functions by byte pattern |
 | `lock <name> --by <n>` / `unlock <name>` | Exclusive lock, used for shared header and symbol map repair. Locks and claims are shared by every worktree of the repository |
-| `report` | Progress, attribution, learning metrics, early warning; regenerates `OPEN.md`, checks `PATTERNS.md` |
+| `report` | Progress, attribution, learning metrics, early warning; regenerates `OPEN.md`, checks `PATTERNS.md`. Prints one `state:` line computed from ticket statuses: `finished` (every in-scope ticket is `revalidated`), `stuck` (not finished, and every remaining ticket is `blocked-reference` or `regressed`), or `more` (anything else) |
 | `sync` | Push unit checklists and the progress issue to GitHub, when enabled |
 
 `inventory`, `disasm`, `check`, `verify`, and `revalidate` run the `doctor` checks first and run no adapter when they fail. `check` and `disasm` skip them while `toolchain.json`, the target, and the tools' files are unchanged since the last pass. Exit 6 always means the machine, not the source: no writer fixes it, and no attempt is recorded.

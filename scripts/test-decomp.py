@@ -1141,6 +1141,33 @@ def test_check_trusts_the_last_pass_until_a_watched_file_changes(base):
     expect(r.returncode == ENV_EXIT and "ENVIRONMENT: target" in r.stderr, "a changed target ends the trust", r)
 
 
+def state_of(p):
+    r = p.run("report")
+    lines = [l for l in r.stdout.splitlines() if l.startswith("state:")]
+    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one state line", r)
+    return lines[0]
+
+
+def test_report_states_more_when_a_ticket_is_ready(base):
+    p = started_project(base, status="integrated", files=second_ticket(status="open"))
+    expect(state_of(p).split()[1] == "more", "a ready ticket means more", p.run("report"))
+
+
+def test_report_states_stuck_when_the_rest_are_blocked_or_regressed(base):
+    p = started_project(base, status="regressed", files=second_ticket(status="blocked-reference"))
+    expect(state_of(p).split()[1] == "stuck", "nothing ready means stuck", p.run("report"))
+
+
+def test_report_states_finished_when_every_ticket_is_revalidated(base):
+    p = started_project(base, status="revalidated", files=second_ticket(status="revalidated"))
+    expect(state_of(p).split()[1] == "finished", "all revalidated means finished", p.run("report"))
+
+
+def test_report_does_not_state_finished_for_integrated_tickets(base):
+    p = started_project(base, status="revalidated", files=second_ticket(status="integrated"))
+    expect(state_of(p).split()[1] == "more", "integrated, not revalidated, is not finished", p.run("report"))
+
+
 def test_verify_checks_the_environment_before_recording(base):
     p = Project(base, status="claimed")
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})

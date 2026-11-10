@@ -1175,6 +1175,15 @@ def cmd_unlock(a):
     print(f"unlocked {a.name}")
 
 
+def project_state(ts):
+    """finished, stuck or more. Regressed and blocked-reference tickets are not ready work here."""
+    if ts and all(t["status"] == "revalidated" for t in ts):
+        return "finished"
+    if any(t["status"] not in ("regressed", "blocked-reference", "revalidated") for t in ts):
+        return "more"
+    return "stuck"
+
+
 def cmd_report(a):
     ts = all_tickets()
     atts = records("attempts.jsonl")
@@ -1199,6 +1208,7 @@ def cmd_report(a):
         if f["scope"] != "in":
             excl[f["scope"]] = excl.get(f["scope"], 0) + 1
     print("excluded:  " + (", ".join(f"{k} {v}" for k, v in sorted(excl.items())) or "none"))
+    print(f"state:     {project_state(ts)}")
     by_model = {}
     for m in matches:
         c = by_model.setdefault(m["model"], [0, 0])
