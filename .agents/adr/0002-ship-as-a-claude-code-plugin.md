@@ -57,3 +57,9 @@ The version invariant above now applies to every managed route. `npm run version
 This repo is now a fork, renamed `bg-skills` and owned as `Ballganda/BG-skills`. The `claude-plugins-official` listing from the 2026-08-05 update belongs to the upstream project: it ships upstream's plugin from upstream's repo. Installing from it would give a fork user the upstream plugin, not this one.
 
 Claude Code therefore moves onto the same route as every other managed install: `claude plugin marketplace add Ballganda/BG-skills`, then `claude plugin install bg-skills@bg-skills`. `.claude-plugin/marketplace.json` is no longer just a fallback; it is the route for every agent. The cost is a one-time opt-in: Claude Code leaves auto-update off for marketplaces other than its official ones, so the user enables it once from `/plugin`. The install wording lives in [.agents/install-block.md](../install-block.md).
+
+## Update, 2026-11-10: root layout stays; strict validation is not a gate
+
+`claude plugin validate . --strict` now fails on two warnings: `CLAUDE.md` at the plugin root (it is maintainer context, not loaded for users) and a missing icon. We considered moving the plugin into a `plugin/` subfolder so the root `CLAUDE.md` falls outside it. Claude Code, Codex and Copilot all resolve a `./plugin` marketplace source, so the move was possible, but it would change every path and break installs by repo path for a benefit that only a directory submission needs. This fork ships only to its owner's machines through `claude plugin marketplace add Ballganda/BG-skills`, which plain validation covers.
+
+So the plugin stays at the root, the gate is `claude plugin validate .` without `--strict`, and the `CLAUDE.md` warning is expected. If a directory listing is ever wanted, split a publish repo from this maintainer repo rather than nesting the plugin.
