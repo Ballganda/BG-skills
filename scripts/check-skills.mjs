@@ -33,6 +33,25 @@ function checkBoundaryLines({ read, fail }) {
   }
 }
 
+// ticket-gen's two templates each carry a tier field.
+function checkTicketTiers({ read, fail }) {
+  const text = read("engineering/ticket-gen/SKILL.md");
+  if (!text.includes("**Tier:**")) fail("engineering/ticket-gen/SKILL.md: local ticket template lacks a tier field");
+  if (!text.includes("## Tier")) fail("engineering/ticket-gen/SKILL.md: issue template lacks a tier field");
+}
+
+// bg-setup writes the models doc from its seed template.
+function checkModelsDoc({ read, fail }) {
+  if (!read("engineering/bg-setup/SKILL.md").includes("[models.md](./models.md)"))
+    fail("engineering/bg-setup/SKILL.md: no longer writes the models doc");
+  try {
+    read("engineering/bg-setup/models.md");
+  } catch {
+    fail("engineering/bg-setup/models.md: models doc seed template is missing");
+  }
+}
+
+
 // Descriptions are loaded into every session: keep them short.
 const descriptionLimits = { user: 20, model: 40 };
 
@@ -61,7 +80,7 @@ function checkDescriptionLengths({ fail }) {
   }
 }
 
-const checks = [checkBoundaryLines, checkDescriptionLengths];
+const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc];
 
 for (const check of checks) check(ctx);
 

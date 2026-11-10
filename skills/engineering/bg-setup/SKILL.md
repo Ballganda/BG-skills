@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # BG Setup
 
-Scaffold the per-repo config the engineering skills read: the **issue tracker**, the **triage labels** for the five canonical roles, and the **domain docs** layout. Every skill reads these files on every run, so write only what this repo uses. Explore, present findings, confirm, then write.
+Scaffold the per-repo config the engineering skills read: the **issue tracker**, the **triage labels** for the five canonical roles, the **domain docs** layout, and the **models** that build each ticket tier and run each subagent task. Every skill reads these files on every run, so write only what this repo uses. Explore, present findings, confirm, then write.
 
 ## Process
 
@@ -47,9 +47,16 @@ Defaults: each label string equals its role, `needs-triage`, `needs-info`, `read
 
 **Section C: Domain docs.** Default **single-context** (one `GLOSSARY.md` plus `docs/adr/` at the root); write it without asking. Offer **multi-context** (a root `GLOSSARY-MAP.md` pointing to per-context `GLOSSARY.md` files) only when exploration found monorepo signals, then confirm the layout.
 
+**Section D: Models.** Ticket tiers (Mechanical, Standard, Hard, set by `ticket-gen`) and subagent tasks each name a model. Ask once, leading with the defaults:
+
+- Tiers: Mechanical on Haiku, Standard on Sonnet, Hard on the top model.
+- Tasks: exploration on the Mechanical model, merging on the Standard model, Standards review on the Standard model, Spec review on the Hard model.
+
+On a harness without those names (not Claude Code), offer its smallest model for Mechanical, its middle one for Standard, and its largest for Hard, and let the user name them.
+
 ### 3. Confirm and edit
 
-Show a draft of the `## Agent skills` block (for the file picked in step 4) and of `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, and `docs/agents/triage-labels.md` (only with `triage`). If an existing block holds lines that aren't setup's (see step 4), list them in the draft and ask "Keep these N lines you added?" Let the user edit before writing.
+Show a draft of the `## Agent skills` block (for the file picked in step 4) and of `docs/agents/issue-tracker.md`, `docs/agents/domain.md`, `docs/agents/models.md`, and `docs/agents/triage-labels.md` (only with `triage`). If an existing block holds lines that aren't setup's (see step 4), list them in the draft and ask "Keep these N lines you added?" Let the user edit before writing.
 
 ### 4. Write
 
@@ -69,11 +76,12 @@ The block points; each `docs/agents/*.md` file owns its topic, so restate nothin
 - Issue tracker: [host] Issues on `<owner>/<repo>` via `[cli]`. See `docs/agents/issue-tracker.md`.
 - Triage labels: see `docs/agents/triage-labels.md`.
 - Domain docs: see `docs/agents/domain.md`.
+- Models: see `docs/agents/models.md`.
 ```
 
 For local markdown or "other", the tracker line names where issues live instead of host and repo. Include the triage line, and write `docs/agents/triage-labels.md`, only when Section B ran.
 
-Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`; add no marker comments. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace each heading and setup's own sentence under it (the one pointing at its `docs/agents/` file) with the list. Anything else under those headings, including words added after setup's sentence on the same line, is the user's. The block runs from `## Agent skills` to the next `#` or `##` heading, or the end of the file; every other non-blank line inside it is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped.
+Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`; add no marker comments. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace each heading and setup's own sentence under it (the one pointing at its `docs/agents/` file) with the list. Anything else under those headings, including words added after setup's sentence on the same line, is the user's. The block runs from `## Agent skills` to the next `#` or `##` heading, or the end of the file; every other non-blank line inside it is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped.
 
 When Section B ran on GitHub or GitLab, create each configured label the tracker lacks (`gh label create` / `glab label create`).
 
@@ -82,6 +90,7 @@ Write the docs from the seed templates in this folder:
 - [issue-tracker-github.md](./issue-tracker-github.md), [issue-tracker-gitlab.md](./issue-tracker-gitlab.md), [issue-tracker-local.md](./issue-tracker-local.md): the chosen tracker
 - [triage-labels.md](./triage-labels.md): label mapping (only with `triage`)
 - [domain.md](./domain.md): domain consumer rules
+- [models.md](./models.md): the model for each tier and subagent task
 
 Trim each template to this repo before writing:
 

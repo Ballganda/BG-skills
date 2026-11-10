@@ -29,6 +29,12 @@ Explore only the modules the tickets touch, and skip this when the conversation 
 
 </vertical-slice-rules>
 
+Give each ticket one **tier**, which picks the model that builds it:
+
+- **Mechanical**: rename, config, docs, copy of an existing pattern.
+- **Standard**: one module, a clear seam, tests that describe it.
+- **Hard**: crosses modules, a new seam, concurrency, or an unclear spec.
+
 Give each ticket its **blocking edges**: the tickets that must complete before it can start. No blockers means it can start immediately.
 
 **Wide refactors** are the exception: one mechanical change (rename a column, retype a shared symbol) whose **blast radius** breaks call sites across the codebase, so no vertical slice can land green. Sequence it **expand–contract**:
@@ -40,7 +46,7 @@ Give each ticket its **blocking edges**: the tickets that must complete before i
 
 ### 4. Quiz the user
 
-Present a numbered list; per ticket: **Title**, **Blocked by**, **What it delivers** (the end-to-end behaviour). Ask in one line: is the granularity right, are the edges genuine gates, should any merge or split? Iterate until approved.
+Present a numbered list; per ticket: **Title**, **Tier**, **Blocked by**, **What it delivers** (the end-to-end behaviour). Ask in one line: is the granularity right, are the edges genuine gates, should any merge or split? Say the user can change any ticket's tier. Iterate until approved.
 
 ### 5. Publish
 
@@ -61,6 +67,8 @@ Acceptance criteria are testable checks only; never restate What to build. No fi
 
 **What to build:** the end-to-end behaviour, from the user's perspective.
 
+**Tier:** Mechanical, Standard, or Hard.
+
 **Blocked by:** numbers/titles of gating tickets, or "None (can start immediately)".
 
 **Status:** ready-for-agent
@@ -74,6 +82,10 @@ Acceptance criteria are testable checks only; never restate What to build. No fi
 ## Parent
 
 Reference to the parent issue (omit if none).
+
+## Tier
+
+Mechanical, Standard, or Hard.
 
 ## What to build
 
