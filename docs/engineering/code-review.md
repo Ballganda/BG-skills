@@ -1,6 +1,6 @@
 ## What it does
 
-`code-review` reviews the diff between `HEAD` and a fixed point you name (a commit, a branch, a tag, `main`, `HEAD~5`) along two axes. **Standards** asks whether the code follows how this repo writes code. **Spec** asks whether the code does what the originating issue or spec asked for. Each axis runs in its own sub-agent so neither sees the other's reasoning.
+`code-review` reviews the diff between `HEAD` and a fixed point you name (a commit, a branch, a tag, `main`, `HEAD~5`) along two axes. **Standards** asks whether the code follows how this repo writes code. **Spec** asks whether the code does what the originating issue or spec asked for. Each axis runs in its own reviewer subagent, started with a fresh context window, so neither sees the other's reasoning.
 
 The skill never merges or re-ranks the two axes. The report ends with a worst issue *per axis* and declines to name a single winner across them. A change can pass one axis and fail the other. Code that follows every convention but implements the wrong thing passes Standards and fails Spec. Code that does exactly what the ticket asked but breaks the repo's conventions does the reverse. A blended verdict lets the passing axis hide the failing one.
 
@@ -39,11 +39,20 @@ Step 1 depends on the tracker doc, which [bg-setup](bg-setup.md) writes. Without
 | Question | Is it built right? | Is it the right thing? |
 | Reads | The repo's documented standards, plus the smell baseline | The originating issue or spec |
 | Reports | Documented breaches (can be hard), and smells (always judgement calls) | Missing or partial requirements, scope creep, requirements implemented wrongly |
-| Every finding cites | The standards file and the rule, or the named smell plus the hunk | The line of the spec |
+| Every finding cites | The standards file and the rule, or the named smell | The line of the spec |
+| Model (default) | The Standards review model (Sonnet) | The Spec review model (the top model) |
 
 This design exists to avoid a generic review skill that does not know your standards. Such a skill flags what is deliberate in your codebase and misses the invariants your codebase depends on. So the repo's own documentation is the primary source on the Standards axis, and **the repo always overrides**.
 
-The **smell baseline** sits under the repo's standards. It is twelve code smells from chapter 3 of Fowler's _Refactoring_: Mysterious Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession, Repeated Switches, Shotgun Surgery, Divergent Change, Speculative Generality, Message Chains, Middle Man, Refused Bequest. Each is a labelled heuristic ("possible Feature Envy"), never a hard violation. Each states what the smell is and how to fix it, so a finding comes with a fix attached rather than only a complaint. Both axes skip anything your linter already enforces.
+The **smell baseline** sits under the repo's standards. It is twelve code smells from chapter 3 of Fowler's _Refactoring_: Mysterious Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession, Repeated Switches, Shotgun Surgery, Divergent Change, Speculative Generality, Message Chains, Middle Man, Refused Bequest. Each is a labelled heuristic ("possible Feature Envy"), never a hard violation. Each states what the smell is and how to fix it, so a finding comes with a fix attached rather than only a complaint. The list lives in the skill's own [SMELLS.md](../../skills/engineering/code-review/SMELLS.md), and the Standards reviewer is handed its path rather than a pasted copy, so the list is paid for once. Both axes skip anything your linter already enforces.
+
+## One line per finding
+
+Each reviewer reports one line per finding and nothing else, with no word limit:
+
+`hard or judgement | location | rule or spec line | finding`
+
+The report is the findings, without surrounding prose. The models come from `docs/agents/models.md`, which [bg-setup](bg-setup.md) writes; edit the Standards review and Spec review rows there to change them.
 
 ## Common questions
 
@@ -58,7 +67,7 @@ One answer is to remove Claude Code's built-in skills entirely. That saves a lot
 
 **Its sub-agents keep invoking `/code-review` again and spawn more agents.**
 
-This is a known open bug. Several people have reproduced it, in more than one harness. The Standards and Spec prompts do not forbid delegation, so a sub-agent can find the skill again and fan out again. One report reached more than 50 agents. The fix people have applied on forks is one line appended to both sub-agent briefs: "Do not invoke `/code-review` or spawn additional agents: perform this review directly." Some prefer to handle it at the harness level so every skill inherits the guard. Neither is in the shipped skill yet. If you run this unattended, watch the agent count.
+This was a known bug, reproduced in more than one harness: a sub-agent could find the skill again and fan out again, and one report reached more than 50 agents. On Claude Code both axes now run as the plugin's `reviewer` agent, whose tool list (read, search, and shell for git) has no way to invoke a skill or start an agent. On a harness without agent definitions the reviewer is a general subagent, so the fan-out is still possible there; the fix people have applied on forks is one line appended to both briefs: "Do not invoke `/code-review` or spawn additional agents: perform this review directly." If you run this unattended on such a harness, watch the agent count.
 
 **Should I run it in the same session that wrote the code?**
 
@@ -70,7 +79,7 @@ Both work, and the skill does not decide for you. Per-ticket keeps each diff sma
 
 **Can I trust the findings?**
 
-Not without checking. Sub-agent output is a hypothesis, not evidence. One team reported a dozen breaking changes that prose-based reviews had missed. The skill combines the two reports as they are, or lightly cleaned. It does not re-verify each claim against the files, so a finding can cite the wrong location or overstate an impact. Read the citation on each finding before you act on it. The skill requires every finding to carry a citation (a standards rule, a smell plus its hunk, or a spec line), and that is what makes the findings checkable.
+Not without checking. Sub-agent output is a hypothesis, not evidence. One team reported a dozen breaking changes that prose-based reviews had missed. The skill combines the two reports as they are, or lightly cleaned. It does not re-verify each claim against the files, so a finding can cite the wrong location or overstate an impact. Read the citation on each finding before you act on it. The skill requires every finding to carry a location and a citation (a standards rule, a named smell, or a spec line), and that is what makes the findings checkable.
 
 **Why does it find new problems every single time I run it?**
 
@@ -84,7 +93,8 @@ No. It diffs `<fixed-point>...HEAD`. The three-dot form measures from the merge-
 
 - It refuses to start on a bad ref or an empty diff, before any sub-agent is spawned.
 - The report arrives as two separate blocks under `## Standards` and `## Spec`, not one merged list.
-- Every Standards finding names either a rule in one of your repo's files or one of the twelve smells, with the hunk quoted; every Spec finding quotes a line of the spec.
+- Each finding is one line: hard or judgement, a location, the rule or spec line, and the finding.
+- Every Standards finding names either a rule in one of your repo's files or one of the twelve smells; every Spec finding quotes a line of the spec.
 - The closing summary gives a worst issue per axis and declines to pick an overall winner.
 - With no spec available, the Spec block says so instead of listing requirements it inferred from the code.
 
