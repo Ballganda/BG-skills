@@ -6,6 +6,7 @@ decomp-setup tag. It is the only writer of ticket statuses and ledger records.
 Standard library only. Run from the project root: python tools/decomp.py <cmd>.
 """
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -259,11 +260,38 @@ def prerequisite_failure(tc, env, lines):
     return None
 
 
+def file_text(path):
+    """A text file's contents in whatever encoding it holds: UTF-8, UTF-16 with or without a mark, or one byte per character."""
+    data = Path(path).read_bytes()
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig", errors="replace")
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", errors="replace")
+    if b"\0" in data:  # UTF-16 with no mark: ASCII text has its zero bytes on one side of each pair
+        little = data[1::2].count(0) >= data[0::2].count(0)
+        return data.decode("utf-16-le" if little else "utf-16-be", errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
 def tool_failure(t, env):
     """Why tool t is not the one toolchain.json pins, or None when it is."""
+    pins = [k for k in ("banner_file", "banner_cmd") if t.get(k)]
+    if len(pins) != 1:
+        return (f"{t['name']}: toolchain.json gives it {'both' if pins else 'neither'} banner_file "
+                f"{'and' if pins else 'nor'} banner_cmd; a tool has exactly one")
     missing = [f for f in t.get("files", []) if not (Path(t["root"]) / f).exists()]
     if missing:
         return f"{t['name']}: missing under {t['root']}: {missing}"
+    if t.get("banner_file"):
+        held = Path(t["root"]) / t["banner_file"]
+        if not held.is_file():
+            return f"{t['name']}: banner file {held} not found"
+        if t["banner"] not in file_text(held):
+            return f"{t['name']}: banner lacks '{t['banner']}'; read from {held}"
+        return None
     out = version_output(tool_command(t["banner_cmd"], root=t["root"]), env)
     if t["banner"] not in out:
         return f"{t['name']}: banner lacks '{t['banner']}'; the command printed: {out.strip()[:300]}"
@@ -271,10 +299,11 @@ def tool_failure(t, env):
 
 
 def environment_stamp(tc):
-    """Changes whenever toolchain.json, the target, or a required file does."""
+    """Changes whenever toolchain.json, the target, a required file, or a banner file does."""
     tgt = tc["target"]
     watched = ([Path(tgt["path"])] if tgt["path"] else []) + [
-        Path(t["root"]) / f for t in tc["tools"] for f in t.get("files", [])]
+        Path(t["root"]) / f for t in tc["tools"]
+        for f in t.get("files", []) + ([t["banner_file"]] if t.get("banner_file") else [])]
     stamp = [sha((ROOT / "toolchain.json").read_bytes()), tgt["path"]]
     for p in watched:
         try:

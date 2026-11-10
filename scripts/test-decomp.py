@@ -844,6 +844,71 @@ def test_doctor_fails_on_wrong_banner(base):
     expect(r.returncode == ENV_EXIT and "banner lacks" in r.stderr, "a wrong banner should exit 6", r)
 
 
+# ---------- banner file: a tool with no executable is pinned by a file ----------
+
+SDK_VERSION_FILE = "include/sdkver.h"
+
+
+def sdk_project(base, contents="#define SDK_VERSION \"FakeSDK 7.1\"\n", encoding="utf-8", **fields):
+    """A project with a header-only tool. `contents` None leaves its banner file missing."""
+    sdk = {"name": "sdk", "product": "FakeSDK 7.1", "installed_by": "user",
+           "banner_file": SDK_VERSION_FILE, "banner": "FakeSDK 7.1"}
+    sdk.update(fields)
+    sdk = {k: v for k, v in sdk.items() if v is not None}
+    p = Project(base, manifest=dict(legacy_manifest(), tools=[tool_entry(), sdk]))
+    if contents is not None:
+        f = p.root / ".decomp" / "toolchain" / "sdk" / SDK_VERSION_FILE
+        f.parent.mkdir(parents=True)
+        f.write_bytes(contents.encode(encoding))
+    return p
+
+
+def test_doctor_passes_when_the_banner_file_holds_the_banner(base):
+    r = sdk_project(base).run("doctor")
+    expect(r.returncode == 0 and "sdk ok: FakeSDK 7.1" in r.stdout, "doctor should pass on the banner file", r)
+
+
+def test_doctor_fails_when_the_banner_file_holds_another_version(base):
+    r = sdk_project(base, contents="#define SDK_VERSION \"FakeSDK 7.0\"\n").run("doctor")
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT: sdk: banner lacks 'FakeSDK 7.1'" in r.stderr,
+           "another version in the banner file should exit 6, naming the tool", r)
+
+
+def test_doctor_fails_on_a_missing_banner_file(base):
+    r = sdk_project(base, contents=None).run("doctor")
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT: sdk:" in r.stderr and "sdkver.h" in r.stderr,
+           "a missing banner file should exit 6, naming the file", r)
+
+
+def test_doctor_fails_on_a_tool_with_both_banner_file_and_banner_cmd(base):
+    r = sdk_project(base, banner_cmd=PY + ' -c "print(\'FakeSDK 7.1\')"').run("doctor")
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT: sdk:" in r.stderr and "both" in r.stderr,
+           "a tool with both pins should exit 6, naming the tool", r)
+
+
+def test_doctor_fails_on_a_tool_with_neither_banner_file_nor_banner_cmd(base):
+    r = sdk_project(base, banner_file=None).run("doctor")
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT: sdk:" in r.stderr and "neither" in r.stderr,
+           "a tool with no pin should exit 6, naming the tool", r)
+
+
+def test_doctor_reads_a_banner_file_in_another_encoding(base):
+    for n, encoding in enumerate(("utf-16", "utf-16-le", "cp1252")):
+        sub = Path(base) / str(n)
+        sub.mkdir()
+        r = sdk_project(sub, contents="// café ©\r\n#define SDK_VERSION \"FakeSDK 7.1\"\r\n",
+                        encoding=encoding).run("doctor")
+        expect(r.returncode == 0 and "sdk ok: FakeSDK 7.1" in r.stdout, f"doctor should read a {encoding} file", r)
+
+
+def test_check_stops_trusting_the_last_pass_when_the_banner_file_changes(base):
+    p = sdk_project(base)
+    expect_match(p)
+    (p.root / ".decomp" / "toolchain" / "sdk" / SDK_VERSION_FILE).write_text("#define SDK_VERSION \"FakeSDK 8.0 beta\"\n")
+    r = p.run("check", TID)
+    expect(r.returncode == ENV_EXIT and "sdk: banner lacks" in r.stderr, "a changed banner file ends the trust", r)
+
+
 def test_worktrees_share_the_main_checkouts_machine_folder(base):
     p = Project(base)
     wt = p.base / "wt"
