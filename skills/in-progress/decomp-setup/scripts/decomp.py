@@ -1291,6 +1291,38 @@ def cmd_link(a):
         sys.exit(LINK_MISMATCH_EXIT)
 
 
+LINK_MILESTONE_FLOOR = 16 * 1024  # bytes: the default milestone never drops below this
+
+
+def link_milestone(total):
+    """The milestone size in bytes: `link_milestone` in decomp.json (a percentage like "10%" or a byte
+    count), else 5% of the in-scope bytes with a floor of 16 KB. An override is used as given."""
+    want = CFG.get("link_milestone")
+    if want is None:
+        return max(LINK_MILESTONE_FLOOR, -(-total * 5 // 100))
+    text = str(want).strip()
+    try:
+        if text.endswith("%"):
+            return -(-int(float(text[:-1]) * total) // 100)
+        return int(text)
+    except ValueError:
+        die(f"decomp.json `link_milestone` is {want!r}; use a percentage such as \"5%\" or a byte count.")
+
+
+def milestone_line(ts):
+    """The report's milestone state: due when units fully matched since the last link reach the milestone."""
+    if CFG.get("link_unavailable"):
+        return "not due (link unavailable for this target)"
+    linked = set()
+    for e in records("events.jsonl"):
+        if e.get("event") == "link":
+            linked = set(e.get("units", []))
+    open_units = {t["unit"] for t in ts if t["status"] not in ("integrated", "revalidated")}
+    fresh = sum(t["size"] for t in ts if t["unit"] not in open_units and t["unit"] not in linked)
+    size = link_milestone(sum(t["size"] for t in ts))
+    return f"{'due' if fresh >= size else 'not due'} ({fresh} B newly matched of {size} B)"
+
+
 def project_state(ts):
     """finished, stuck or more. Regressed and blocked-reference tickets are not ready work here."""
     if ts and all(t["status"] == "revalidated" for t in ts):
@@ -1325,6 +1357,7 @@ def cmd_report(a):
             excl[f["scope"]] = excl.get(f["scope"], 0) + 1
     print("excluded:  " + (", ".join(f"{k} {v}" for k, v in sorted(excl.items())) or "none"))
     print(f"state:     {project_state(ts)}")
+    print(f"milestone: {milestone_line(ts)}")
     by_model = {}
     for m in matches:
         c = by_model.setdefault(m["model"], [0, 0])

@@ -133,7 +133,7 @@ class Project:
     def write(self, rel, text, root=None):
         p = (root or self.root) / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8", newline="\n")
+        p.write_text(text, encoding="utf-8")
 
     def git(self, *args, cwd=None):
         r = subprocess.run(["git", *args], cwd=cwd or self.root, capture_output=True, text=True)
@@ -614,11 +614,11 @@ def test_candidate_rebuilds_the_tickets_the_project_holds_matched(base):
     p = started_project(base)
     p.branch("c/diff", {"decomp.json": config_with(p, diff=NEVER_MATCHES)})
     ticket = p.root / f"tickets/{UNIT}/{TID}.md"  # matched after the candidate branched, and not committed
-    ticket.write_text(ticket.read_text().replace("status: integrated", "status: open"), newline="\n")
+    ticket.write_text(ticket.read_text().replace("status: integrated", "status: open"))
     p.git("commit", "-q", "-am", "an open ticket")
     r = p.run("revalidate", "--candidate", "c/diff")
     expect(r.returncode == 0 and "revalidated 0 on c/diff" in r.stdout, "an open ticket is not rebuilt", r)
-    ticket.write_text(ticket.read_text().replace("status: open", "status: matched"), newline="\n")
+    ticket.write_text(ticket.read_text().replace("status: open", "status: matched"))
     r = p.run("revalidate", "--candidate", "c/diff")
     expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout, "the project's matched ticket is rebuilt", r)
 
@@ -1307,6 +1307,68 @@ def test_link_marked_unavailable_exits_with_its_own_code_and_reason(base):
     r = p.run("link")
     expect(r.returncode == 7 and why in r.stderr, "the contract's reason, with exit 7", r)
     expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
+# ---- link milestones ----
+
+def milestone_project(base, sizes, statuses=("integrated", "integrated", "open"), config=None):
+    """A link project whose three tickets have the given sizes (bytes, in ticket order)."""
+    p = link_project(base, statuses=statuses, config=config)
+    for tid, size in zip((TID, TID2, TID3), sizes):
+        t = next((p.root / "tickets").glob(f"*/{tid}.md"))
+        t.write_text(t.read_text().replace("size: 37", f"size: {size}"))
+    p.git("commit", "-aq", "--allow-empty", "-m", "sizes")
+    return p
+
+
+def milestone_of(p):
+    r = p.run("report")
+    lines = [l for l in r.stdout.splitlines() if l.startswith("milestone:")]
+    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one milestone line", r)
+    return lines[0].split(":", 1)[1].strip()
+
+
+def test_milestone_is_due_at_five_percent_of_in_scope_bytes(base):
+    for d, (sizes, due) in each(base, [((29999, 285001, 285000), False), ((30000, 285000, 285000), True)]):
+        got = milestone_of(milestone_project(d, sizes, statuses=("integrated", "open", "open")))
+        expect(got.startswith("due") == due and "of 30000 B" in got, f"{sizes}: want due={due} of 30000 B, got {got}")
+
+
+def test_milestone_floor_is_16_kb_on_a_small_project(base):
+    for d, (size, due) in each(base, [(16383, False), (16384, True)]):
+        got = milestone_of(milestone_project(d, (size, 37, 37), statuses=("integrated", "open", "open")))
+        expect(got.startswith("due") == due and "of 16384 B" in got, f"{size}: want due={due} of 16384 B, got {got}")
+
+
+def test_milestone_honours_a_percentage_override(base):
+    for d, (statuses, due) in each(base, [(("integrated", "open", "open"), False), (("open", "integrated", "integrated"), True)]):
+        got = milestone_of(milestone_project(d, (37, 37, 37), statuses, {"link_milestone": "50%"}))
+        expect(got.startswith("due") == due and "of 56 B" in got, f"{statuses}: want due={due} of 56 B, got {got}")
+
+
+def test_milestone_honours_a_byte_count_override(base):
+    for d, (size, due) in each(base, [(37, True), (36, False)]):
+        got = milestone_of(milestone_project(d, (size, 37, 37), statuses=("integrated", "open", "open"),
+                                             config={"link_milestone": 37}))
+        expect(got.startswith("due") == due and "of 37 B" in got, f"{size}: want due={due} of 37 B, got {got}")
+
+
+def test_milestone_is_not_due_after_a_link_until_new_units_complete(base):
+    p = milestone_project(base, (37, 37, 37), config={"link_milestone": 10})
+    expect(milestone_of(p).startswith("due"), "the finished unit is due before any link")
+    r = p.run("link")
+    expect(r.returncode == 0, "the link should pass", r)
+    expect(milestone_of(p).startswith("not due"), "a recorded link clears the milestone")
+    t = p.root / "tickets" / "u0002" / f"{TID3}.md"
+    t.write_text(t.read_text().replace("status: open", "status: integrated"))
+    p.git("commit", "-aq", "-m", "complete u0002")
+    expect(milestone_of(p).startswith("due"), "a newly completed unit makes it due again")
+
+
+def test_milestone_is_never_due_when_the_link_is_unavailable(base):
+    p = milestone_project(base, (37, 37, 37), config={"link_milestone": 10, "link_unavailable": "no linker can do it"})
+    got = milestone_of(p)
+    expect(got.startswith("not due") and "unavailable" in got, f"unavailable means never due, got {got}")
 
 
 def test_verify_checks_the_environment_before_recording(base):
