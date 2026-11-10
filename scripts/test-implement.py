@@ -56,9 +56,9 @@ class Project:
         self.git("add", "-A")
         self.git("commit", "-q", "-m", msg)
 
-    def run(self, *args, cwd=None, clean=True):
+    def run(self, *args, cwd=None, clean=True, env=None):
         r = subprocess.run([sys.executable, str(SCRIPT), *args], cwd=cwd or self.root,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env={**os.environ, **(env or {})})
         if clean:
             expect(self.git("status", "--porcelain") == "", "git status should stay clean", r)
         return r
@@ -178,6 +178,56 @@ def test_status_flags_a_deleted_branch(base):
     p.git("branch", "-D", branch)
     line = status_lines(p)["1"]
     expect(line.endswith(" missing=worktree,branch"), f"status should flag both: {line!r}")
+
+
+def test_outside_a_git_repository_every_command_is_an_environment_problem(base):
+    p = Project(base)
+    outside = p.base / "plain"
+    outside.mkdir()
+    env = {"GIT_CEILING_DIRECTORIES": str(p.base)}
+    for args in (("begin", INTEGRATION, "1"), ("start", "1"), ("status",)):
+        r = p.run(*args, cwd=outside, env=env)
+        expect(r.returncode == ENV and "not a git repository" in r.stderr, f"{args[0]} outside a repo", r)
+    expect(list(outside.iterdir()) == [], "nothing should be written outside a repository")
+
+
+def test_a_dirty_integration_branch_stops_begin_and_start_before_any_change(base):
+    p = begun(base)
+    p.git("checkout", "-q", INTEGRATION)
+    (p.root / "src.txt").write_text("edited\n")
+    before = p.ledger()
+    r = p.run("start", "1", clean=False)
+    expect(r.returncode == ENV and "uncommitted" in r.stderr, "start on a dirty integration branch", r)
+    expect(not p.has_branch("ticket-1") and not (p.base / "wts").exists(), "start should create nothing")
+    r = p.run("begin", INTEGRATION, "1", "3", clean=False)
+    expect(r.returncode == ENV and "uncommitted" in r.stderr, "begin on a dirty integration branch", r)
+    expect(p.ledger() == before, "the ledger should be unchanged")
+
+
+def test_bad_arguments_exit_with_the_usage_code(base):
+    p = begun(base)
+    for args in ((), ("frobnicate",), ("begin", INTEGRATION), ("begin", INTEGRATION, "1:enormous"),
+                 ("begin", "bad..name", "1"), ("start",), ("start", "9"), ("start", "1", "--slug", "a b"),
+                 ("status", "extra")):
+        r = p.run(*args)
+        expect(r.returncode == USAGE and r.stderr.startswith("error: "), f"usage code for {args}", r)
+    expect(not p.has_branch("ticket-9"), "a ticket outside the batch is never started")
+
+
+def test_parallel_starts_all_land_in_the_ledger(base):
+    p = begun(base, *[str(n) for n in range(1, 7)])
+    procs = [subprocess.Popen([sys.executable, str(SCRIPT), "start", str(n)], cwd=p.root,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for n in range(1, 7)]
+    for proc in procs:
+        _, err = proc.communicate()
+        expect(proc.returncode == OK, f"a parallel start failed: {err}")
+    tickets = p.ledger()["tickets"]
+    expect(all(t["state"] == "claimed" for t in tickets.values()), f"every start recorded: {tickets}")
+
+
+def test_the_script_and_tests_contain_no_em_dashes(base):
+    for path in (SCRIPT, Path(__file__)):
+        expect(chr(0x2014) not in path.read_text(encoding="utf-8"), f"em-dash in {path}")
 
 
 def rmtree(path):
