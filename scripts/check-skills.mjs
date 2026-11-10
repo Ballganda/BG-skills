@@ -51,6 +51,40 @@ function checkModelsDoc({ read, fail }) {
   }
 }
 
+// The plugin ships one restricted agent per role, each with a model and a tool list.
+const agentRoles = ["implementer", "explorer", "reviewer", "merger"];
+
+function checkAgentDefinitions({ fail }) {
+  for (const role of agentRoles) {
+    const rel = `agents/${role}.md`;
+    let text;
+    try {
+      text = readFileSync(join(root, rel), "utf8");
+    } catch {
+      fail(`${rel}: agent definition for ${role} is missing`);
+      continue;
+    }
+    const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
+    for (const field of ["model", "tools"]) {
+      if (!new RegExp(`^${field}:[ \\t]*\\S`, "m").test(front)) fail(`${rel}: ${role} agent lacks a ${field}`);
+    }
+  }
+}
+
+// implement states each subagent's fixed one-line report, the implementer's with its lesson field.
+const implementFormats = [
+  ["implementer", "`branch | tests: pass or fail | blocker: none or text | lesson: type @ location; type @ location`"],
+  ["explorer", "`notes: path`"],
+  ["merger", "`merged or conflict | files`"],
+];
+
+function checkImplementFormats({ read, fail }) {
+  const file = "engineering/implement/SKILL.md";
+  const text = read(file);
+  for (const [role, format] of implementFormats) {
+    if (!text.includes(format)) fail(`${file}: missing the ${role} report format: ${format}`);
+  }
+}
 
 // Descriptions are loaded into every session: keep them short.
 const descriptionLimits = { user: 20, model: 40 };
@@ -80,7 +114,7 @@ function checkDescriptionLengths({ fail }) {
   }
 }
 
-const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc];
+const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc, checkAgentDefinitions, checkImplementFormats];
 
 for (const check of checks) check(ctx);
 

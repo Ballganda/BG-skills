@@ -18,12 +18,14 @@ const script = join(repo, "scripts", "check-skills.mjs");
 const run = (root) =>
   spawnSync(process.execPath, [script, ...(root ? [root] : [])], { encoding: "utf8" });
 
-// Copy the skills tree, apply a mutation to one file, run the check, clean up.
-function mutated(file, mutate) {
+// Copy the skills and agents trees, apply a mutation to one file (a path under
+// skills/, or under the repo root when `fromRoot`), run the check, clean up.
+function mutated(file, mutate, fromRoot = false) {
   const dir = mkdtempSync(join(tmpdir(), "check-skills-"));
   try {
     cpSync(join(repo, "skills"), join(dir, "skills"), { recursive: true });
-    const path = join(dir, "skills", file);
+    cpSync(join(repo, "agents"), join(dir, "agents"), { recursive: true });
+    const path = fromRoot ? join(dir, file) : join(dir, "skills", file);
     writeFileSync(path, mutate(readFileSync(path, "utf8")));
     return run(dir);
   } finally {
@@ -96,3 +98,28 @@ test("fails when a model-invoked description is over 40 words", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /tdd.*description/);
 });
+
+for (const role of ["implementer", "explorer", "reviewer", "merger"]) {
+  for (const field of ["model", "tools"]) {
+    test(`fails when the ${role} agent loses its ${field}`, () => {
+      const r = mutated(`agents/${role}.md`, dropLine(`${field}:`), true);
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, new RegExp(`${role}.*${field}`));
+    });
+  }
+}
+
+const implementFormats = [
+  ["implementer format", "`branch | tests: pass or fail | blocker: none or text"],
+  ["lesson field", "| lesson: type @ location; type @ location`"],
+  ["explorer format", "`notes: path`"],
+  ["merger format", "`merged or conflict | files`"],
+];
+
+for (const [name, needle] of implementFormats) {
+  test(`fails when implement loses the ${name}`, () => {
+    const r = mutated("engineering/implement/SKILL.md", (t) => t.split(needle).join(""));
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /implement.*format/);
+  });
+}
