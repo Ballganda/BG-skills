@@ -1,6 +1,6 @@
 ---
 name: improve-codebase-architecture
-description: Scan a codebase for deepening opportunities, list them as ID'd markdown candidates ready for /spec-gen, then grill through whichever one you pick.
+description: Find deepening opportunities as candidates ready for /spec-gen, then grill through the one you pick.
 disable-model-invocation: true
 ---
 

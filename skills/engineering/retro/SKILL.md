@@ -1,16 +1,25 @@
 ---
 name: retro
-description: "Conduct a retrospective on a coding session."
-disable-model-invocation: true
+description: "Suggest improvements to the coding agent's environment after a session. Use when the user asks for a retro or retrospective, when implement ends with lesson lines, or after diagnosing-bugs lands a fix."
 ---
 
-The user has asked for a **retrospective**. You are suggesting improvements to the coding agent's **environment** to improve future runs.
+A **retrospective** suggests improvements to the coding agent's **environment** to improve future runs.
+
+## Modes
+
+| Invoked by | Evidence | Output |
+| --- | --- | --- |
+| The user typing it | The session they name, from the session logs; the current one by default | Candidates presented to the user |
+| `implement`, at the end of a run | Only the lesson lines it passes (`type @ location`) and the locations they point to. Do not read session logs. | Suggestions listed in the caller's final report |
+| `diagnosing-bugs`, after the fix lands | The live session | Suggestions listed in the caller's final report |
+
+When another skill invokes you, **only suggest**: change no file, add no check, write no rule. The user decides later which suggestions to act on.
 
 ## Steps
 
 1. Call the Skill tool with `writing-for-agents` for the writing style guide.
 
-2. Read the primary sources for the session the user specifies. This may mean searching through session logs on this machine. If the user doesn't specify a session, default to the current one.
+2. Gather the evidence for your mode (table above). For lesson lines, read each location it names, and keep each lesson's type as its category.
 
 3. Look for candidates for improvement in these categories.
 
@@ -22,7 +31,7 @@ The user has asked for a **retrospective**. You are suggesting improvements to t
 - **No-ops**: look for instructions in steering files that don't modify the agent's behavior. _Use when_ the steering files are large and unwieldy.
 - **Information access**: look for opportunities to increase the agent's access to information. Teeing dev server logs, readonly access to third-party services. _Use when_ a crucial piece of information was not available to the agent.
 
-4. Present these candidates to the user, in order of severity.
+4. List the candidates in order of severity: to the user when typed, in the caller's final report when invoked by another skill.
 
 ## Reference
 

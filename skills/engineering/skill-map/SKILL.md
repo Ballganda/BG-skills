@@ -14,28 +14,35 @@ A **flow** is a path through the skills. Most paths run along one **main flow**,
 
 ## The main flow: idea → ship
 
-The route most work travels. You have an idea and want it built.
+The route most work travels. You have an idea and want it built. The creation flow starts at `/grill` and runs `grill → spec-gen → ticket-gen → implement → code-review`.
 
-1. **`/grill`** sharpens the idea by interview. Start here whenever you are **working in a working directory**: it's stateful, retaining what it learns in `GLOSSARY.md` and ADRs, and writing nothing else. It ends by asking whether you're ready for a spec, then waits for you to type `/spec-gen`; it never moves on by itself. (No working directory? Use `/grill-me` instead, covered under Standalone. Both run the same `/grilling` primitive; `grill` is the one that leaves a paper trail, which makes it the better of the two whenever a repo is there to leave it in.)
+1. **`/grill`** is where the creation flow starts. It sharpens the idea by interview. Start here whenever you are **working in a working directory**: it's stateful, retaining what it learns in `GLOSSARY.md` and ADRs, and writing nothing else. It ends by asking whether you're ready for a spec, then waits for you to type `/spec-gen`; it never moves on by itself. (No working directory? Use `/grill-me` instead, covered under Standalone. Both run the same `/grilling` primitive; `grill` is the one that leaves a paper trail, which makes it the better of the two whenever a repo is there to leave it in.)
 2. **Branch: can you settle every question in conversation?** If a question needs a runnable answer (state, business logic, a UI you have to see), detour through a prototype, bridged by **`/handoff`** in both directions (a prototype lives in its own directory, which is exactly what `/handoff` is for; see Phase boundaries):
    - **`/handoff`** out, then open a fresh session against that file,
    - **`/prototype`** to answer the question with throwaway code,
    - **`/handoff`** back what you learned, and reference it from the original idea thread.
 3. **Branch: is this a multi-session build?**
-   - **Yes** → **`/spec-gen`** (turn the thread into a spec), then **`/ticket-gen`** to split it into tracer-bullet tickets, each declaring its **blocking edges**. Then run **`/implement`** for one **Ticket batch** per run (see `implement`'s SKILL.md for the arguments and cap). It always orchestrates: it reads the tickets as a **task graph**, hands each ready ticket on the **frontier** to a fresh-context implementer subagent, and lands everything on one **integration branch**. On a local tracker the tickets are one file per ticket under `.scratch/<feature>/issues/`; on a real tracker the edges are native blocking links.
+   - **Yes** → **`/spec-gen`** (turn the thread into a spec), then **`/ticket-gen`** to split it into tracer-bullet tickets, each declaring its **blocking edges** and a **tier** (Mechanical, Standard, Hard) that picks the model. Then run **`/implement`** for one **Ticket batch** per run (see `implement`'s SKILL.md for the arguments and cap). It always orchestrates: it reads the tickets as a **task graph**, hands each ready ticket on the **frontier** to a fresh-context implementer subagent on its tier's model (one retry on the next tier, then the ticket is reported), and lands everything on one **integration branch**. On a local tracker the tickets are one file per ticket under `.scratch/<feature>/issues/`; on a real tracker the edges are native blocking links.
    - **No** → **`/implement`** from this window. With no tickets, the described work is a batch of one, handed to a single fresh-context implementer subagent.
 
    Either way, the code gets built by implementers driving **`/tdd`** (one red-green slice at a time). `/implement` doesn't review its own work: run **`/code-review`**, a two-axis review (Standards + Spec) of the diff, as the next stage. Reach for **`/tdd`** on its own when you just want to build a concrete behaviour test-first without a full spec, and **`/code-review`** on its own whenever you want to review a branch or PR against a fixed point.
 
    When the work goes up as a pull request, **`/pr`** shapes the body: the smallest visual that shows the change, before/after evidence that it works, and a one-way or two-way door call. It's model-invoked, so the agent reaches for it whenever it writes a PR.
 
-4. **`/retro`** closes the loop. After a build, and especially one that went sideways, it looks back over the session and suggests changes to the agent's **environment**, not the code: navigation pointers, automated checks, the coding standards `/code-review` enforces, steering files, tooling. Mechanical mistakes become deterministic checks; judgement calls become coding standards. The next build then starts from a better environment.
+4. **`/retro`** closes the loop. It suggests changes to the agent's **environment**, not the code: navigation pointers, automated checks, the coding standards `/code-review` enforces, steering files, tooling. Mechanical mistakes become deterministic checks; judgement calls become coding standards. It runs **automatically**: `/implement` calls it at the end of a run when implementers reported **lessons**, and works from those lesson lines alone; a clean run skips it. Run that way, it only lists suggestions in the final report and changes nothing until you pick one. Type `/retro` yourself to look back on any session. The next build then starts from a better environment.
 
 ### Context hygiene
 
-Keep steps 1–3 in **one unbroken context window** (don't compact or clear until after `/ticket-gen`) so the grilling, spec, and tickets all build on the same thinking. `/implement` then keeps its own window small by giving every ticket to a fresh-context subagent. Run `/retro` in the session it's looking back on, before you clear; after clearing, point it at that session's log instead.
+Each skill in the creation flow ends with one line about the next step:
 
-The limit on this is the **smart zone**: the window (~150k tokens on state-of-the-art models) within which the model still reasons sharply. If a session approaches it before `/ticket-gen`, don't push on degraded; `/compact` at the nearest phase boundary and carry on (see Phase boundaries).
+| After | Next | Advice |
+| --- | --- | --- |
+| `/grill` | `/spec-gen` | Stay in this session. |
+| `/spec-gen` | `/ticket-gen` | If your context is over 150k, it is suggested to clear or start a new chat before /ticket-gen. |
+| `/ticket-gen` | `/implement` | Always start a new chat. |
+| `/implement` | `/code-review` | Always start a new chat. |
+
+The limit behind the 150k line is the **smart zone**: the window (~150k tokens on state-of-the-art models) within which the model still reasons sharply. The agent cannot read its own token count, so the line is conditional on what you see. If a session grows past it mid-phase, `/compact` at the nearest phase boundary (see Phase boundaries). `/implement` keeps its own window small by giving every ticket to a fresh-context subagent. The automatic `/retro` needs no session history, since it works from lesson lines. When you type `/retro` yourself, run it in the session it's looking back on, before you clear; after clearing, point it at that session's log instead.
 
 ## On-ramps
 
@@ -45,7 +52,7 @@ A starting situation that generates work, then merges onto the main flow.
 
   Triage is only for issues **you didn't create**: bug reports, incoming feature requests, anything that arrives raw. Tickets that `/ticket-gen` produced are already agent-ready, so **don't triage them**.
 
-- **Something's broken** → **`/diagnosing-bugs`**. For the hard ones: the bug that resists a first glance, the intermittent flake, the regression that crept in between two known-good states. It refuses to theorise until it has a **tight feedback loop** (one command that already goes red on *this* bug), then fixes with a regression test. Once the fix is in, run **`/retro`** in the same session to ask what would have prevented the bug; where the real finding is that there's no good seam to lock it down, that's a job for **`/improve-codebase-architecture`**.
+- **Something's broken** → **`/diagnosing-bugs`**. For the hard ones: the bug that resists a first glance, the intermittent flake, the regression that crept in between two known-good states. It refuses to theorise until it has a **tight feedback loop** (one command that already goes red on *this* bug), then fixes with a regression test. Once the fix is in, it calls **`/retro`** in the same session to suggest what would have prevented the bug; where the real finding is that there's no good seam to lock it down, that's a job for **`/improve-codebase-architecture`**.
 
 - **A huge, foggy effort: a greenfield project or a huge feature build, too big for one session** → **`/wayfinder`**, the most cognitively demanding flow here. When the way from here to the destination isn't visible yet, it charts a **shared map** of **decision tickets** on the issue tracker and resolves them one at a time, producing **decisions, not deliverables**, until the fog is pushed back and the way is clear. Where **`/grill`** sharpens an idea you can hold in one session, wayfinder is for the idea you can't, and it's slower and denser, so save it for exactly that, never a well-scoped feature.
 
@@ -92,4 +99,4 @@ Off the main flow entirely.
 
 ## Precondition
 
-**`/bg-setup`**: run before your first engineering flow to configure the issue tracker, triage labels, and doc layout the other skills assume. Custom issue trackers also work.
+**`/bg-setup`**: run before your first engineering flow to configure the issue tracker, triage labels, doc layout, and the model for each ticket tier and subagent task that the other skills assume. Custom issue trackers also work.

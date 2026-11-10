@@ -2,6 +2,8 @@
 
 `ticket-gen` takes a plan, a spec, or the conversation you are in, and breaks it into a set of **tickets** on your issue tracker. Each ticket declares its **blocking edges**: the other tickets that have to finish before it can start.
 
+Each ticket also gets a **tier**: Mechanical (rename, config, docs, copy of an existing pattern), Standard (one module, a clear seam, tests that describe it) or Hard (crosses modules, a new seam, concurrency, an unclear spec). The tier picks the model that builds the ticket, using the models [bg-setup](bg-setup.md) recorded.
+
 Every ticket is a **tracer bullet**: a narrow but complete path through every layer of the change (schema, API, UI, tests) that you can demo on its own as soon as it lands. This is what makes the skill different from the obvious way to split work, which is to cut one layer at a time and integrate at the end. It also sizes each ticket to fit in a single fresh context window, because a session that has never seen your spec will pick the ticket up.
 
 ## When to reach for it
@@ -28,7 +30,7 @@ A **horizontal** slice ships one layer of the change. Nothing works until every 
 
 This is the rule people break most often. One team ran a 26-ticket stack sliced by layer (corpus, producer, aggregator, selector) and got roughly twenty agent runs per closed ticket, about three quarters of them rework. Their own post-mortem traced every failure class back to the horizontal slicing rather than to the implementations.
 
-Two things happen before anything is published. `ticket-gen` looks for prefactoring (the principle "make the change easy, then make the easy change") and orders that work first. Then it presents the breakdown as a numbered list and quizzes you on it: is the granularity right, are the blocking edges real, should anything merge or split. Nothing reaches the tracker until you approve, and that quiz is the place to push back.
+Two things happen before anything is published. `ticket-gen` looks for prefactoring (the principle "make the change easy, then make the easy change") and orders that work first. Then it presents the breakdown as a numbered list and quizzes you on it: is the granularity right, are the blocking edges real, should anything merge or split. Each ticket is listed with its tier, and you can change any of them there. Nothing reaches the tracker until you approve, and that quiz is the place to push back.
 
 ## Blocking edges
 
@@ -71,7 +73,7 @@ This is the same kind of problem, [reported in issue #513](https://github.com/ma
 They did, and that was a bug. A single shared file also caused race conditions when parallel agents wrote to it. Local mode now writes one file per ticket under `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, in dependency order, matching the layout the local tracker template already described. The `NN` prefix is a real ticket ID, so `/implement 03` works instead of retyping a long title.
 
 **It kept truncating when it tried to read my spec.**
-A very large spec can outgrow what a tracker issue serves back cleanly. There is no local copy to fall back on, so the agent spends tool calls fetching chunks again and never reaches the end. Don't clear or compact between `/spec-gen` and `/ticket-gen`. Run them in the same context window: when the spec was written in this session, the skill skips the fetch entirely.
+A very large spec can outgrow what a tracker issue serves back cleanly. There is no local copy to fall back on, so the agent spends tool calls fetching chunks again and never reaches the end. When the spec was written in this session, the skill skips the fetch entirely, so run `/ticket-gen` in the same window unless `/spec-gen` told you your context is over 150k.
 
 **The acceptance criteria graded nothing: some passed before any work was done.**
 The skill now asks for testable checks only and forbids restating What to build, which removes the commonest case. Three shapes recur: a criterion already true at the base commit, a criterion that only work in another ticket can satisfy, and one that restates the request rather than deriving from the artifact. Vertical slicing prevents most of it, because a slice that delivers new behaviour fails at the base commit by construction. The check is still worth doing by hand. For each criterion, name the observation that would show it false, and confirm it fails at the commit the implementer starts from.
@@ -82,7 +84,7 @@ The skill stops at the artifact. Run [implement](implement.md), which works one 
 ## It's working if
 
 - Every ticket has an answer to "what can I demo when this is done?", and the answer is behaviour, not a layer.
-- The list comes back to you numbered, with a "Blocked by" line on each, before anything is published.
+- The list comes back to you numbered, with a tier and a "Blocked by" line on each, before anything is published.
 - The ticket at the top has no blockers and can be started immediately.
 - Nothing in a ticket body is a file path or a line number, except a snippet a prototype produced.
 - Each ticket reads like something a fresh session could finish without you in the room.
@@ -96,4 +98,4 @@ The skill stops at the artifact. Run [implement](implement.md), which works one 
 grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
-Upstream is [spec-gen](spec-gen.md), which hands it a settled spec to slice against. Keep both in one context window, with no clear between them. Downstream is [implement](implement.md), which reads the same blocking edges as a task graph and builds each ready ticket in a fresh-context subagent driving [tdd](tdd.md), landing them on one integration branch. [code-review](code-review.md) is the stage after that. When you're unsure which skill or flow fits, [skill-map](skill-map.md) routes you.
+Upstream is [spec-gen](spec-gen.md), which hands it a settled spec to slice against. Run them in one window unless your context is over 150k, which `spec-gen` tells you. Downstream is [implement](implement.md), which you always start in a new chat (the skill ends by telling you so), so the orchestrator begins with only the tickets in context. It reads the same blocking edges as a task graph and builds each ready ticket in a fresh-context subagent driving [tdd](tdd.md), landing them on one integration branch. [code-review](code-review.md) is the stage after that. When you're unsure which skill or flow fits, [skill-map](skill-map.md) routes you.

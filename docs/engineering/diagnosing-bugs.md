@@ -1,6 +1,6 @@
 ## What it does
 
-`diagnosing-bugs` runs a six-phase diagnosis on a hard bug or a performance regression: build a repro, minimise it, rank hypotheses, instrument, fix with a regression test, clean up.
+`diagnosing-bugs` runs a six-phase diagnosis on a hard bug or a performance regression: build a repro, minimise it, rank hypotheses, instrument, fix with a regression test, clean up. Once the fix lands, it calls [retro](retro.md) for suggestions on what would have prevented the bug.
 
 It will not let the agent form a theory until a **tight** feedback loop exists: one named command, already run once, that goes red on *this* bug and green when it is fixed. Given a bug report, a coding agent by default reads code and guesses. This skill blocks that. If no red-capable command exists, there is no Phase 2. That single gate is what the skill is for. Once the loop exists, everything after it (bisection, hypothesis-testing, instrumentation) is mechanical.
 
@@ -18,7 +18,7 @@ Reach for it on the hard ones: a bug you can't solve at first look, an intermitt
 | A raw bug report from someone else, not yet confirmed or written up | [triage](triage.md) first |
 | Throwaway code to answer a design question, not chase a defect | [prototype](prototype.md) |
 | Building a planned behaviour test-first | [tdd](tdd.md) |
-| Asking what would have prevented the bug, once it is fixed | [retro](retro.md), run in the same session |
+| Asking what would have prevented the bug, once it is fixed | Nothing: it calls [retro](retro.md) itself, in the same session |
 | No good seam exists to lock the bug down | [improve-codebase-architecture](improve-codebase-architecture.md), which you start yourself |
 
 ## The tight loop is the skill
@@ -91,4 +91,4 @@ v1.0.0 renamed it to `/diagnosing-bugs`. The old name no longer exists. Anything
 
 `diagnosing-bugs` is a reach-for-it-anytime standalone. You start it when something is broken, and it ends when the fix and its regression test are in. It keeps no state and needs no prior setup. [skill-map](skill-map.md) routes "Something's broken" here.
 
-Two neighbours matter. [retro](retro.md) comes after it: once the fix is in, run it in the same session to ask what would have prevented the bug, while the session has more information than it had at the start. `diagnosing-bugs` never invokes `retro` itself, because `retro` is user-invoked. [triage](triage.md) comes before it for bugs that arrive as raw reports from other people, and does a shallower version of the same first two phases.
+Two neighbours matter. [retro](retro.md) comes after it: once the fix lands, `diagnosing-bugs` calls it in the same session to suggest what would have prevented the bug, while the session has more information than it had at the start. It only lists suggestions in the final report; nothing changes until you pick one. [triage](triage.md) comes before it for bugs that arrive as raw reports from other people, and does a shallower version of the same first two phases.

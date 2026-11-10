@@ -43,13 +43,42 @@ The orchestrator reads the tickets as a **task graph**, not a list. A ticket is 
 
 Everything from a ticket batch lands on one branch. Each implementer works in its own worktree based on the integration branch tip, builds its ticket with `tdd`, runs single test files as it goes and the full suite once at the end, commits, and merges the integration branch tip into its own branch before reporting done. The orchestrator then does the merge itself; a merger subagent is started only for a conflict it cannot resolve trivially.
 
-Implementers talk to the orchestrator through context pointers (the spec, the ticket, shared exploration notes, earlier commits) rather than pasted summaries, and report back in under 100 words. That is what keeps the orchestrator's window small across a long batch.
+Implementers talk to the orchestrator through context pointers (the spec, the ticket, shared exploration notes, earlier commits) rather than pasted summaries, and report back in one fixed line (branch, test result, blocker, and any lessons). That is what keeps the orchestrator's window small across a long batch.
+
+When the run ends, the closing message tells you to always start a new chat before `/code-review`, so the review starts from the diff and the spec alone.
 
 Chat work skips all of this. Its one implementer works in your current checkout with no worktree, builds with `tdd` the same way, and commits straight to the branch you are on.
 
 A pull request opens only if your tracker closes work through PRs or you ask for one. Otherwise the run stops on the integration branch with every ticket resolved, which works fully offline against a local markdown tracker.
 
+## Tiers, models and roles
+
+Each ticket carries a **tier** from [ticket-gen](ticket-gen.md), and the tier picks the implementer's model from the models doc [bg-setup](bg-setup.md) writes:
+
+| Tier | Default model | If it fails |
+| --- | --- | --- |
+| Mechanical | Haiku | One retry on the Standard model, then reported |
+| Standard (also any ticket with no tier, and chat work) | Sonnet | One retry on the Hard model, then reported |
+| Hard | The top model | Reported, not retried |
+
+A repo set up before the models doc existed runs on these defaults until you rerun setup. A ticket that still fails after its retry is stopped and listed in the final report, so a bad ticket never climbs every tier.
+
+On Claude Code, each subagent runs as one of the plugin's **restricted agents** (implementer, explorer, merger, plus the reviewer [code-review](code-review.md) uses), each with only the tools its role needs, so it starts from a lower token floor. The orchestrator overrides the agent's model at dispatch. Other harnesses get the same roles and models through a general subagent.
+
+## Lessons and the automatic retro
+
+An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). When the run ends with at least one lesson, `implement` calls [retro](retro.md) on those lines alone, without reading session logs, and lists its suggestions in the final report. It changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
+
 ## Common questions
+
+**The subagent reports are one terse line. What do they mean?**
+
+That is by design: each role reports in a fixed line (the implementer's is `branch | tests | blocker | lesson`) so the orchestrator's window holds only what it acts on. Ask the orchestrator to explain any report in plain language and it will.
+
+**Why did a ticket run on a bigger model than its tier?**
+
+Its first implementer reported failing tests or a blocker, so the orchestrator retried it once on the next tier's model. The final report lists any ticket that failed the retry too, and any Hard ticket that failed.
+
 
 **Where did `implement-spec` go?**
 
@@ -91,9 +120,11 @@ The agent resolved `#2` against another numbered list in context rather than the
 
 - The session opens by stating the resolved batch (ticket numbers and titles), or the one piece of chat work it is handing off, rather than asking you what to build.
 - The orchestrating session never edits code itself: every change arrives from a subagent's report.
+- Each ticket's implementer runs on its tier's model, and every subagent report is a single line.
 - Several implementers (up to 3) run at once whenever the graph allows, and a ticket starts as soon as its last blocker lands.
 - Every implementer's trace shows a `tdd` Skill tool call, repeated typechecks and single test files, and one full suite near the end.
 - The run ends on one branch with every batch ticket resolved or listed as skipped, and suggests `/code-review` instead of running it.
+- A run with lessons ends with retro's suggestions listed, and no file changed on their account; a clean run lists none.
 
 ## Where it fits
 

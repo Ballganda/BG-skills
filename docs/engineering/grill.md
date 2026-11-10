@@ -4,7 +4,7 @@
 
 It is **stateful**. Every other grilling skill leaves the session in your head; this one leaves files on disk. When a term resolves, the skill writes it to `GLOSSARY.md` at once, not in a batch at the end. When a decision passes three gates, the skill writes it as an ADR. That is the whole difference, and it also causes most of the trouble people have with the skill. The artifacts are real files in a real repo, so they can be missing when you expected them, and they can drift when more than one person writes them.
 
-Those two files are all it writes. It edits no code, config or skill files, and it never moves down the chain by itself. When the interview is done it asks one closing question, whether you are ready to turn the result into a spec, and tells you to type `/spec-gen`. Then it stops and waits for you to type it.
+Those two files are all it writes. It edits no code, config or skill files, and it never moves down the chain by itself. When the interview is done it asks one closing question, whether you are ready to turn the result into a spec, and tells you to type `/spec-gen` and to stay in this session for it, so the spec is written from the conversation itself. Then it stops and waits for you to type it.
 
 ## When to reach for it
 
@@ -38,7 +38,7 @@ Three things come out of a session, and they are not equal.
 | A decision that is hard to reverse, surprising without context, and a real trade-off | An ADR under `docs/adr/` |
 | Everything else you decided | The conversation, and nowhere else |
 
-That third row is the one that catches people out. `GLOSSARY.md` is only a glossary. It holds no implementation details, no spec, and no scratch notes. An ADR needs all three conditions at once, so most decisions do not qualify and most sessions produce none. A session that yields a sharper glossary and zero ADRs is working as designed, but it means most of what you agreed exists only in the context window you agreed it in. Hand that same conversation to [spec-gen](spec-gen.md) rather than clearing it.
+That third row is the one that catches people out. `GLOSSARY.md` is only a glossary. It holds no implementation details, no spec, and no scratch notes. An ADR needs all three conditions at once, so most decisions do not qualify and most sessions produce none. A session that yields a sharper glossary and zero ADRs is working as designed, but it means most of what you agreed exists only in the context window you agreed it in. Hand that same conversation to [spec-gen](spec-gen.md) rather than clearing it: `grill` tells you to stay in the session.
 
 The glossary is the main output. This skill builds domain language: the project's own words, agreed once, so you, the agent and your colleagues do not have to work them out again. Not everyone agrees that this improves agent performance. The strongest objection is that a term and its plain-English expansion get the same result from the model, and that the vocabulary mainly shortens communication between the humans who share it. On that view the glossary is still valuable, but the value goes to the humans.
 
@@ -80,7 +80,7 @@ Nobody is happy with the name. There is an open suggestion to rename it `grill-d
 
 ## Where it fits
 
-`grill` is the head of the main build chain:
+`grill` is where the creation flow starts, the head of the main build chain:
 
 ```txt
 grill → spec-gen → ticket-gen → implement → code-review → retro

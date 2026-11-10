@@ -1,6 +1,6 @@
 ## What it does
 
-`bg-setup` answers three questions about one repo: where issues live, what the triage labels are called, and where the domain docs sit. It records the answers as markdown files under `docs/agents/`.
+`bg-setup` answers four questions about one repo: where issues live, what the triage labels are called, where the domain docs sit, and which model builds each ticket tier and runs each subagent task. It records the answers as markdown files under `docs/agents/`.
 
 Those files are the only thing that varies between repos. The skills themselves are identical everywhere. They read `docs/agents/issue-tracker.md` at run time and do what it says. That is why the set is not tied to GitHub, and why you never edit a skill file to point it at another tracker. Invoking it with "link the skills to a custom issue tracker" works with anything you can connect to programmatically, with no changes to the skills.
 
@@ -23,11 +23,12 @@ It writes into the repo you run it in:
 | `issue-tracker.md` | `docs/agents/` |
 | `domain.md` | `docs/agents/` |
 | `triage-labels.md` | `docs/agents/`, only when the `triage` skill is installed |
+| `models.md` | `docs/agents/` |
 | An `## Agent skills` block | whichever of `CLAUDE.md` or `AGENTS.md` already exists |
 
 You commit all of it as markdown. There is no user-level or global mode. The config lives in the repo, so every repo gets its own copy.
 
-## The three decisions
+## The four decisions
 
 It starts each section with the recommended answer, and skips any question its exploration already answered. Most runs need only two confirmations.
 
@@ -36,6 +37,7 @@ It starts each section with the recommended answer, and skips any question its e
 | **Issue tracker** | the one matching your `git remote` | always, because this is the one real choice |
 | **Triage labels** | keep the five canonical names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) | only if the `triage` skill is installed |
 | **Domain docs** | single-context: one `GLOSSARY.md` plus `docs/adr/` at the root | only if it spots monorepo signals, and then it offers a multi-context `GLOSSARY-MAP.md` |
+| **Models** | Haiku for Mechanical tickets, Sonnet for Standard, the top model for Hard; exploration on the Mechanical model, merging and Standards review on the Standard model, Spec review on the Hard model | always; on a harness without those names it offers its smallest, middle and largest models instead |
 
 The tracker options:
 
@@ -62,7 +64,7 @@ The direct answer after v1.1 was yes. The skill's own closing message is softer.
 
 **Will a re-run overwrite lines I added to the `## Agent skills` block?**
 
-No. Setup knows its own lines by their prefixes (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`) and rewrites only those. Any other line in the block is yours: the draft lists them and asks "Keep these N lines you added?" Say yes and they stay unchanged, in their own paragraph below the list; say no and they are removed. It asks again on every re-run. A block in the older format, with a `###` heading per topic, is converted to the list, and your lines in it get the same question.
+No. Setup knows its own lines by their prefixes (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`) and rewrites only those. Any other line in the block is yours: the draft lists them and asks "Keep these N lines you added?" Say yes and they stay unchanged, in their own paragraph below the list; say no and they are removed. It asks again on every re-run. A block in the older format, with a `###` heading per topic, is converted to the list, and your lines in it get the same question.
 
 **It wrote to `CLAUDE.md`, but I'm on Codex.**
 
@@ -88,8 +90,8 @@ One long-standing complaint says yes, in these words: *"having a skill to set up
 
 ## It's working if
 
-- `docs/agents/issue-tracker.md` and `docs/agents/domain.md` exist, plus `triage-labels.md` if `triage` is installed.
-- An `## Agent skills` section appears in the instruction file your harness reads, as a list of up to three pointers (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`). Only the tracker line says more than "see" the file: it names the host and repo. The triage line appears only if `triage` is installed, and the block has no marker comments.
+- `docs/agents/issue-tracker.md`, `docs/agents/domain.md` and `docs/agents/models.md` exist, plus `triage-labels.md` if `triage` is installed.
+- An `## Agent skills` section appears in the instruction file your harness reads, as a list of up to four pointers (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`). Only the tracker line says more than "see" the file: it names the host and repo. The triage line appears only if `triage` is installed, and the block has no marker comments.
 - The tracker it proposed matches the remote you use, and the label strings match labels that exist in your tracker.
 - Afterwards, `/ticket-gen` publishes without asking you where issues live, and `/triage` applies labels rather than inventing them.
 - Nothing in the skill files themselves changed. If setup edited a `SKILL.md`, something went wrong.

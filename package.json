@@ -12,7 +12,9 @@
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-plugin-version.mjs",
     "check-plugin-version": "node scripts/sync-plugin-version.mjs --check",
-    "test:decomp": "python scripts/test-decomp.py"
+    "test:decomp": "python scripts/test-decomp.py",
+    "check-skills": "node scripts/check-skills.mjs",
+    "test:check-skills": "node scripts/test-check-skills.mjs"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",

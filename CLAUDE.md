@@ -12,7 +12,7 @@ On adding, renaming, removing, or moving a skill between buckets:
 - **[`skill-map`](./skills/engineering/skill-map/SKILL.md):** update for any user-reachable skill, including changes to how it fits the flows.
 - **Links:** re-run `scripts/link-skills.sh`.
 
-Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install commands: copy verbatim from [.agents/install-block.md](./.agents/install-block.md). After touching `plugin.json` or `marketplace.json`, run `claude plugin validate . --strict` ([ADR 0002](./.agents/adr/0002-ship-as-a-claude-code-plugin.md)).
+Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install commands: copy verbatim from [.agents/install-block.md](./.agents/install-block.md). After touching `plugin.json` or `marketplace.json`, run `claude plugin validate .`: the `CLAUDE.md` warning at the plugin root is expected and does not block work, and strict mode is not a gate ([ADR 0002](./.agents/adr/0002-ship-as-a-claude-code-plugin.md)).
 
 ## Writing rules
 
