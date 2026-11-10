@@ -1,6 +1,6 @@
 ---
 name: spec-gen
-description: "Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed."
+description: Turn the current conversation into a spec and publish it to the issue tracker, without an interview.
 disable-model-invocation: true
 ---
 
