@@ -219,7 +219,7 @@ def read_edges(tickets):
         for blocker in re.findall(r"\d+", line.group(1) if line else ""):
             other = files.get(numeric(blocker))
             body = other.read_text(encoding="utf-8") if other else ""
-            done = bool(re.search(r"^Status:\s*resolved", body, re.M | re.I))
+            done = bool(re.search(r"^Status:\s*resolved\b", body, re.M | re.I))
             edges[ticket].append((blocker, done))
     return edges
 
