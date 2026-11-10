@@ -34,8 +34,16 @@ The contract names exact tools. Provisioning puts those tools on this machine, r
       },
       "unpack": ["<command using {archive}, {root}, and {tools}>"],
       "files": ["VC/bin/cl.exe", "SDK/Include/windows.h"],
-      "banner_cmd": "\"{root}/VC/bin/cl.exe\"",
+      "banner_cmd": "\"{python}\" \"{tools}/run_tool.py\" compiler",
       "banner": "<exact version string the tool prints>"
+    },
+    {
+      "name": "sdk",
+      "product": "<exact product and version>",
+      "installed_by": "user",
+      "files": ["Include/windows.h"],
+      "banner_file": "Include/sdkver.h",
+      "banner": "<exact version string the file holds>"
     }
   ]
 }
@@ -45,7 +53,9 @@ The contract names exact tools. Provisioning puts those tools on this machine, r
 - `prerequisites` are what the host must already have: an archive tool, a compatibility layer. `doctor` runs each `version_cmd` before it looks at any tool, and stops at the first whose output lacks `version`, naming it. `provision` never downloads one: the user installs it.
 - `name` is how adapters find the tool: `decomp.py` exports each tool's folder as `DECOMP_TOOL_<NAME>` and the target's path as `DECOMP_TARGET`. Adapters and `banner_cmd` use those and `{root}`, never an absolute path.
 - `files` lists everything a build needs that an incomplete install tends to lack (the compiler binary, the platform headers the sources include).
-- `banner` is a literal substring of what `banner_cmd` prints, on stdout or stderr. It carries the full version, so a neighbouring build cannot pass.
+- `banner` is required on every tool. It is a literal substring of what `banner_cmd` prints, on stdout or stderr, and it carries the full version, so a neighbouring build cannot pass. A `banner_cmd` runs the tool through [the wrapper](#the-wrapper), never directly.
+- `banner_file` pins a tool that has no executable to run (a platform SDK made of headers). It is a path relative to the tool's root, in place of `banner_cmd`. `decomp.py` reads the file itself, in whatever encoding it holds, and passes when `banner` is a substring of its contents. A tool has exactly one of `banner_file` and `banner_cmd`: `doctor` exits 6 on both, on neither, and on a banner file that is missing.
+- Every command in the manifest (`version_cmd`, `unpack`, `banner_cmd`) runs through the host's shell: `cmd.exe` on Windows, `sh` elsewhere. `{root}` and `{tools}` are already native paths, so a path continued from one uses the host's separator (`{root}\VC\bin\cl.exe` on Windows) wherever a host program reads it as a file argument. A command that must differ per system gets one entry per host (see `hosts`). Python takes `/` on every host, which is why the wrapper's path is written `{tools}/run_tool.py`.
 - `unpack` steps run in the downloads folder. `{tools}` is the project's `tools/` folder, so a step can run a script the project ships (see [Unpack scripts](#unpack-scripts)). `{python}` is the interpreter running `decomp.py`: write it, never a bare `python`, in every command the manifest or `decomp.json` holds, because some systems have only `python3`.
 - `hosts` limits a prerequisite or a tool entry to the systems whose `sys.platform` starts with one of its values (`win32`, `linux`, `darwin`). Without it the entry applies everywhere. A tool that needs another archive, other files, or another banner per system gets one entry per host under the same `name`.
 - A tool the user installs has `"installed_by": "user"` and no `source` or `unpack`.
