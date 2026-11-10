@@ -183,13 +183,7 @@ def test_status_flags_a_deleted_branch(base):
 def ticket_file(p, num, blocked_by=(), status="ready-for-agent"):
     """Commit a local-tracker ticket file: .scratch/feat/issues/NN-t.md with a Blocked by line."""
     edges = ", ".join(f"{b:02d}" for b in blocked_by) or "None"
-    text = f"# Ticket {num}
-
-Status: {status}
-Blocked by: {edges}
-
-Body.
-"
+    text = chr(10).join([f"# Ticket {num}", "", f"Status: {status}", f"Blocked by: {edges}", "", "Body.", ""])
     p.commit(f".scratch/feat/issues/{num:02d}-t.md", text, f"ticket {num}")
 
 
