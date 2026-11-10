@@ -1236,7 +1236,7 @@ def test_link_takes_a_fully_matched_unit_from_source_and_a_partly_matched_one_fr
 
 def link_events(p):
     path = p.root / "ledger" / "events.jsonl"
-    return [e for e in map(json.loads, p_.read_text().splitlines()) if e["event"] == "link"] if p_.exists() else []
+    return [e for e in map(json.loads, path.read_text().splitlines()) if e["event"] == "link"] if path.exists() else []
 
 
 def ticket_texts(p):
