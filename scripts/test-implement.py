@@ -180,6 +180,115 @@ def test_status_flags_a_deleted_branch(base):
     expect(line.endswith(" missing=worktree,branch"), f"status should flag both: {line!r}")
 
 
+def work(p, wt, rel, text, msg):
+    (wt / rel).write_text(text, encoding="utf-8", newline="\n")
+    p.git("add", "-A", cwd=wt)
+    p.git("commit", "-q", "-m", msg, cwd=wt)
+
+
+def py(code):
+    return f'"{sys.executable}" -c "{code}"'
+
+
+def test_test_passes_and_logs_the_full_output(base):
+    p = begun(base)
+    _, _, wt = start(p, "1")
+    r = p.run("test", "1", py("import os;print(os.getcwd());print('line two')"))
+    expect(r.returncode == OK and r.stdout.startswith("test: pass log="), "a passing command", r)
+    log = Path(r.stdout.strip().split("log=", 1)[1])
+    text = log.read_text(encoding="utf-8")
+    expect("line two" in text and wt.name in text, f"the log holds the output from the worktree: {text!r}")
+
+
+def test_test_fails_with_a_nonzero_exit_and_keeps_the_log(base):
+    p = begun(base)
+    start(p, "1")
+    r = p.run("test", "1", py("import sys;print('boom');print('err', file=sys.stderr);sys.exit(3)"))
+    expect(r.returncode not in (OK, CONFLICT, USAGE, ENV) and r.stdout.startswith("test: fail log="), "a failing command", r)
+    text = Path(r.stdout.strip().split("log=", 1)[1]).read_text(encoding="utf-8")
+    expect("boom" in text and "err" in text, f"the log holds stdout and stderr: {text!r}")
+    r = p.run("test", "9", "true")
+    expect(r.returncode == USAGE, "a ticket outside the batch", r)
+
+
+def test_merge_brings_the_ticket_commits_into_the_integration_branch(base):
+    p = begun(base)
+    _, branch, wt = start(p, "1")
+    work(p, wt, "one.txt", "1\n", "ticket one")
+    r = p.run("merge", "1")
+    expect(r.returncode == OK and r.stdout.strip() == "merge: merged", "a clean merge", r)
+    expect(p.git("show", f"{INTEGRATION}:one.txt") == "1", "the integration branch has the commit")
+    expect(p.ledger()["tickets"]["1"]["state"] == "merged", "the ledger records the merge")
+    tip = p.git("rev-parse", INTEGRATION)
+    r = p.run("merge", "1")
+    expect(r.returncode == OK and r.stdout.strip() == "merge: merged", "a rerun reports merged", r)
+    expect(p.git("rev-parse", INTEGRATION) == tip, "no second merge commit")
+
+
+def test_merge_recovers_when_the_ledger_missed_a_completed_merge(base):
+    p = begun(base)
+    _, branch, wt = start(p, "1")
+    work(p, wt, "one.txt", "1\n", "ticket one")
+    p.git("worktree", "add", "-q", str(p.base / "tmp-int"), INTEGRATION)
+    p.git("merge", "-q", "--no-ff", "-m", "manual", branch, cwd=p.base / "tmp-int")
+    p.git("worktree", "remove", "--force", str(p.base / "tmp-int"))
+    tip = p.git("rev-parse", INTEGRATION)
+    r = p.run("merge", "1")
+    expect(r.returncode == OK and r.stdout.strip() == "merge: merged", "merge after a crash", r)
+    expect(p.git("rev-parse", INTEGRATION) == tip and p.ledger()["tickets"]["1"]["state"] == "merged",
+           "the ledger catches up without a new merge")
+
+
+def test_merge_of_a_conflicting_branch_reports_the_files_and_aborts(base):
+    p = begun(base)
+    _, _, wt1 = start(p, "1")
+    _, _, wt2 = start(p, "2")
+    work(p, wt1, "src.txt", "ticket one\n", "one edits")
+    work(p, wt2, "src.txt", "ticket two\n", "two edits")
+    expect(p.run("merge", "1").returncode == OK, "first merge")
+    tip = p.git("rev-parse", INTEGRATION)
+    r = p.run("merge", "2")
+    expect(r.returncode == CONFLICT and r.stdout.strip() == "merge: conflict files=src.txt", "a conflict", r)
+    expect(p.git("rev-parse", INTEGRATION) == tip, "the integration branch is untouched")
+    common = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir"))
+    expect(not list(common.glob("worktrees/*/MERGE_HEAD")), "no merge is left in progress")
+    expect(p.ledger()["tickets"]["2"]["state"] == "claimed", "a conflicting ticket stays claimed")
+    r = p.run("merge", "2")
+    expect(r.returncode == CONFLICT, "a retry can run again", r)
+
+
+def test_fail_frees_the_ticket_and_counts_the_attempt(base):
+    p = begun(base)
+    start(p, "1")
+    r = p.run("fail", "1")
+    expect(r.returncode == OK and r.stdout.strip() == "fail: ticket 1 attempts=1", "fail prints the count", r)
+    expect(status_lines(p)["1"].startswith("ticket 1 failed Standard attempts=1"), "status shows the attempt")
+    start(p, "1")
+    r = p.run("fail", "1")
+    expect(r.stdout.strip() == "fail: ticket 1 attempts=2", "the second attempt counts", r)
+    r = p.run("fail", "2")
+    expect(r.returncode == USAGE, "only a claimed ticket can fail", r)
+
+
+def test_clean_removes_merged_and_failed_tickets_only(base):
+    p = begun(base, "1", "2", "3", "4")
+    _, b1, w1 = start(p, "1")
+    _, b2, w2 = start(p, "2")
+    _, b3, w3 = start(p, "3")
+    work(p, w1, "one.txt", "1\n", "one")
+    expect(p.run("merge", "1").returncode == OK, "merge")
+    expect(p.run("fail", "2").returncode == OK, "fail")
+    r = p.run("clean")
+    expect(r.returncode == OK and r.stdout.strip() == "clean: 2 removed", "clean prints the count", r)
+    listing = p.git("worktree", "list", "--porcelain")
+    expect(w1.as_posix() not in listing and w2.as_posix() not in listing, "no worktree for cleaned tickets")
+    expect(w3.as_posix() in listing and p.has_branch(b3), "a claimed ticket stays")
+    expect(not p.has_branch(b1) and not p.has_branch(b2) and not w1.exists(), "branches and directories gone")
+    expect(p.run("clean").stdout.strip() == "clean: 0 removed", "a second clean removes nothing")
+    start(p, "2")
+    expect(p.ledger()["tickets"]["2"]["state"] == "claimed", "a cleaned failed ticket can start again")
+
+
 def ticket_file(p, num, blocked_by=(), status="ready-for-agent"):
     """Commit a local-tracker ticket file: .scratch/feat/issues/NN-t.md with a Blocked by line."""
     edges = ", ".join(f"{b:02d}" for b in blocked_by) or "None"
@@ -271,7 +380,8 @@ def test_outside_a_git_repository_every_command_is_an_environment_problem(base):
     outside = p.base / "plain"
     outside.mkdir()
     env = {"GIT_CEILING_DIRECTORIES": str(p.base)}
-    for args in (("begin", INTEGRATION, "1"), ("start", "1"), ("status",)):
+    for args in (("begin", INTEGRATION, "1"), ("start", "1"), ("status",), ("test", "1", "true"),
+                 ("merge", "1"), ("fail", "1"), ("clean",)):
         r = p.run(*args, cwd=outside, env=env)
         expect(r.returncode == ENV and "not a git repository" in r.stderr, f"{args[0]} outside a repo", r)
     expect(list(outside.iterdir()) == [], "nothing should be written outside a repository")
