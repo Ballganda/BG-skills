@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Tests of the static skills check at its one seam: the command line.
 // Runs scripts/check-skills.mjs against the real tree (expects exit 0) and
-// against mutated temp copies of the skills tree (expects non-zero).
+// against mutated temp copies of the tree (expects non-zero).
 // Run: node scripts/test-check-skills.mjs
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,20 +18,28 @@ const script = join(repo, "scripts", "check-skills.mjs");
 const run = (root) =>
   spawnSync(process.execPath, [script, ...(root ? [root] : [])], { encoding: "utf8" });
 
-// Copy the skills and agents trees, apply a mutation to one file (a path under
-// skills/, or under the repo root when `fromRoot`), run the check, clean up.
-function mutated(file, mutate, fromRoot = false) {
+// Copy the checked trees into a temp dir, let `change` edit the copy, run the
+// check, clean up.
+function withCopy(change) {
   const dir = mkdtempSync(join(tmpdir(), "check-skills-"));
   try {
-    cpSync(join(repo, "skills"), join(dir, "skills"), { recursive: true });
-    cpSync(join(repo, "agents"), join(dir, "agents"), { recursive: true });
-    const path = fromRoot ? join(dir, file) : join(dir, "skills", file);
-    writeFileSync(path, mutate(readFileSync(path, "utf8")));
+    for (const tree of ["skills", "agents", ".claude-plugin"]) {
+      cpSync(join(repo, tree), join(dir, tree), { recursive: true });
+    }
+    change(dir);
     return run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// Apply a mutation to one text file (a path under skills/, or under the repo
+// root when `fromRoot`) in a copy of the tree and run the check.
+const mutated = (file, mutate, fromRoot = false) =>
+  withCopy((dir) => {
+    const path = fromRoot ? join(dir, file) : join(dir, "skills", file);
+    writeFileSync(path, mutate(readFileSync(path, "utf8")));
+  });
 
 const dropLine = (needle) => (text) =>
   text
@@ -146,3 +154,49 @@ for (const [name, needle] of implementFormats) {
     assert.match(r.stderr, /implement.*format/);
   });
 }
+
+const iconRel = join(".claude-plugin", "icon.png");
+
+test("fails when the plugin icon is missing", () => {
+  const r = withCopy((dir) => unlinkSync(join(dir, iconRel)));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /icon/);
+});
+
+// A PNG signature and IHDR chunk of the given size, padded to `bytes` long.
+// Only the header is real: enough for a check that reads width and height.
+function fakePng(width, height, bytes = 64) {
+  const png = Buffer.alloc(bytes);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+  png.writeUInt32BE(13, 8);
+  png.write("IHDR", 12, "ascii");
+  png.writeUInt32BE(width, 16);
+  png.writeUInt32BE(height, 20);
+  return png;
+}
+
+const withIcon = (png) => withCopy((dir) => writeFileSync(join(dir, iconRel), png));
+
+test("fails when the plugin icon is not square", () => {
+  const r = withIcon(fakePng(1024, 768));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /icon.*square/);
+});
+
+test("fails when the plugin icon is under 512 px", () => {
+  const r = withIcon(fakePng(511, 511));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /icon.*512 to 2048/);
+});
+
+test("fails when the plugin icon is over 2 MB", () => {
+  const r = withIcon(fakePng(1024, 1024, 2 * 1024 * 1024 + 1));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /icon.*2 MB/);
+});
+
+test("fails when the plugin icon is over 2048 px", () => {
+  const r = withIcon(fakePng(2049, 2049));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /icon.*512 to 2048/);
+});
