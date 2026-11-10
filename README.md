@@ -114,7 +114,7 @@ This is just the same in the AI age. There is a communication gap between you an
 - [`/grill-me`](./skills/productivity/grill-me/SKILL.md): a plain grilling session, for non-code uses
 - [`/grill`](./skills/engineering/grill/SKILL.md): the same session, but it also builds your project's domain model as it goes (see #2)
 
-`/grill` is the start of the build chain: `/grill` → [`/spec-gen`](./skills/engineering/spec-gen/SKILL.md) → [`/ticket-gen`](./skills/engineering/ticket-gen/SKILL.md) → [`/implement`](./skills/engineering/implement/SKILL.md) → [`/code-review`](./skills/engineering/code-review/SKILL.md). It writes no code and no spec. Once you reach a shared understanding, it stops and hands you to `/spec-gen`, which turns the conversation into a spec without interviewing you again.
+`/grill` is where the creation flow starts, the first step of the build chain: `/grill` → [`/spec-gen`](./skills/engineering/spec-gen/SKILL.md) → [`/ticket-gen`](./skills/engineering/ticket-gen/SKILL.md) → [`/implement`](./skills/engineering/implement/SKILL.md) → [`/code-review`](./skills/engineering/code-review/SKILL.md). It writes no code and no spec. Once you reach a shared understanding, it stops and hands you to `/spec-gen`, which turns the conversation into a spec without interviewing you again.
 
 These are the core skills of this repo. They help you align with the agent before you get started, and think deeply about the change you're making. Use them _every_ time you want to make a change.
 

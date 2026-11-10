@@ -24,7 +24,9 @@ Reach for it when the build is too big for one agent session and must be split a
 
 ## The spec is a decision record
 
-The spec exists because context windows end. You settled many things while grilling: the shape of the solution, the choices you argued through, and what you deliberately refused. All of that is in one conversation that you are about to clear. The spec keeps it.
+The spec exists because context windows end. You settled many things while grilling: the shape of the solution, the choices you argued through, and what you deliberately refused. All of that is in one conversation that will eventually end. The spec keeps it.
+
+The skill's closing message ends with one line: if your context is over 150k, it is suggested to clear or start a new chat before `/ticket-gen`. The agent cannot read its own token count, so the line is conditional on what you see. Under 150k, carry straight on.
 
 So the spec does not validate or decide anything. It records what you decided, in your project's own vocabulary, so a fresh session can pick up the work without you explaining it again. If the spec states something you never said, that is a defect.
 

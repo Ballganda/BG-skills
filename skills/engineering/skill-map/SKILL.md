@@ -14,9 +14,9 @@ A **flow** is a path through the skills. Most paths run along one **main flow**,
 
 ## The main flow: idea → ship
 
-The route most work travels. You have an idea and want it built.
+The route most work travels. You have an idea and want it built. The creation flow starts at `/grill` and runs `grill → spec-gen → ticket-gen → implement → code-review`.
 
-1. **`/grill`** sharpens the idea by interview. Start here whenever you are **working in a working directory**: it's stateful, retaining what it learns in `GLOSSARY.md` and ADRs, and writing nothing else. It ends by asking whether you're ready for a spec, then waits for you to type `/spec-gen`; it never moves on by itself. (No working directory? Use `/grill-me` instead, covered under Standalone. Both run the same `/grilling` primitive; `grill` is the one that leaves a paper trail, which makes it the better of the two whenever a repo is there to leave it in.)
+1. **`/grill`** is where the creation flow starts. It sharpens the idea by interview. Start here whenever you are **working in a working directory**: it's stateful, retaining what it learns in `GLOSSARY.md` and ADRs, and writing nothing else. It ends by asking whether you're ready for a spec, then waits for you to type `/spec-gen`; it never moves on by itself. (No working directory? Use `/grill-me` instead, covered under Standalone. Both run the same `/grilling` primitive; `grill` is the one that leaves a paper trail, which makes it the better of the two whenever a repo is there to leave it in.)
 2. **Branch: can you settle every question in conversation?** If a question needs a runnable answer (state, business logic, a UI you have to see), detour through a prototype, bridged by **`/handoff`** in both directions (a prototype lives in its own directory, which is exactly what `/handoff` is for; see Phase boundaries):
    - **`/handoff`** out, then open a fresh session against that file,
    - **`/prototype`** to answer the question with throwaway code,
@@ -33,9 +33,16 @@ The route most work travels. You have an idea and want it built.
 
 ### Context hygiene
 
-Keep steps 1–3 in **one unbroken context window** (don't compact or clear until after `/ticket-gen`) so the grilling, spec, and tickets all build on the same thinking. `/implement` then keeps its own window small by giving every ticket to a fresh-context subagent. Run `/retro` in the session it's looking back on, before you clear; after clearing, point it at that session's log instead.
+Each skill in the creation flow ends with one line about the next step:
 
-The limit on this is the **smart zone**: the window (~150k tokens on state-of-the-art models) within which the model still reasons sharply. If a session approaches it before `/ticket-gen`, don't push on degraded; `/compact` at the nearest phase boundary and carry on (see Phase boundaries).
+| After | Next | Advice |
+| --- | --- | --- |
+| `/grill` | `/spec-gen` | Stay in this session. |
+| `/spec-gen` | `/ticket-gen` | If your context is over 150k, it is suggested to clear or start a new chat before /ticket-gen. |
+| `/ticket-gen` | `/implement` | Always start a new chat. |
+| `/implement` | `/code-review` | Always start a new chat. |
+
+The limit behind the 150k line is the **smart zone**: the window (~150k tokens on state-of-the-art models) within which the model still reasons sharply. The agent cannot read its own token count, so the line is conditional on what you see. If a session grows past it mid-phase, `/compact` at the nearest phase boundary (see Phase boundaries). `/implement` keeps its own window small by giving every ticket to a fresh-context subagent. Run `/retro` in the session it's looking back on, before you clear; after clearing, point it at that session's log instead.
 
 ## On-ramps
 

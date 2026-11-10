@@ -51,6 +51,8 @@ Publish in dependency order (blockers first), using the tracker doc's operations
 
 The **frontier** is every ticket whose blockers are all done. Do NOT close or modify any parent issue.
 
+End the closing message with this line: Always start a new chat before `/implement`.
+
 Acceptance criteria are testable checks only; never restate What to build. No file paths or code snippets, except a prototype snippet that encodes a decision more precisely than prose (trimmed, noted as from a prototype).
 
 <local-ticket-template>

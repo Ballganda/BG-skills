@@ -11,6 +11,7 @@ Synthesize the current conversation and codebase understanding into a spec. Do N
 1. Explore only the modules this spec touches, and skip this when the conversation already covered them. Use the project's glossary vocabulary and respect ADRs in the area.
 2. Sketch the test seams: prefer existing seams, use the highest seam possible, and propose new ones as high as you can. Fewer is better; one is ideal. Confirm the seams with the user.
 3. Write the spec from the template, then publish it to the issue tracker with the `ready-for-agent` triage label.
+4. End the closing message with this line, word for word: If your context is over 150k, it is suggested to clear or start a new chat before /ticket-gen.
 
 ## Template
 

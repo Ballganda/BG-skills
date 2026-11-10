@@ -45,6 +45,8 @@ Everything from a ticket batch lands on one branch. Each implementer works in it
 
 Implementers talk to the orchestrator through context pointers (the spec, the ticket, shared exploration notes, earlier commits) rather than pasted summaries, and report back in under 100 words. That is what keeps the orchestrator's window small across a long batch.
 
+When the run ends, the closing message tells you to always start a new chat before `/code-review`, so the review starts from the diff and the spec alone.
+
 Chat work skips all of this. Its one implementer works in your current checkout with no worktree, builds with `tdd` the same way, and commits straight to the branch you are on.
 
 A pull request opens only if your tracker closes work through PRs or you ask for one. Otherwise the run stops on the integration branch with every ticket resolved, which works fully offline against a local markdown tracker.

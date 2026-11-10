@@ -44,4 +44,4 @@ A Ticket is ready when every blocker is merged into the integration branch. N is
 7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done). Report: integration branch, Tickets done, Tickets skipped and why.
 8. Remove the implementer worktrees.
 
-Don't review: review is a separate stage, so suggest `/code-review` when done.
+Don't review: review is a separate stage, so suggest `/code-review` when done. End the closing message with this line: Always start a new chat before `/code-review`.
