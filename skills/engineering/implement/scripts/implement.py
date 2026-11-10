@@ -3,7 +3,8 @@
 
 Commands:
   begin INTEGRATION TICKET[:TIER]...  create or reuse the integration branch, open the run's ledger
-  ready [--cap N]                     list batch tickets whose blockers are merged, up to the free slots
+  ready [--cap N] [--tracker T]       list batch tickets whose blockers are merged, up to the free slots
+                                      (T: local, github, or any other name, which exits with the environment code)
   start TICKET [--slug TEXT]          claim a ticket, create or reuse its worktree and branch
   status                              one line per batch ticket
   test TICKET COMMAND                 run COMMAND in the ticket's worktree, log the output
@@ -20,6 +21,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -205,8 +207,7 @@ def read_edges(tickets):
     """Blocking edges of the given tickets, read from the local tracker's ticket files.
 
     Returns {ticket: [(blocker, finished), ...]}: finished is whether the blocker's own
-    ticket file says resolved. This is the one place readiness touches a tracker; a
-    GitHub source replaces this function and nothing else.
+    ticket file says resolved.
     """
     main = Path(out("rev-parse", "--path-format=absolute", "--git-common-dir")).parent
     files = {}
@@ -230,15 +231,51 @@ def read_edges(tickets):
     return edges
 
 
+def gh_json(path):
+    """GET a GitHub REST path through the gh command (IMPLEMENT_GH overrides it) and parse the JSON."""
+    cmd = shlex.split(os.environ.get("IMPLEMENT_GH") or "gh", posix=True)
+    try:
+        r = subprocess.run([*cmd, "api", "repos/{owner}/{repo}/" + path], capture_output=True, text=True)
+    except OSError as e:
+        raise Stop(ENV, f"cannot run {cmd[0]}: {e}")
+    if r.returncode:
+        raise Stop(ENV, f"{cmd[0]} api {path}: {r.stderr.strip() or 'exit ' + str(r.returncode)}")
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        raise Stop(ENV, f"{cmd[0]} api {path}: not JSON")
+
+
+def read_edges_github(tickets):
+    """The same edges as read_edges, from GitHub: native blocked-by dependencies, plus a Blocked by line.
+
+    A blocker is finished when its issue is closed.
+    """
+    edges = {}
+    for ticket in tickets:
+        n = numeric(ticket)
+        issue = gh_json(f"issues/{n}")
+        known = {str(d["number"]): d.get("state") == "closed" for d in gh_json(f"issues/{n}/dependencies/blocked_by")}
+        line = re.search(r"^Blocked by:(.*)$", issue.get("body") or "", re.M | re.I)
+        for blocker in re.findall(r"\d+", line.group(1) if line else ""):
+            if numeric(blocker) not in known:
+                known[numeric(blocker)] = gh_json(f"issues/{numeric(blocker)}").get("state") == "closed"
+        edges[ticket] = list(known.items())
+    return edges
+
+
 def cmd_ready(store, args):
     if args.cap < 1:
         raise Stop(USAGE, f"bad cap: {args.cap}")
+    if args.tracker not in ("local", "github"):
+        raise Stop(ENV, f"ready cannot read the {args.tracker} tracker: the orchestrator must compute readiness"
+                        " and pass ticket ids to start")
     with store:
         ledger = store.load()
         batch = {numeric(t): t for t in ledger["tickets"]}
         entries = ledger["tickets"]
         candidates = [t for t, e in entries.items() if e["state"] in ("open", "failed", "skipped")]
-        edges = read_edges(candidates)
+        edges = (read_edges_github if args.tracker == "github" else read_edges)(candidates)
         slots = args.cap - sum(1 for e in entries.values() if e["state"] == "claimed")
         listed = []
         for ticket in candidates:
@@ -449,6 +486,8 @@ def parser():
     b.add_argument("--worktree-root", help="directory for ticket worktrees (default: beside the main checkout)")
     r = sub.add_parser("ready", help="list batch tickets whose blockers are merged, up to the free slots")
     r.add_argument("--cap", type=int, default=DEFAULT_CAP, help=f"concurrency cap (default {DEFAULT_CAP})")
+    r.add_argument("--tracker", default="local",
+                   help="where blocking edges live: local, github, or another tracker (default local)")
     s = sub.add_parser("start", help="claim a ticket and create or reuse its worktree and branch")
     s.add_argument("ticket", help="a batch ticket id")
     s.add_argument("--slug", help="suffix for a new branch name: ticket-ID-SLUG")

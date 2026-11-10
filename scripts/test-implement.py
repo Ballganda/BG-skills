@@ -421,6 +421,77 @@ def test_parallel_starts_all_land_in_the_ledger(base):
     expect(all(t["state"] == "claimed" for t in tickets.values()), f"every start recorded: {tickets}")
 
 
+FAKE_GH = r"""
+import json, os, sys
+canned = json.load(open(os.environ["FAKE_GH_DATA"], encoding="utf-8"))
+key = sys.argv[-1].split("issues/", 1)[1]
+if key not in canned:
+    sys.stderr.write("HTTP 404: " + key + chr(10))
+    sys.exit(1)
+print(json.dumps(canned[key]))
+"""
+
+
+def fake_gh(p, issues):
+    """A fake gh: issues maps number to (state, blocked_by numbers, body). Returns the tracker env."""
+    canned = {}
+    for n, (state, blockers, body) in issues.items():
+        canned[str(n)] = {"number": n, "state": state, "body": body}
+        canned[f"{n}/dependencies/blocked_by"] = [
+            {"number": b, "state": issues[b][0] if b in issues else "open"} for b in blockers]
+    data = p.base / "gh-data.json"
+    data.write_text(json.dumps(canned), encoding="utf-8")
+    script = p.base / "fake_gh.py"
+    script.write_text(FAKE_GH, encoding="utf-8")
+    return {"IMPLEMENT_GH": f"{Path(sys.executable).as_posix()} {script.as_posix()}", "FAKE_GH_DATA": str(data)}
+
+
+def gh_ready(p, env, *extra):
+    r = p.run("ready", "--tracker", "github", *extra, env=env)
+    expect(r.returncode == OK, "ready should succeed", r)
+    return [line.split() for line in r.stdout.splitlines()]
+
+
+def test_github_ready_lists_the_same_tickets_as_the_local_tracker(base):
+    p = begun(base, "1:mechanical", "2", "3:hard", "4")
+    env = fake_gh(p, {1: ("open", [], ""), 2: ("open", [1], ""), 3: ("open", [2], ""), 4: ("open", [9], ""),
+                      9: ("open", [], "")})
+    expect(gh_ready(p, env) == [["ticket", "1", "Mechanical"]], "only the head is ready")
+    expect(status_lines(p)["4"].startswith("ticket 4 skipped "), "a ticket blocked outside the batch is skipped")
+    set_state(p, "1", "merged")
+    expect(gh_ready(p, env) == [["ticket", "2", "Standard"]], "the next one after the head is merged")
+    env = fake_gh(p, {1: ("open", [], ""), 2: ("open", [1], ""), 3: ("open", [2], ""), 4: ("open", [9], ""),
+                      9: ("closed", [], "")})
+    expect([t[1] for t in gh_ready(p, env)] == ["2", "4"], "a closed outside blocker no longer skips")
+
+
+def test_github_ready_reads_a_blocked_by_line_when_there_are_no_native_dependencies(base):
+    p = begun(base, "1", "2")
+    env = fake_gh(p, {1: ("open", [], ""), 2: ("open", [], "Blocked by: #1, #9\n\nBody."), 9: ("open", [], "")})
+    expect([t[1] for t in gh_ready(p, env)] == ["1"], "the batch blocker and the open outside blocker hold ticket 2")
+    set_state(p, "1", "merged")
+    r = p.run("ready", "--tracker", "github", env=env)
+    expect(r.returncode == NOTHING_READY, "an open outside blocker still skips ticket 2", r)
+
+
+def test_github_ready_without_tracker_access_is_an_environment_problem(base):
+    p = begun(base, "1")
+    missing = {"IMPLEMENT_GH": (p.base / "no-such-gh").as_posix()}
+    r = p.run("ready", "--tracker", "github", env=missing)
+    expect(r.returncode == ENV and r.stderr.startswith("error: "), "missing gh command", r)
+    env = fake_gh(p, {})  # every call fails with a 404
+    r = p.run("ready", "--tracker", "github", env=env)
+    expect(r.returncode == ENV and "404" in r.stderr, "a failing gh call", r)
+
+
+def test_ready_on_another_tracker_asks_the_orchestrator_to_compute_readiness_and_start_still_works(base):
+    p = begun(base, "1", "2")
+    r = p.run("ready", "--tracker", "gitlab")
+    expect(r.returncode == ENV and "orchestrator" in r.stderr and "start" in r.stderr, "environment code and message", r)
+    line, branch, wt = start(p, "2")
+    expect(wt.is_dir() and branch == "ticket-2", f"start with an explicit id still works: {line!r}")
+
+
 def test_the_script_and_tests_contain_no_em_dashes(base):
     for path in (SCRIPT, Path(__file__)):
         expect(chr(0x2014) not in path.read_text(encoding="utf-8"), f"em-dash in {path}")
