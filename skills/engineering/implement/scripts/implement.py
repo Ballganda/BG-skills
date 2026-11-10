@@ -188,6 +188,47 @@ def cmd_begin(store, args):
     return OK
 
 
+def cmd_start(store, args):
+    ticket, _ = parse_ticket(args.ticket)
+    if args.slug is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", args.slug):
+        raise Stop(USAGE, f"bad slug: {args.slug}")
+    with store:
+        ledger = store.load()
+        integration = ledger["integration"]
+        entry = ledger["tickets"].get(ticket)
+        if entry is None:
+            raise Stop(USAGE, f"ticket {ticket} is not in the batch")
+        if entry["state"] not in ("open", "failed", "claimed"):
+            raise Stop(USAGE, f"ticket {ticket} is {entry['state']}")
+        if not branch_exists(integration):
+            raise Stop(ENV, f"integration branch {integration} is missing")
+        require_clean_integration(integration)
+        reused = entry["state"] == "claimed"
+        if not reused:
+            branch = f"ticket-{ticket}" + (f"-{args.slug}" if args.slug else "")
+            entry.update(state="claimed", attempts=entry["attempts"] + 1, branch=branch,
+                         worktree=(Path(ledger["worktree_root"]) / branch).as_posix())
+            store.save(ledger)  # claim first, so a crash below leaves a claim the next start completes
+        branch, path = entry["branch"], Path(entry["worktree"])
+        have = worktrees()
+        if branch in have:
+            if have[branch] != path.resolve().as_posix():
+                entry["worktree"] = have[branch]
+                store.save(ledger)
+        else:
+            reused = False
+            if path.exists():
+                raise Stop(ENV, f"{path} exists and is not the worktree of {branch}")
+            git("worktree", "prune")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if branch_exists(branch):
+                git("worktree", "add", "-q", str(path), branch)
+            else:
+                git("worktree", "add", "-q", "-b", branch, str(path), integration)
+    print(f"start: {'reused' if reused else 'created'} branch={entry['branch']} worktree={entry['worktree']}")
+    return OK
+
+
 def default_worktree_root():
     """A sibling of the main checkout, so worktrees never sit inside the tree."""
     main = Path(out("rev-parse", "--path-format=absolute", "--git-common-dir")).parent
@@ -207,10 +248,13 @@ def parser():
     b.add_argument("tickets", nargs="+", help="batch tickets as ID or ID:TIER")
     b.add_argument("--base", default="HEAD", help="where a new integration branch starts (default HEAD)")
     b.add_argument("--worktree-root", help="directory for ticket worktrees (default: beside the main checkout)")
+    s = sub.add_parser("start", help="claim a ticket and create or reuse its worktree and branch")
+    s.add_argument("ticket", help="a batch ticket id")
+    s.add_argument("--slug", help="suffix for a new branch name: ticket-ID-SLUG")
     return p
 
 
-COMMANDS = {"begin": cmd_begin}
+COMMANDS = {"begin": cmd_begin, "start": cmd_start}
 
 
 def main(argv=None):

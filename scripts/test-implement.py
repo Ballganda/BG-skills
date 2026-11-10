@@ -92,6 +92,59 @@ def test_begin_creates_the_integration_branch_then_reuses_it(base):
     expect(p.git("rev-parse", INTEGRATION) == tip, "the integration branch should start at HEAD")
     r = p.run("begin", INTEGRATION, "1", "2")
     expect(r.returncode == OK and r.stdout.strip() == f"begin: reused {INTEGRATION}", "begin should reuse", r)
+    common = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    expect(common == (p.root / ".git").resolve() and (common / "implement" / "runs").is_dir(),
+           "the ledger lives under the git directory")
+
+
+def begun(base, *tickets):
+    p = Project(base)
+    r = p.run("begin", INTEGRATION, *(tickets or ("1", "2:hard")), "--worktree-root", str(p.base / "wts"))
+    expect(r.returncode == OK, "begin should succeed", r)
+    p.commit("later.txt", "on main\n", "main moves on")  # the integration tip is not main's tip
+    return p
+
+
+def start(p, ticket, *extra):
+    r = p.run("start", ticket, *extra)
+    expect(r.returncode == OK, f"start {ticket} should succeed", r)
+    line = r.stdout.strip()
+    expect("\n" not in line, "start prints one line", r)
+    return line, field(line, "branch"), Path(field(line, "worktree"))
+
+
+def test_start_creates_a_worktree_and_branch_at_the_integration_tip(base):
+    p = begun(base)
+    line, branch, wt = start(p, "1")
+    expect(line.startswith("start: created "), f"start should say created: {line!r}")
+    expect(branch == "ticket-1" and p.has_branch(branch), f"branch ticket-1 should exist: {line!r}")
+    expect(wt.is_dir() and wt.parent == (p.base / "wts").resolve(), f"worktree under the root: {line!r}")
+    expect(p.git("rev-parse", "HEAD", cwd=wt) == p.git("rev-parse", INTEGRATION), "based on the integration tip")
+    expect(p.git("branch", "--show-current", cwd=wt) == branch, "the worktree has the ticket branch checked out")
+
+
+def test_start_names_the_branch_with_a_slug(base):
+    p = begun(base)
+    _, branch, _ = start(p, "2", "--slug", "script-core")
+    expect(branch == "ticket-2-script-core", f"slugged branch, got {branch}")
+
+
+def test_start_reuses_the_worktree_and_branch_of_a_claimed_ticket(base):
+    p = begun(base)
+    _, branch, wt = start(p, "1")
+    (wt / "work.txt").write_text("in progress\n")
+    line, branch2, wt2 = start(p, "1")
+    expect(line.startswith("start: reused ") and (branch2, wt2) == (branch, wt), f"reuse both: {line!r}")
+    expect((wt / "work.txt").exists(), "reuse keeps the work in the worktree")
+    expect(p.ledger()["tickets"]["1"]["attempts"] == 1, "a reuse is not a new attempt")
+
+
+def test_start_recreates_a_claimed_tickets_missing_worktree(base):
+    p = begun(base)
+    _, branch, wt = start(p, "1")
+    rmtree(wt)
+    line, branch2, wt2 = start(p, "1")
+    expect(wt2.is_dir() and branch2 == branch, f"start should rebuild the worktree: {line!r}")
 
 
 def rmtree(path):
