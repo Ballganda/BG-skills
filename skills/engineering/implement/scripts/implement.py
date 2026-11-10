@@ -3,6 +3,7 @@
 
 Commands:
   begin INTEGRATION TICKET[:TIER]...  create or reuse the integration branch, open the run's ledger
+  ready [--cap N]                     list batch tickets whose blockers are merged, up to the free slots
   start TICKET [--slug TEXT]          claim a ticket, create or reuse its worktree and branch
   status                              one line per batch ticket
 
@@ -31,6 +32,7 @@ TIERS = ("Mechanical", "Standard", "Hard")
 STATES = ("open", "claimed", "merged", "failed", "skipped")
 TICKET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 LOCK_WAIT = 30.0
+DEFAULT_CAP = 3
 
 
 class Stop(Exception):
@@ -188,6 +190,71 @@ def cmd_begin(store, args):
     return OK
 
 
+def numeric(ticket):
+    """A ticket id with leading zeros dropped, so 01 and 1 name the same ticket."""
+    return ticket.lstrip("0") or "0"
+
+
+def read_edges(tickets):
+    """Blocking edges of the given tickets, read from the local tracker's ticket files.
+
+    Returns {ticket: [(blocker, finished), ...]}: finished is whether the blocker's own
+    ticket file says resolved. This is the one place readiness touches a tracker; a
+    GitHub source replaces this function and nothing else.
+    """
+    main = Path(out("rev-parse", "--path-format=absolute", "--git-common-dir")).parent
+    files = {}
+    for path in sorted((main / ".scratch").glob("*/issues/*.md")):
+        m = re.match(r"^(\d+)-", path.name)
+        if m:
+            files[numeric(m.group(1))] = path
+    edges = {}
+    for ticket in tickets:
+        path = files.get(numeric(ticket))
+        if path is None:
+            raise Stop(ENV, f"no local ticket file for {ticket} under {main / '.scratch'}")
+        text = path.read_text(encoding="utf-8")
+        line = re.search(r"^Blocked by:(.*)$", text, re.M | re.I)
+        edges[ticket] = []
+        for blocker in re.findall(r"\d+", line.group(1) if line else ""):
+            other = files.get(numeric(blocker))
+            body = other.read_text(encoding="utf-8") if other else ""
+            done = bool(re.search(r"^Status:\s*resolved\b", body, re.M | re.I))
+            edges[ticket].append((blocker, done))
+    return edges
+
+
+def cmd_ready(store, args):
+    if args.cap < 1:
+        raise Stop(USAGE, f"bad cap: {args.cap}")
+    with store:
+        ledger = store.load()
+        batch = {numeric(t): t for t in ledger["tickets"]}
+        entries = ledger["tickets"]
+        candidates = [t for t, e in entries.items() if e["state"] in ("open", "failed", "skipped")]
+        edges = read_edges(candidates)
+        slots = args.cap - sum(1 for e in entries.values() if e["state"] == "claimed")
+        listed = []
+        for ticket in candidates:
+            blockers = edges[ticket]
+            outside = [b for b, done in blockers if numeric(b) not in batch and not done]
+            inside = [batch[numeric(b)] for b, _ in blockers if numeric(b) in batch]
+            if outside:
+                entries[ticket]["state"] = "skipped"
+            elif all(entries[b]["state"] == "merged" for b in inside):
+                if entries[ticket]["state"] == "skipped":
+                    entries[ticket]["state"] = "open"
+                if len(listed) < slots:
+                    listed.append(ticket)
+        store.save(ledger)
+    if not listed:
+        print("ready: none")
+        return NOTHING_READY
+    for ticket in listed:
+        print(f"ticket {ticket} {entries[ticket]['tier']}")
+    return OK
+
+
 def cmd_start(store, args):
     ticket, _ = parse_ticket(args.ticket)
     if args.slug is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", args.slug):
@@ -264,6 +331,8 @@ def parser():
     b.add_argument("tickets", nargs="+", help="batch tickets as ID or ID:TIER")
     b.add_argument("--base", default="HEAD", help="where a new integration branch starts (default HEAD)")
     b.add_argument("--worktree-root", help="directory for ticket worktrees (default: beside the main checkout)")
+    r = sub.add_parser("ready", help="list batch tickets whose blockers are merged, up to the free slots")
+    r.add_argument("--cap", type=int, default=DEFAULT_CAP, help=f"concurrency cap (default {DEFAULT_CAP})")
     s = sub.add_parser("start", help="claim a ticket and create or reuse its worktree and branch")
     s.add_argument("ticket", help="a batch ticket id")
     s.add_argument("--slug", help="suffix for a new branch name: ticket-ID-SLUG")
@@ -271,7 +340,7 @@ def parser():
     return p
 
 
-COMMANDS = {"begin": cmd_begin, "start": cmd_start, "status": cmd_status}
+COMMANDS = {"begin": cmd_begin, "ready": cmd_ready, "start": cmd_start, "status": cmd_status}
 
 
 def main(argv=None):
