@@ -12,7 +12,7 @@ Call the Skill tool with `decomp-standards` first.
 
 ## 1. Inventory
 
-Run the `inventory` adapter from `decomp.json`. It writes `inventory.json` and `expected/`, and seeds `symbols.json`.
+Run `python tools/decomp.py inventory`. It checks the environment, then runs the `inventory` adapter, which writes `inventory.json` and `expected/`, and seeds `symbols.json`. Exit 6 means the machine's target or toolchain differs from the contract: nothing was written, so stop and report it. Once the `decomp-start` tag exists the command refuses: pass `--redo` only with the user's go-ahead for a redo.
 
 Check it before anything depends on it:
 
