@@ -1,14 +1,20 @@
 ## What it does
 
-`retro` looks back over a coding session and suggests improvements to the agent's **environment**, so the next run goes better. It reads the session's own record (the current one by default, or one you point it at in the session logs). It finds the moments where the agent struggled, and gives you a list of candidate fixes, most severe first.
+`retro` looks back over a coding session and suggests improvements to the agent's **environment**, so the next run goes better. It finds the moments where the agent struggled, and gives you a list of candidate fixes, most severe first. What it reads depends on who started it:
+
+| Started by | It reads | You see |
+| --- | --- | --- |
+| You, typing `/retro` | The session's own record: the current one by default, or one you point it at in the session logs | The candidates, in the chat |
+| `implement`, at the end of a run with **lessons** | Only the implementers' lesson lines (`type @ location`) and the files they point to, never the session logs | Suggestions in implement's final report |
+| `diagnosing-bugs`, once a fix lands | The live debugging session | Suggestions in its final report |
 
 It changes the environment, not the code. Take the bug the agent shipped, the file it needed twenty tool calls to find, or the rule the reviewer missed. `retro` does not fix any of them directly. It asks what in the repo let them happen, and proposes the check, pointer, or standard that prevents them next time. It also only proposes. Nothing changes until you pick a candidate.
 
 ## When to reach for it
 
-You invoke this by typing `/retro`, and the agent won't reach for it on its own.
+Type `/retro`, or the agent reaches for it automatically when a task fits: `implement` calls it when its implementers reported lessons (a clean run skips it), and `diagnosing-bugs` calls it after a fix. Run automatically, it only lists suggestions and changes nothing.
 
-Reach for it at the end of a session that was harder than it should have been. For example, the agent searched too long for something, made a mistake a tool could have caught, or needed information it could not get. A smooth session has little to teach, and the findings come from the difficult ones. If you want a verdict on the code the session produced, use [code-review](code-review.md) instead.
+Type it yourself at the end of a session that was harder than it should have been. For example, the agent searched too long for something, made a mistake a tool could have caught, or needed information it could not get. A smooth session has little to teach, and the findings come from the difficult ones. If you want a verdict on the code the session produced, use [code-review](code-review.md) instead.
 
 ## Where the findings land
 
@@ -32,7 +38,7 @@ Before `retro` writes any rule, it classifies the violation. A **mechanical** vi
 
 **Does it write the lint rule itself, or wait for a yes? Can I wire it to run after every session?**
 
-It waits. `retro` only proposes. Nothing changes until you pick a candidate, so it edits nothing by hand and installs no hook automatically. This is deliberate. One user asked for exactly this after being "burned by auto-hooks that blocked good changes." It takes judgement to decide what deserves a permanent check, so the skill stays human-in-the-loop and user-invoked. Some users do run it after every implementation run. But a smooth session has little to teach, so a run after every session mostly produces rules nobody needed. There is no dry-run mode. A proposed check is code like any other, so try it against the repo before you let it block merges.
+It waits. `retro` only proposes. Nothing changes until you pick a candidate, so it edits nothing by hand and installs no hook automatically. This is deliberate. One user asked for exactly this after being "burned by auto-hooks that blocked good changes." It takes judgement to decide what deserves a permanent check, so the skill stays human-in-the-loop. You do not need to wire it up: `implement` already runs it when its implementers reported lessons, and `diagnosing-bugs` runs it after a fix. Neither run changes anything; both list suggestions in the final report. A smooth run reports no lessons, so it skips the retro, because a smooth session has little to teach. There is no dry-run mode. A proposed check is code like any other, so try it against the repo before you let it block merges.
 
 **Won't this pile up lint rules forever? Does it ever suggest removing one?**
 
@@ -44,7 +50,7 @@ This is the strongest criticism of it. One user found that "once the job is fini
 
 **My session is long. Run it now, or start fresh?**
 
-By default it reviews the current session. That is the best case, because the struggles are still in the context window. If the session has already moved out of the smart zone, clear it, and point a fresh `/retro` at the previous session in the session logs.
+Typed, it reviews the current session by default. That is the best case, because the struggles are still in the context window. If the session has already moved out of the smart zone, clear it, and point a fresh `/retro` at the previous session in the session logs. After `implement` this question goes away: its automatic retro works from the lesson lines, so it needs no session history.
 
 **The agent keeps making the same mistake. Should I add a line to `CLAUDE.md`?**
 
@@ -73,7 +79,7 @@ The input is different. [improve-codebase-architecture](improve-codebase-archite
 grill → spec-gen → ticket-gen → implement → code-review → retro
 ```
 
-Run it after a build worth learning from, in the same session or pointed at that session's log. You can skip it after a smooth build.
+`implement` runs it for you after a build that reported lessons, and skips it after a smooth one. Type it yourself to look back on any other session, in that session or pointed at its log.
 
 - [code-review](code-review.md) is the reviewer agent that `retro` most often tunes. New coding standards go where its Standards axis reads them.
 - [writing-for-agents](../productivity/writing-for-agents.md) sets the writing style for every steering file and skill that `retro` proposes, and `retro` loads it before it starts.

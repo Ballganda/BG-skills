@@ -17,7 +17,6 @@ Reachable only when you type them (Claude Code: `disable-model-invocation: true`
 - **[ticket-gen](./ticket-gen/SKILL.md)**
 - **[implement](./implement/SKILL.md)**
 - **[wayfinder](./wayfinder/SKILL.md)**
-- **[retro](./retro/SKILL.md)**
 
 ## Model-invoked
 
@@ -32,3 +31,4 @@ Model- or user-reachable (rich trigger phrasing so the model can reach for them)
 - **[code-review](./code-review/SKILL.md)**
 - **[pr](./pr/SKILL.md)**
 - **[wizard](./wizard/SKILL.md)**
+- **[retro](./retro/SKILL.md)**

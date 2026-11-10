@@ -155,6 +155,23 @@ for (const [name, needle] of implementFormats) {
   });
 }
 
+test("fails when retro's frontmatter makes it user-invoked", () => {
+  const r = mutated("engineering/retro/SKILL.md", (t) =>
+    t.replace(/^description:.*$/m, (line) => `${line}\ndisable-model-invocation: true`),
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /retro.*invo/);
+});
+
+test("fails when retro's Codex metadata makes it user-invoked", () => {
+  const r = mutated(
+    "engineering/retro/agents/openai.yaml",
+    (t) => `${t.trimEnd()}\npolicy:\n  allow_implicit_invocation: false\n`,
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /retro.*invo/);
+});
+
 const iconRel = join(".claude-plugin", "icon.png");
 
 test("fails when the plugin icon is missing", () => {
