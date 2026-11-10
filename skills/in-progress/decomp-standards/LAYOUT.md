@@ -91,7 +91,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `verify <id> --model <m> [--category <c>]` | Rebuild the writer's branch in a clean worktree, compare bytes, record the attempt |
 | `audit <id> pass\|fail --auditor <m>` | Record the auditor's verdict; `pass` records the match |
 | `integrate <id>` | Mark a merged match integrated |
-| `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref; nonzero exit on any regression. A repair ref may touch only `include/` and `symbols.json` |
+| `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref (with `--header`, only those that include that header, directly or through another); nonzero exit on any regression. A repair ref may touch only `include/` and `symbols.json` |
 | `note <id> <text>` | Append an attempt note to a ticket |
 | `similar <id>` | Closest matched functions by byte pattern |
 | `lock <name> --by <n>` / `unlock <name>` | Exclusive lock, used for shared header and symbol map repair. Locks and claims are shared by every worktree of the repository |

@@ -297,6 +297,48 @@ def test_scan_covers_included_project_headers(base):
         expect_guardrail(p, "shared.h", bad)
 
 
+def test_scan_follows_a_chain_of_headers(base):
+    p = Project(base, source='#include "outer.h"\n' + CLEAN,
+                headers={"outer.h": '#include "deep/inner.h"\n', "deep/inner.h": '#include "leaf.h"\n',
+                         "deep/leaf.h": "__asm nop\n"})
+    expect_guardrail(p, "include/deep/leaf.h", "assembly")
+
+
+def test_scan_covers_a_header_beside_the_source(base):
+    p = Project(base, source='#include "local.h"\n' + CLEAN, files={"src/local.h": "__asm nop\n"})
+    expect_guardrail(p, "src/local.h", "assembly")
+
+
+def test_scan_follows_an_include_spelled_in_another_case(base):
+    p = Project(base, source='#include <SHARED.H>\n' + CLEAN, headers={"shared.h": "__asm nop\n"})
+    expect_guardrail(p, "include/shared.h", "assembly")
+
+
+def test_scan_refuses_computed_include(base):
+    for d, line in each(base, ['#define H "keep.h"\n#include H', "# include_next KEEP_H", "#import KEEP_H"]):
+        expect_guardrail(Project(d, source=CLEAN + line + "\n"), "computed include")
+
+
+def test_scan_refuses_include_outside_the_project(base):
+    outside = ['#include "C:/Temp/x.h"', "#include </tmp/x.h>", '#include "../../x.h"', '#include "..\\\\..\\\\x.h"']
+    for d, line in each(base, outside):
+        expect_guardrail(Project(d, source=CLEAN + line + "\n"), "include outside the project")
+
+
+def test_scan_passes_toolchain_and_commented_includes(base):
+    src = '#include <windows.h>\n#include "../include/keep.h"\n// #include "C:/Temp/x.h"\n' + CLEAN
+    expect_match(Project(base, source=src))
+
+
+def test_revalidate_header_reaches_tickets_through_a_chain(base):
+    p = Project(base, status="matched", source=MARK + '#include "outer.h"\nint f(void) { return K; }\n',
+                config={"build": BUILD.replace("open(sys.argv[1]).read()", "open('include/keep.h').read()")},
+                headers={"outer.h": '#include "KEEP.H"\n', "keep.h": "/* MATCH */\n"})
+    p.branch("r/sym", {"include/keep.h": "/* broken */\n"})
+    r = p.run("revalidate", "--ref", "r/sym", "--header", "include/keep.h")
+    expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout, "the ticket includes the header through another", r)
+
+
 # ---------- target editions ----------
 
 def test_doctor_passes_legacy_single_hash_manifest(base):

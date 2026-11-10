@@ -41,6 +41,8 @@ NAKED = re.compile(r"(?<![A-Za-z0-9])_*naked_*(?![A-Za-z0-9])")
 PLACEMENT = re.compile(r"(?<![A-Za-z0-9])_*(section|allocate|code_seg|init_seg)_*(?![A-Za-z0-9])")
 CHAR_LITERAL = re.compile(r"'(?:\\[^\n]|[^'\\\n]){1,4}'")
 RAW_STRING = re.compile(r'R"([^()\\\s]{0,16})\(')
+INCLUDE = re.compile(r"[ \t\f\v]*#[ \t]*(include_next|include|import)\b[ \t]*(.*)")
+INCLUDE_NAME = re.compile(r'"([^"\n]+)"|<([^>\n]+)>')
 KEY = re.compile(r"[0-9A-Za-z_.]+")  # a function's key: the part of its ticket id after the unit
 HEX = re.compile(r"(0[xX])?[0-9A-Fa-f]+")
 SYMBOLS = "symbols.json"  # the symbol map: symbol name to address in the original
@@ -609,6 +611,9 @@ def scan(text):
             refuse("digraph directive")
         if "##" in code:
             refuse("token pasting")
+        inc = INCLUDE.match(code)
+        if inc and not INCLUDE_NAME.match(inc.group(2)):  # a macro names the file, so no scan can follow it
+            refuse("computed include")
         for m in PRAGMA_OPERATOR.finditer(code):  # held to the allowlist as the #pragma it stands for
             found = parenthesised(code, bare, m.end())
             if not found or not any(a.search(as_directive(found[0])) for a in pragmas):
@@ -666,10 +671,10 @@ def build_and_diff(t, tree, report):
     if marks != 1:
         return "guardrail", None, f"expected one '@decomp {t['id']}' marker comment, found {marks}"
     bad = scan(text)
-    for inc in sorted(includes(text)):  # project headers obey the same guardrails
-        h = Path(tree) / "include" / inc
-        if h.is_file():
-            bad += [f"{inc}: {v}" for v in scan(h.read_text(encoding="utf-8", errors="replace"))]
+    headers, outside = included(tree, t["source"])
+    bad += outside
+    for rel in headers:  # project headers obey the same guardrails, however deep the include chain
+        bad += [f"{rel}: {v}" for v in scan((Path(tree) / rel).read_text(encoding="utf-8", errors="replace"))]
     if bad:
         return "guardrail", None, "\n".join(bad)
     obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
@@ -921,7 +926,64 @@ def cmd_integrate(a):
 
 
 def includes(text):
-    return set(re.findall(r'#\s*include\s*[<"]([^>"]+)[>"]', text))
+    """The file each include directive of a source text names. Comments and literals cannot fake one."""
+    code, bare = lexed(text.replace("\r\n", "\n").replace("\r", "\n"))
+    names = set()
+    for c, b in zip(code.split("\n"), bare.split("\n")):
+        m = INCLUDE.match(c)
+        name = m and INCLUDE_NAME.match(b, m.start(2))
+        if name:
+            names.add(name.group(1) or name.group(2))
+    return names
+
+
+def in_tree(tree, parts):
+    """The file under tree that these path parts name, whatever case they are written in. None when none.
+
+    A compiler on a case-blind file system, or behind a compatibility layer, opens `Types.h`
+    for `types.h`, so the scan follows it there too.
+    """
+    here = Path(tree)
+    for part in parts:
+        if not here.is_dir():
+            return None
+        same = [e for e in here.iterdir() if e.name.casefold() == part.casefold()]
+        if not same:
+            return None
+        here = next((e for e in same if e.name == part), same[0])
+    return here if here.is_file() else None
+
+
+def included(tree, source):
+    """Every file in the tree that source includes, directly or through another header.
+
+    Returns (their paths relative to tree, violations). A name is looked up beside the
+    including file and under include/. One that points outside the project is a violation.
+    One found nowhere in the tree is taken to be the toolchain's own header.
+    """
+    found, bad, todo = [], [], [source]
+    seen = {source.casefold()}
+    while todo:
+        rel = todo.pop()
+        text = (Path(tree) / rel).read_text(encoding="utf-8", errors="replace")
+        for name in sorted(includes(text)):
+            spelled = name.replace("\\", "/")
+            inside = 0
+            if not spelled.startswith("/") and not re.match(r"[A-Za-z]:", spelled):
+                for base in (os.path.dirname(rel), "include"):
+                    parts = os.path.normpath(os.path.join(base, spelled)).replace("\\", "/").split("/")
+                    if parts[0] == "..":
+                        continue
+                    inside += 1
+                    hit = in_tree(tree, parts)
+                    hit = hit and hit.relative_to(tree).as_posix()
+                    if hit and hit.casefold() not in seen:
+                        seen.add(hit.casefold())
+                        found.append(hit)
+                        todo.append(hit)
+            if not inside:
+                bad.append(f"{rel}: include outside the project: {name}")
+    return sorted(found), bad
 
 
 def cmd_revalidate(a):
@@ -941,9 +1003,9 @@ def cmd_revalidate(a):
     bad = skipped = measured = 0
     with Worktree(ref) as tree:
         if a.header:
-            name = Path(a.header).name
+            name = Path(a.header).name.casefold()  # every ticket that reaches the header, through any chain
             ts = [t for t in ts if (Path(tree) / t["source"]).exists() and any(
-                Path(i).name == name for i in includes((Path(tree) / t["source"]).read_text(errors="replace")))]
+                Path(h).name.casefold() == name for h in included(tree, t["source"])[0])]
         for t in ts:
             why = ("this machine's edition holds it differently" if edition_differs(t) else
                    f"its compiler '{built_with[t['unit']]}' is not usable here" if built_with[t["unit"]] in unusable
