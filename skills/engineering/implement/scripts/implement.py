@@ -229,6 +229,22 @@ def cmd_start(store, args):
     return OK
 
 
+def cmd_status(store, args):
+    with store:
+        ledger = store.load()
+    paths = set(worktrees().values())
+    for ticket, e in ledger["tickets"].items():
+        line = (f"ticket {ticket} {e['state']} {e['tier']} attempts={e['attempts']}"
+                f" branch={e['branch'] or '-'} worktree={e['worktree'] or '-'}")
+        missing = []
+        if e["worktree"] and Path(e["worktree"]).resolve().as_posix() not in paths:
+            missing.append("worktree")
+        if e["branch"] and not branch_exists(e["branch"]):
+            missing.append("branch")
+        print(line + (f" missing={','.join(missing)}" if missing else ""))
+    return OK
+
+
 def default_worktree_root():
     """A sibling of the main checkout, so worktrees never sit inside the tree."""
     main = Path(out("rev-parse", "--path-format=absolute", "--git-common-dir")).parent
@@ -251,10 +267,11 @@ def parser():
     s = sub.add_parser("start", help="claim a ticket and create or reuse its worktree and branch")
     s.add_argument("ticket", help="a batch ticket id")
     s.add_argument("--slug", help="suffix for a new branch name: ticket-ID-SLUG")
+    sub.add_parser("status", help="one line per batch ticket, flagging a missing worktree or branch")
     return p
 
 
-COMMANDS = {"begin": cmd_begin, "start": cmd_start}
+COMMANDS = {"begin": cmd_begin, "start": cmd_start, "status": cmd_status}
 
 
 def main(argv=None):

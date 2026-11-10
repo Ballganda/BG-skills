@@ -69,7 +69,7 @@ class Project:
 
     def ledger(self):
         common = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir"))
-        files = list((common / "implement" / "runs").glob("*.json"))
+        files = list((common / "implement" / "runs").glob(f"{INTEGRATION}.json"))
         expect(len(files) == 1, f"expected one ledger file, found {files}")
         return json.loads(files[0].read_text(encoding="utf-8"))
 
@@ -145,6 +145,39 @@ def test_start_recreates_a_claimed_tickets_missing_worktree(base):
     rmtree(wt)
     line, branch2, wt2 = start(p, "1")
     expect(wt2.is_dir() and branch2 == branch, f"start should rebuild the worktree: {line!r}")
+
+
+def status_lines(p):
+    r = p.run("status")
+    expect(r.returncode == OK, "status should succeed", r)
+    return {line.split()[1]: line for line in r.stdout.splitlines()}
+
+
+def test_status_shows_every_batch_ticket_as_recorded(base):
+    p = begun(base, "1:mechanical", "2", "3:HARD")
+    _, branch, wt = start(p, "3")
+    lines = status_lines(p)  # each run is a fresh process, so this reads the ledger alone
+    expect(list(lines) == ["1", "2", "3"], f"one line per ticket in batch order: {lines}")
+    expect(lines["1"] == "ticket 1 open Mechanical attempts=0 branch=- worktree=-", lines["1"])
+    expect(lines["2"] == "ticket 2 open Standard attempts=0 branch=- worktree=-", lines["2"])
+    expect(lines["3"] == f"ticket 3 claimed Hard attempts=1 branch={branch} worktree={wt.as_posix()}", lines["3"])
+
+
+def test_status_flags_a_deleted_worktree(base):
+    p = begun(base)
+    _, _, wt = start(p, "1")
+    rmtree(wt)
+    line = status_lines(p)["1"]
+    expect(line.endswith(" missing=worktree"), f"status should flag the worktree: {line!r}")
+
+
+def test_status_flags_a_deleted_branch(base):
+    p = begun(base)
+    _, branch, wt = start(p, "1")
+    p.git("worktree", "remove", "--force", str(wt))
+    p.git("branch", "-D", branch)
+    line = status_lines(p)["1"]
+    expect(line.endswith(" missing=worktree,branch"), f"status should flag both: {line!r}")
 
 
 def rmtree(path):
