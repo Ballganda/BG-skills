@@ -55,6 +55,7 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 - Integration branch.
 - GitHub mirror: off, or the private repo.
 - Full revalidation: after every how many integrations.
+- Link milestone: a percentage or a byte count of in-scope bytes (default 5%, floor 16 KB), recorded as `link_milestone` in `decomp.json`.
 
 ## Pipeline check
 - Each check, the command, its result, and the Unix time it passed.
