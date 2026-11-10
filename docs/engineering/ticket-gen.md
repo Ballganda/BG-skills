@@ -2,6 +2,8 @@
 
 `ticket-gen` takes a plan, a spec, or the conversation you are in, and breaks it into a set of **tickets** on your issue tracker. Each ticket declares its **blocking edges**: the other tickets that have to finish before it can start.
 
+Each ticket also gets a **tier**: Mechanical (rename, config, docs, copy of an existing pattern), Standard (one module, a clear seam, tests that describe it) or Hard (crosses modules, a new seam, concurrency, an unclear spec). The tier picks the model that builds the ticket, using the models [bg-setup](bg-setup.md) recorded.
+
 Every ticket is a **tracer bullet**: a narrow but complete path through every layer of the change (schema, API, UI, tests) that you can demo on its own as soon as it lands. This is what makes the skill different from the obvious way to split work, which is to cut one layer at a time and integrate at the end. It also sizes each ticket to fit in a single fresh context window, because a session that has never seen your spec will pick the ticket up.
 
 ## When to reach for it
@@ -28,7 +30,7 @@ A **horizontal** slice ships one layer of the change. Nothing works until every 
 
 This is the rule people break most often. One team ran a 26-ticket stack sliced by layer (corpus, producer, aggregator, selector) and got roughly twenty agent runs per closed ticket, about three quarters of them rework. Their own post-mortem traced every failure class back to the horizontal slicing rather than to the implementations.
 
-Two things happen before anything is published. `ticket-gen` looks for prefactoring (the principle "make the change easy, then make the easy change") and orders that work first. Then it presents the breakdown as a numbered list and quizzes you on it: is the granularity right, are the blocking edges real, should anything merge or split. Nothing reaches the tracker until you approve, and that quiz is the place to push back.
+Two things happen before anything is published. `ticket-gen` looks for prefactoring (the principle "make the change easy, then make the easy change") and orders that work first. Then it presents the breakdown as a numbered list and quizzes you on it: is the granularity right, are the blocking edges real, should anything merge or split. Each ticket is listed with its tier, and you can change any of them there. Nothing reaches the tracker until you approve, and that quiz is the place to push back.
 
 ## Blocking edges
 
@@ -82,7 +84,7 @@ The skill stops at the artifact. Run [implement](implement.md), which works one 
 ## It's working if
 
 - Every ticket has an answer to "what can I demo when this is done?", and the answer is behaviour, not a layer.
-- The list comes back to you numbered, with a "Blocked by" line on each, before anything is published.
+- The list comes back to you numbered, with a tier and a "Blocked by" line on each, before anything is published.
 - The ticket at the top has no blockers and can be started immediately.
 - Nothing in a ticket body is a file path or a line number, except a snippet a prototype produced.
 - Each ticket reads like something a fresh session could finish without you in the room.

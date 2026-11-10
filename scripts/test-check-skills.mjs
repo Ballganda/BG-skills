@@ -63,3 +63,21 @@ test("fails when one word of the 150k sentence changes", () => {
   );
   assert.notEqual(r.status, 0);
 });
+
+test("fails when the local ticket template loses its tier field", () => {
+  const r = mutated("engineering/ticket-gen/SKILL.md", dropLine("**Tier:**"));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /tier/i);
+});
+
+test("fails when the issue ticket template loses its tier field", () => {
+  const r = mutated("engineering/ticket-gen/SKILL.md", dropLine("## Tier"));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /tier/i);
+});
+
+test("fails when bg-setup stops writing the models doc", () => {
+  const r = mutated("engineering/bg-setup/SKILL.md", dropLine("[models.md](./models.md)"));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /models/i);
+});
