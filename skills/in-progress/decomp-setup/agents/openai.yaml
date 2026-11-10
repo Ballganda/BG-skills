@@ -1,5 +1,5 @@
 interface:
   display_name: "Decomp Setup"
-  short_description: "Agree the decomp contract and set up the project"
+  short_description: "Agree the decomp contract and set up the project, or upgrade an existing one"
 policy:
   allow_implicit_invocation: false

@@ -84,7 +84,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | --- | --- |
 | `doctor` | Check this machine against `toolchain.json`: which edition the target is, each host prerequisite's version, each tool's required files and version banner. Prints the recognised edition. Exit 6 on any difference |
 | `provision [--tool <name>] [--force]` | Download each tool that has a source, compare size and SHA-256, then unpack it under `.decomp/toolchain/`. Checks the host prerequisites first. A file already in `.decomp/downloads/` is compared, and replaced only with `--force`. Never installs a host prerequisite |
-| `inventory [--redo]` | Run the `inventory` adapter, after the full `doctor` checks. Once the `decomp-start` tag exists it refuses, naming the redo flow, unless `--redo` is passed |
+| `inventory [--redo]` | Run the `inventory` adapter, after the full `doctor` checks. Once the `decomp-start` tag exists it refuses, naming the redo flow, unless `--redo` is passed. Pass `--redo` only with the user's go-ahead for an inventory redo, or in a throwaway clone, where it writes nothing to the project |
 | `disasm <id>` | Print the original function's disassembly: run the `disasm` adapter with the ticket's expected file and address |
 | `gen-specs`, `gen-tickets` | Write unit specs and tickets from `inventory.json`; existing status and notes survive |
 | `next [--n N]` | List open tickets in pick order |
@@ -94,7 +94,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `audit <id> pass\|fail --auditor <m>` | Record the auditor's verdict; `pass` records the match |
 | `integrate <id>` | Mark a merged match integrated |
 | `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref (with `--header`, only those that include that header, directly or through another); nonzero exit on any regression. A repair ref may touch only `include/` and `symbols.json` |
-| `revalidate --candidate <c/slug>` | Rebuild every matched ticket on a candidate ref, in a clean worktree of it, with that tree's own copy of `decomp.py`. Accepts only a `c/<slug>` branch. Records nothing: no ledger line, no status change. Exit 0 when every match holds; nonzero, listing each `REGRESSED` ticket, when one does not |
+| `revalidate --candidate <c/slug>` | Rebuild every matched ticket on a candidate ref, in a clean worktree of it, with that tree's own copy of `decomp.py`. Accepts only a `c/<slug>` branch, and takes no `--ref` or `--header`. Records nothing: no ledger line, no status change. Exit 0 when every match holds; nonzero, listing each `REGRESSED` ticket, when one does not. A ticket the integration branch holds matched and the candidate lacks is listed `REGRESSED` too. A ticket already `regressed` is not rebuilt and does not count |
 | `note <id> <text>` | Append an attempt note to a ticket |
 | `similar <id>` | Closest matched functions by byte pattern |
 | `lock <name> --by <n>` / `unlock <name>` | Exclusive lock, used for shared header and symbol map repair. Locks and claims are shared by every worktree of the repository |
@@ -105,7 +105,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 
 `check` and `verify` also exit 6 for a ticket no result could count for on this machine: the recognised edition's `differs` list names it, or its unit's compiler is missing from `toolchain.json`, listed only for another host, or not provisioned. A compiler that builds only other units does not stop this one.
 
-`revalidate` prints `SKIPPED` for each such ticket. On the integration branch it leaves that ticket's status alone and still exits 0. On a repair ref or a candidate ref it exits 6: a repair is accepted, and a candidate measured, only on a machine that rebuilt every match it could break.
+`revalidate` prints `SKIPPED` for each such ticket. On the integration branch it leaves that ticket's status alone and still exits 0. On a repair ref or a candidate ref it exits 6: a repair is accepted, and a candidate measured, only on a machine that rebuilt every match it could break. A candidate run with a skipped ticket exits 6 even when it also lists regressions.
 
 ## Change flow
 
@@ -134,7 +134,7 @@ An edition's `differs` lists the functions it holds differently from `expected/`
 - **inventory**: reads the target, writes `inventory.json` and `expected/`, and seeds `symbols.json` with what the target itself proves (exports, imports, any symbols present). Shape: `{"units": [{"id", "source", "start", "end", "evidence"}], "functions": [{"address", "size", "unit", "scope", "evidence"}]}`; a function may add `key` (see Units and ids) and `expected` (its expected file, when not `expected/<key>.bin`); `scope` is `in`, `library`, `compiler`, `asm-origin`, or `excluded`; `size` follows the tier rule.
 - **build** (`{source}`, `{unit}`, `{obj}`, `{compiler}`): compiles one unit with the contract's compiler and flags. `{compiler}` is the tool name from `toolchain.json` that builds this unit: `decomp.json`'s `compiler`, or the unit's entry in `unit_compilers`. Exit nonzero on failure, errors on stderr.
 - **diff** (`{obj}`, `{expected}`, `{id}`, `{source}`, `{report}`, `{symbols}`): finds the function after the `@decomp {id}` marker in the object, compares it to the expected bytes under the contract's relocation policy, writes a readable instruction diff to `{report}`, and prints `{"match": true|false, "differ_bytes": N}` on stdout. `{symbols}` is the path of the symbol map in the tree being built.
-- **disasm** (`{expected}`, `{address}`, `{id}`): prints the original function's disassembly. `decomp.py disasm <id>` fills the placeholders from the ticket.
+- **disasm** (`{expected}`, `{address}`): prints the original function's disassembly. `decomp.py disasm <id>` fills the placeholders from the ticket.
 
 Every adapter and banner command invokes a tool through the one wrapper in `tools/`, which owns the environment, path conversion, and any compatibility layer. `decomp.py` reads a tool's output in whatever encoding the tool writes, so an adapter never depends on the host's.
 

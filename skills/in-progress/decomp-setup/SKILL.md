@@ -79,7 +79,7 @@ A new machine needs no contract change: write its `.decomp/local.json`, run `pro
 
 Accepting another edition, or marking one known-wrong, is a contract change like any other. Prove every `differs` entry by comparing the two editions first.
 
-Only on the user's request: grill the change, write a dated ADR, then update the contract through the [change flow](../decomp-standards/LAYOUT.md#change-flow). The `decomp-setup` tag moves only after the candidate revalidation, on the user's go-ahead. Report every regression, from the candidate run and from the plain `revalidate` that ends the flow.
+Only on the user's request: grill the change, write a dated ADR, then update the contract through the change flow in `decomp-standards`' layout. The `decomp-setup` tag moves only after the candidate revalidation, on the user's go-ahead. Report every regression, from the candidate run and from the plain `revalidate` that ends the flow.
 
 ## Skill upgrade
 
@@ -90,7 +90,7 @@ An existing project keeps the copy of the project tool it was set up with. The u
 - **Identical**: the project is current. Tell the user so and stop, unless they asked for a contract change (see [Changing the contract later](#changing-the-contract-later)).
 - **Different**: tell the user the project was set up by another version of the skills, and upgrade it as below.
 
-**Upgrade.** A skill upgrade is a contract change. It goes through the [change flow](../decomp-standards/LAYOUT.md#change-flow), and the candidate branch holds all of this:
+**Upgrade.** A skill upgrade is a contract change. It goes through the change flow in `decomp-standards`' layout, and the candidate branch holds all of this:
 
 - A dated ADR: the upgrade, and each contract file it adds or rewrites.
 - `tools/decomp.py`: a fresh copy of [scripts/decomp.py](scripts/decomp.py), unchanged.
@@ -99,8 +99,10 @@ An existing project keeps the copy of the project tool it was set up with. The u
   - The adapters, rewired to `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>` and the wrapper, holding no absolute path and no lookup of their own.
   - `decomp.json` keys and `symbols.json`.
   - `DECOMP.md` sections [CONTRACT.md](CONTRACT.md) has gained.
-- The pipeline check (step 6) run again in full, in a throwaway clone of the candidate branch, with its results and the Unix time recorded in `DECOMP.md`. Where the `decomp-start` tag exists, the clone's inventory box runs `inventory --redo`: the clone is discarded, so nothing frozen is overwritten. Its `inventory.json` and `expected/` must equal the frozen ones byte for byte. A difference is a fault in the rewired adapter to fix here, never an inventory redo slipped in with the upgrade.
+- The pipeline check (step 6) run again in full, in a throwaway clone of the candidate branch, with its results and the Unix time recorded in `DECOMP.md`. Where the `decomp-start` tag exists, the clone's inventory box runs `inventory --redo`. That needs no further go-ahead: the user started the upgrade, and the run writes only to the clone, which is discarded, so nothing in the project is overwritten. The clone's `inventory.json` and `expected/` must equal the frozen ones byte for byte. A difference is a fault in the rewired adapter to fix here, never an inventory redo slipped in with the upgrade.
 
 The upgrade carries the contract's decisions over unchanged: same compiler, flags, scope, and policies. Where the newer skills need a decision the contract never made, grill that one decision as in step 3 and record it in the ADR.
 
-**Done when** every pipeline check box is ticked on the candidate branch and the change flow has run to its end. The `decomp-setup` tag moves only after the candidate revalidation, on the user's go-ahead. Report every regression, from the candidate run and from the plain `revalidate` that ends the flow.
+**Candidate revalidation.** Run it with this skill's copy of the tool, from the project root with the integration branch checked out: `python <this skill's folder>/scripts/decomp.py revalidate --candidate c/<slug>`. The integration branch's `tools/decomp.py` may predate `--candidate`. The copy that starts the run only checks the branch name and hands the candidate to the candidate's own `tools/decomp.py`, which does the rebuild, so the result is the one the flow asks for. After the merge, the plain `revalidate` runs from `tools/decomp.py` as usual.
+
+**Done when** every pipeline check box is ticked on the candidate branch and the change flow has run to its end, reported as in [Changing the contract later](#changing-the-contract-later).

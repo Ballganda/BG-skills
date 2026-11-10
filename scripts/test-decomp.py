@@ -84,6 +84,15 @@ def editions_manifest():
     }, "tools": [tool_entry()]}
 
 
+def ticket_text(tid, address, source, status):
+    unit, key = tid.split("-")
+    return "\n".join([
+        "---", f"id: {tid}", f"unit: {unit}", f"address: {address}", "size: 37", "tier: SMALL",
+        f"source: {source}", f"expected: expected/{key}.bin", f"status: {status}",
+        "claimed_by:" + (" w1" if status == "claimed" else ""),
+        "claimed_at:" + (" 1789000000" if status == "claimed" else ""), "---", "## Notes", ""])
+
+
 class Project:
     """A scratch decomp project: committed, tagged decomp-setup, with one ticket."""
 
@@ -109,11 +118,7 @@ class Project:
             self.write("include/" + name, text)
         for name, text in (files or {}).items():
             self.write(name, text)
-        self.write(f"tickets/{UNIT}/{TID}.md", "\n".join([
-            "---", f"id: {TID}", f"unit: {UNIT}", f"address: {ADDRESS}", "size: 37", "tier: SMALL",
-            f"source: {SOURCE}", "expected: expected/00401000.bin", f"status: {status}",
-            "claimed_by:" + (" w1" if status == "claimed" else ""),
-            "claimed_at:" + (" 1789000000" if status == "claimed" else ""), "---", "## Notes", ""]))
+        self.write(f"tickets/{UNIT}/{TID}.md", ticket_text(TID, ADDRESS, SOURCE, status))
         self.write(".decomp/local.json", json.dumps({"target": str(self.target)}))
         for name in installed:
             self.write(f".decomp/toolchain/{name}/cc.py", FAKE_TOOL)
@@ -144,12 +149,13 @@ class Project:
         self.git("commit", "-q", "-m", name)
         self.git("checkout", "-q", "main")
 
-    def run(self, *args, cwd=None, env=None):
+    def run(self, *args, cwd=None, env=None, tool=None):
+        """Run the tree's own copy of the tool, or the copy at `tool`."""
         cwd = Path(cwd or self.root)
         e = {k: v for k, v in os.environ.items() if k not in ("DECOMP_LOCAL", "DECOMP_TARGET", "FAKE_BANNER")}
         e.update(PYTHONDONTWRITEBYTECODE="1", TMP=str(self.tmp), TEMP=str(self.tmp), TMPDIR=str(self.tmp))
         e.update(env or {})
-        r = subprocess.run([sys.executable, str(cwd / "tools" / "decomp.py"), *args], cwd=cwd, env=e,
+        r = subprocess.run([sys.executable, str(tool or cwd / "tools" / "decomp.py"), *args], cwd=cwd, env=e,
                            capture_output=True, text=True, errors="replace")
         r.all = r.stdout + r.stderr
         return r
@@ -529,7 +535,8 @@ TOOL_MARKER = "the candidate's own copy ran"
 def started_project(base, **kw):
     """A project past decomp-start: both tags set, its one ticket integrated unless told otherwise."""
     kw.setdefault("status", "integrated")
-    p = Project(base, files={"inventory.json": '{"units": [], "functions": []}\n', "expected/00401000.bin": "old\n"}, **kw)
+    files = {"inventory.json": '{"units": [], "functions": []}\n', "expected/00401000.bin": "old\n"}
+    p = Project(base, files=dict(files, **kw.pop("files", {})), **kw)
     p.git("tag", "decomp-start")
     return p
 
@@ -605,6 +612,78 @@ def test_candidate_rebuilds_the_tickets_the_project_holds_matched(base):
     ticket.write_text(ticket.read_text().replace("status: open", "status: matched"), newline="\n")
     r = p.run("revalidate", "--candidate", "c/diff")
     expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout, "the project's matched ticket is rebuilt", r)
+
+
+TID2 = "u0002-00402000"  # a second unit's ticket, which no edition holds differently
+MATCHING2 = f"// @decomp {TID2}\nint g(void) {{ return 2; }} /* MATCH */\n"
+
+
+def second_ticket(status="integrated", source=MATCHING2):
+    """Files that give a project a second unit with one ticket."""
+    return {"src/u0002.c": source, f"tickets/u0002/{TID2}.md": ticket_text(TID2, "0x00402000", "src/u0002.c", status)}
+
+
+def test_candidate_with_a_regression_and_a_skipped_ticket_exits_6_and_lists_both(base):
+    p = started_project(base, manifest=editions_manifest(), target=STORE, files=second_ticket())
+    p.branch("c/diff", {"decomp.json": config_with(p, diff=NEVER_MATCHES)})
+    r = p.run("revalidate", "--candidate", "c/diff")
+    expect(r.returncode == ENV_EXIT, "a skipped ticket should win over a regression: exit 6", r)
+    expect(f"SKIPPED {TID}" in r.stdout and f"REGRESSED {TID2}" in r.stdout, "both should still be listed", r)
+    expect_nothing_recorded(p, r)
+
+
+def test_candidate_refuses_to_be_narrowed_to_a_header(base):
+    p = started_project(base)
+    p.branch("c/flags", {"DECOMP.md": "# contract, changed\n"})
+    r = p.run("revalidate", "--candidate", "c/flags", "--header", "include/keep.h")
+    expect(r.returncode == 2 and "--header" in r.stderr, "a candidate run rebuilds every matched ticket", r)
+    expect("revalidated" not in r.stdout, "nothing should be rebuilt", r)
+
+
+def test_judged_for_is_refused_outside_a_candidates_own_worktree(base):
+    p = started_project(base)
+    p.branch("flags", {"DECOMP.md": "# contract, changed\n"})
+    p.branch("c/flags", {"DECOMP.md": "# contract, changed\n"})
+    p.write("DECOMP.md", "# edited on the integration branch\n")
+    p.git("commit", "-q", "-am", "edit a frozen path")
+    for args in ([], ["--candidate", "flags"], ["--candidate", "c/flags"], ["--ref", "c/flags"]):
+        r = p.run("revalidate", "--judged-for", str(p.root), *args)
+        expect(r.returncode == 2 and "revalidated" not in r.stdout, f"--judged-for with {args} should be refused", r)
+
+
+def test_candidate_is_not_blamed_for_a_ticket_already_regressed(base):
+    broken = f"// @decomp {TID2}\nint g(void) {{ return 3; }}\n"
+    p = started_project(base, files=second_ticket(status="regressed", source=broken))
+    p.branch("c/flags", {"DECOMP.md": "# contract, changed\n"})
+    r = p.run("revalidate", "--candidate", "c/flags")
+    expect(r.returncode == 0 and "REGRESSED" not in r.stdout, "only matched tickets count against a candidate", r)
+    expect("revalidated 1 on c/flags: 0 regressed" in r.stdout, "the regressed ticket is not rebuilt", r)
+
+
+def test_candidate_that_drops_a_matched_ticket_lists_it_as_regressed(base):
+    p = started_project(base, files=second_ticket())
+    p.git("checkout", "-q", "-b", "c/redo", "main")
+    p.git("rm", "-q", f"tickets/u0002/{TID2}.md")
+    p.git("commit", "-q", "-m", "an inventory without the second function")
+    p.git("checkout", "-q", "main")
+    r = p.run("revalidate", "--candidate", "c/redo")
+    expect(r.returncode == 5 and f"REGRESSED {TID2} on c/redo: the candidate holds no such ticket" in r.stdout,
+           "a matched ticket the candidate lacks is a regression", r)
+    expect("revalidated 1 on c/redo: 1 regressed" in r.stdout, "the ticket it still holds is rebuilt", r)
+    expect_nothing_recorded(p, r)
+
+
+def test_skills_copy_judges_a_candidate_for_a_project_whose_tool_has_no_candidate_mode(base):
+    p = started_project(base)
+    p.write("tools/decomp.py", "raise SystemExit('an older tool: no --candidate')\n")
+    p.git("commit", "-q", "-am", "the tool an older skill version set up")
+    p.git("tag", "-f", "decomp-setup")
+    p.branch("c/upgrade", {"tools/decomp.py": TOOL.read_text(encoding="utf-8")})
+    expect(p.run("revalidate", "--candidate", "c/upgrade").returncode == 1, "the project's own copy cannot run it")
+    r = p.run("revalidate", "--candidate", "c/upgrade", tool=TOOL)
+    expect(r.returncode == 0 and "revalidated 1 on c/upgrade: 0 regressed, 0 skipped" in r.stdout,
+           "the skill's copy, run from the project root, should hand the candidate to its own copy", r)
+    expect_nothing_recorded(p, r)
 
 
 def test_plain_revalidate_still_refuses_when_a_frozen_path_differs(base):
@@ -956,6 +1035,10 @@ def test_doctor_fails_on_wrong_banner(base):
 SDK_VERSION_FILE = "include/sdkver.h"
 
 
+def sdk_version_file(p):
+    return p.root / ".decomp" / "toolchain" / "sdk" / SDK_VERSION_FILE
+
+
 def sdk_project(base, contents="#define SDK_VERSION \"FakeSDK 7.1\"\n", encoding="utf-8", **fields):
     """A project with a header-only tool. `contents` None leaves its banner file missing."""
     sdk = {"name": "sdk", "product": "FakeSDK 7.1", "installed_by": "user",
@@ -964,9 +1047,8 @@ def sdk_project(base, contents="#define SDK_VERSION \"FakeSDK 7.1\"\n", encoding
     sdk = {k: v for k, v in sdk.items() if v is not None}
     p = Project(base, manifest=dict(legacy_manifest(), tools=[tool_entry(), sdk]))
     if contents is not None:
-        f = p.root / ".decomp" / "toolchain" / "sdk" / SDK_VERSION_FILE
-        f.parent.mkdir(parents=True)
-        f.write_bytes(contents.encode(encoding))
+        sdk_version_file(p).parent.mkdir(parents=True)
+        sdk_version_file(p).write_bytes(contents.encode(encoding))
     return p
 
 
@@ -1000,10 +1082,8 @@ def test_doctor_fails_on_a_tool_with_neither_banner_file_nor_banner_cmd(base):
 
 
 def test_doctor_reads_a_banner_file_in_another_encoding(base):
-    for n, encoding in enumerate(("utf-16", "utf-16-le", "cp1252")):
-        sub = Path(base) / str(n)
-        sub.mkdir()
-        r = sdk_project(sub, contents="// café ©\r\n#define SDK_VERSION \"FakeSDK 7.1\"\r\n",
+    for d, encoding in each(base, ("utf-16", "utf-16-le", "cp1252")):
+        r = sdk_project(d, contents="// café ©\r\n#define SDK_VERSION \"FakeSDK 7.1\"\r\n",
                         encoding=encoding).run("doctor")
         expect(r.returncode == 0 and "sdk ok: FakeSDK 7.1" in r.stdout, f"doctor should read a {encoding} file", r)
 
@@ -1011,7 +1091,7 @@ def test_doctor_reads_a_banner_file_in_another_encoding(base):
 def test_check_stops_trusting_the_last_pass_when_the_banner_file_changes(base):
     p = sdk_project(base)
     expect_match(p)
-    (p.root / ".decomp" / "toolchain" / "sdk" / SDK_VERSION_FILE).write_text("#define SDK_VERSION \"FakeSDK 8.0 beta\"\n")
+    sdk_version_file(p).write_text("#define SDK_VERSION \"FakeSDK 8.0 beta\"\n")
     r = p.run("check", TID)
     expect(r.returncode == ENV_EXIT and "sdk: banner lacks" in r.stderr, "a changed banner file ends the trust", r)
 

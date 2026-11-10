@@ -287,11 +287,11 @@ def tool_failure(t, env):
     if missing:
         return f"{t['name']}: missing under {t['root']}: {missing}"
     if t.get("banner_file"):
-        held = Path(t["root"]) / t["banner_file"]
-        if not held.is_file():
-            return f"{t['name']}: banner file {held} not found"
-        if t["banner"] not in file_text(held):
-            return f"{t['name']}: banner lacks '{t['banner']}'; read from {held}"
+        banner_file = Path(t["root"]) / t["banner_file"]
+        if not banner_file.is_file():
+            return f"{t['name']}: banner file {banner_file} not found"
+        if t["banner"] not in file_text(banner_file):
+            return f"{t['name']}: banner lacks '{t['banner']}'; read from {banner_file}"
         return None
     out = version_output(tool_command(t["banner_cmd"], root=t["root"]), env)
     if t["banner"] not in out:
@@ -866,7 +866,7 @@ def cmd_release(a):
 
 
 def run_adapter(name, **values):
-    """Run an adapter that reports to the caller, in the project root, and exit as it exits.
+    """Run an adapter that reports to the caller, in the project root. Exit 1, naming its exit code, when it fails.
 
     Its output goes straight through, in whatever encoding the tool writes.
     """
@@ -888,7 +888,7 @@ def cmd_inventory(a):
 def cmd_disasm(a):
     t, _ = read_ticket(a.id)
     doctor(full=False, need=tools_needed([t["unit"]]))
-    run_adapter("disasm", id=t["id"], expected=t["expected"], address=t["address"])
+    run_adapter("disasm", expected=t["expected"], address=t["address"])
 
 
 def cmd_check(a):
@@ -1045,42 +1045,54 @@ def included(tree, source):
 CANDIDATE = re.compile(r"c/[0-9A-Za-z_.-]+")  # a candidate ref: a branch holding a change to frozen paths
 
 
-def judge_candidate(a):
+def candidate_ref(a):
+    """The candidate ref a `revalidate` was given, or exit 2 when it was not given one, alone."""
+    ref = a.candidate or ""
+    if a.ref or a.header:
+        die("--candidate rebuilds every matched ticket on a c/<slug> branch: it takes no --ref and no --header", 2)
+    known = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{ref}"], cwd=ROOT).returncode == 0
+    if not CANDIDATE.fullmatch(ref) or not known:
+        die(f"--candidate takes a branch named c/<slug>; '{ref}' is not one. "
+            "A repair ref goes to `revalidate --ref`.", 2)
+    return ref
+
+
+def judge_candidate(ref):
     """Hand a candidate ref to its own copy of this tool, run in a clean worktree of it. Records nothing.
 
     The copy in that tree rebuilds every ticket this project holds matched, so the candidate's
     tool, adapters, manifest, and contract are the ones that judge it.
     """
-    ref = a.candidate
-    known = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{ref}"], cwd=ROOT).returncode == 0
-    if a.ref or not CANDIDATE.fullmatch(ref) or not known:
-        die(f"--candidate takes a branch named c/<slug>, alone; '{ref}' is not one. "
-            "A repair ref goes to `revalidate --ref`.", 2)
     with Worktree(ref) as tree:
         own = Path(tree) / "tools" / "decomp.py"
         if not own.exists():
             die(f"{ref} holds no tools/decomp.py to judge it", 2)
         cmd = [sys.executable, str(own), "revalidate", "--candidate", ref, "--judged-for", str(ROOT)]
-        code = subprocess.run(cmd + (["--header", a.header] if a.header else []), cwd=tree).returncode
+        code = subprocess.run(cmd, cwd=tree).returncode
     sys.exit(code)
 
 
 def cmd_revalidate(a):
     judging = bool(a.judged_for)  # this copy sits in the candidate's worktree and judges it
-    if a.candidate and not judging:
-        judge_candidate(a)
+    if a.candidate or judging:
+        candidate = candidate_ref(a)
+        if not judging:
+            judge_candidate(candidate)
+        if git("rev-parse", "HEAD") != git("rev-parse", f"refs/heads/{candidate}"):
+            die("--judged-for is set only by this tool, in its own worktree of the candidate; "
+                "run `revalidate --candidate c/<slug>`", 2)
     gone = []
     if judging:  # the one exception to the frozen check: the candidate exists to change frozen paths
-        held = [t["id"] for t in all_tickets(Path(a.judged_for)) if t["status"] in MATCHED | {"regressed"}]
-        gone = [i for i in held if not ticket_path(i).exists()]
-        ts = [read_ticket(i)[0] for i in held if i not in gone]
+        matched_ids = [t["id"] for t in all_tickets(Path(a.judged_for)) if t["status"] in MATCHED]
+        gone = [i for i in matched_ids if not ticket_path(i).exists()]
+        ts = [read_ticket(i)[0] for i in matched_ids if i not in gone]
     else:
         frozen_check()
         ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
     built_with = {t["unit"]: compiler_for(t["unit"]) for t in ts}  # stops here, before any status is written
     doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
     unusable = toolchain()["unusable"]
-    ref = a.candidate if judging else a.ref or CFG["integration_branch"]
+    ref = candidate if judging else a.ref or CFG["integration_branch"]
     on_integ = not judging and ref == CFG["integration_branch"]
     if not on_integ and not judging:
         outside = [p for p in git("diff", "--name-only", f"{CFG['integration_branch']}...{ref}").split()
@@ -1121,7 +1133,7 @@ def cmd_revalidate(a):
     if bad and not on_integ and not judging:
         append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
     print(f"revalidated {measured} on {ref}: {bad} regressed, {skipped} skipped")
-    if bad:
+    if bad and not (judging and skipped):  # a candidate that was not fully measured is exit 6, whatever it broke
         sys.exit(5)
     if skipped and not on_integ:  # a repair or candidate is proven only where every match it could break was rebuilt
         print(f"ENVIRONMENT: {skipped} matched tickets could not be measured on this machine", file=sys.stderr)
