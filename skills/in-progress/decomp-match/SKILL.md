@@ -28,7 +28,7 @@ If any is missing from the headers or the symbol map, or contradicts them, **sto
 
 ## 3. Write
 
-Write the function in the unit's source file, at its address-order position, directly under `// @decomp <id>`. Change nothing else in the file except adding includes the function needs.
+Write the function in the unit's source file, at its place in the contract's function order, directly under its `@decomp <id>` marker comment. Change nothing else in the file except adding includes the function needs.
 
 ## 4. Loop
 
@@ -36,7 +36,7 @@ Run `python tools/decomp.py check <id>` and read the result:
 
 - **Exit 6, `ENVIRONMENT:` lines**: the machine's target or toolchain differs from the contract, this machine's edition holds the function differently, or the unit's compiler is not provisioned. Nothing you write fixes it: stop and report it in `note`, with `local: build-fail`.
 - **`build-fail`**: fix your own source. If the error is a missing or wrong shared declaration, that is a `gap`: stop.
-- **`guardrail`**: the scan quotes the line and names the rule. Rewrite it within the guardrails: a trigraph, a line continuation, or a `%:` directive is refused whatever it spells, so write the plain form.
+- **`guardrail`**: the scan quotes the line and names the rule. Rewrite it within the guardrails: a trigraph, a line continuation, a `%:` digraph, or token pasting is refused whatever it spells, so write the plain form. An attribute outside the contract's allowlist is refused too: if the evidence shows the original used it, that is a `gap` for the contract, not yours to add.
 - **`differ`**: open the diff report and find the **first** differing instruction. Read [MISMATCH.md](MISMATCH.md) for its category, write two or three ranked hypotheses (each with the change it predicts will remove the difference), then make **one** change per iteration. Progress is a falling `differ_bytes`; a change that does not lower it is reverted, unless it moves the first difference later.
 - **`bytes-match`**: done.
 

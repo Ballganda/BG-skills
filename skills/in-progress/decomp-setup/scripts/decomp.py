@@ -29,11 +29,20 @@ CATEGORIES = {
 BANNED = [
     (r"\b_{0,2}asm\b|\b__asm__\b", "assembly"),
     (r"\b_?_emit\b", "assembly"),
-    (r"__declspec\s*\(\s*naked|__attribute__\s*\(\(\s*naked", "naked function"),
-    (r"__declspec\s*\(\s*(allocate|code_seg)|__attribute__\s*\(\(\s*section", "section placement"),
 ]
 TRIGRAPH = re.compile(r"\?\?[=/'()!<>-]")
+CONTINUATION = re.compile(r"\\[ \t]*$")
+DIRECTIVE_PRAGMA = re.compile(r"\s*#\s*pragma\b")
 PRAGMA_OPERATOR = re.compile(r"\b(__pragma|_Pragma)\b")
+ATTRIBUTE = re.compile(r"\b(__attribute__|__attribute|__declspec|_declspec)\b")
+BRACKET_ATTRIBUTE = re.compile(r"\[\[[^\[\]]*\]\]")
+# Inside an attribute, in any compiler's spelling. No allowlist reaches these.
+NAKED = re.compile(r"(?<![A-Za-z0-9])_*naked_*(?![A-Za-z0-9])")
+PLACEMENT = re.compile(r"(?<![A-Za-z0-9])_*(section|allocate|code_seg|init_seg)_*(?![A-Za-z0-9])")
+CHAR_LITERAL = re.compile(r"'(?:\\[^\n]|[^'\\\n]){1,4}'")
+RAW_STRING = re.compile(r'R"([^()\\\s]{0,16})\(')
+KEY = re.compile(r"[0-9A-Za-z_.]+")  # a function's key: the part of its ticket id after the unit
+HEX = re.compile(r"(0[xX])?[0-9A-Fa-f]+")
 SYMBOLS = "symbols.json"  # the symbol map: symbol name to address in the original
 OPEN_THRESHOLD = 3
 EARLY_WARNING_ATTEMPTS = 10
@@ -50,7 +59,7 @@ def now():
 
 
 def git(*args, cwd=None, check=True):
-    r = subprocess.run(["git", *args], cwd=cwd or ROOT, capture_output=True, text=True)
+    r = subprocess.run(["git", *args], cwd=cwd or ROOT, capture_output=True, text=True, errors="replace")
     if check and r.returncode != 0:
         die(f"git {' '.join(args)}: {r.stderr.strip()}")
     return r.stdout
@@ -74,6 +83,52 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def expand(template, **values):
+    """Replace each {name} given here. Any other brace in a command stays as written."""
+    return re.sub(r"\{(\w+)\}", lambda m: str(values.get(m.group(1), m.group(0))), template)
+
+
+def address_parts(address):
+    """An address split at its colons: plain (`0x00401000`), or with a segment, bank, or module in front."""
+    return [int(p, 16) if HEX.fullmatch(p) else p for p in address.split(":")]
+
+
+def address_order(address):
+    return [(0, p, "") if isinstance(p, int) else (1, 0, p) for p in address_parts(address)]
+
+
+def same_address(address):
+    """One spelling per address, so `0x401000` and `00401000` compare equal."""
+    return ":".join(f"{p:X}" if isinstance(p, int) else p for p in address_parts(address))
+
+
+def function_key(f):
+    """What names an inventory function in its ticket id and expected file: its `key`, else its address."""
+    if f.get("key"):
+        key = f["key"]
+    elif HEX.fullmatch(f["address"]):
+        key = f"{int(f['address'], 16):08X}"
+    else:
+        key = re.sub(r"[^0-9A-Za-z_.]", "_", f["address"])
+    if not KEY.fullmatch(key):
+        die(f"inventory: key '{key}' may hold only letters, digits, '_' and '.'")
+    return key
+
+
+def function_keys(functions):
+    """Each function's key, by position. Stops when two functions share one."""
+    keys, seen = [], {}
+    for f in functions:
+        key = function_key(f)
+        if key in seen:
+            die(f"inventory: {f['address']} in unit {f['unit']} and {seen[key]['address']} in unit "
+                f"{seen[key]['unit']} share the key '{key}'. Give each a `key` of its own "
+                "(a module or overlay name in front of the address).")
+        seen[key] = f
+        keys.append(key)
+    return keys
+
+
 # ---------- environment ----------
 
 ENV_EXIT = 6  # the machine's target or toolchain differs from toolchain.json
@@ -88,12 +143,23 @@ def file_sha(path):
     return h.hexdigest()
 
 
+def checkout_dir():
+    """The .decomp/ directory of this repository's main checkout, which its worktrees share."""
+    common = git("rev-parse", "--git-common-dir").strip()  # relative to ROOT in the main checkout
+    return (ROOT / common).resolve().parent / ".decomp"
+
+
 def local_dir():
-    """The machine-local .decomp/ directory. Worktrees share the main checkout's."""
+    """Where this machine's target path, tools, and downloads live. DECOMP_LOCAL names another checkout's."""
     if os.environ.get("DECOMP_LOCAL"):
         return Path(os.environ["DECOMP_LOCAL"])
-    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
-    return Path(common).parent / ".decomp"
+    return checkout_dir()
+
+
+def on_host(entry):
+    """True when a manifest entry applies to this system: no `hosts`, or one that sys.platform starts with."""
+    hosts = entry.get("hosts")
+    return not hosts or any(sys.platform.startswith(h) for h in hosts)
 
 
 def toolchain():
@@ -113,6 +179,13 @@ def toolchain():
         tgt.setdefault("probes", [])
         tgt.setdefault("known_wrong", [])
         tgt["path"] = os.environ.get("DECOMP_TARGET") or local.get("target", "")
+        tc["elsewhere"] = {t["name"] for t in tc["tools"] if not on_host(t)}
+        tc["tools"] = [t for t in tc["tools"] if on_host(t)]
+        tc["prerequisites"] = [h for h in tc.get("prerequisites", []) if on_host(h)]
+        names = [t["name"] for t in tc["tools"]]
+        twice = sorted({n for n in names if names.count(n) > 1})
+        if twice:
+            die(f"toolchain.json lists {twice} more than once for this host ({sys.platform})", ENV_EXIT)
         for t in tc["tools"]:
             t["root"] = str(Path(local.get("roots", {}).get(t["name"]) or loc / "toolchain" / t["name"]))
         _TOOLCHAIN = tc
@@ -128,7 +201,12 @@ def tool_env():
     return env
 
 
-def banner_of(cmd, env):
+def tool_command(template, **values):
+    """A manifest command with its placeholders filled. {python} is the interpreter running this tool."""
+    return expand(template, tools=ROOT / "tools", python=sys.executable, **values)
+
+
+def version_output(cmd, env):
     """What a version command prints, on stdout and stderr together."""
     try:
         r = subprocess.run(cmd, shell=True, cwd=ROOT, env=env, capture_output=True, text=True,
@@ -168,16 +246,30 @@ def edition_named(name):
     return next((e for e in toolchain()["target"]["editions"] if e["name"] == name), None)
 
 
-def doctor(full=True):
-    """Stop unless the target, host prerequisites, and tools equal toolchain.json. Returns the report lines.
+def prerequisite_failure(tc, env, lines):
+    """The first host prerequisite that is missing or the wrong version, as a message. Passed ones go to lines."""
+    for h in tc["prerequisites"]:  # the user installs these; a tool behind a missing one fails confusingly
+        out = version_output(tool_command(h["version_cmd"]), env)
+        if h["version"] not in out:
+            return (f"prerequisite {h['name']}: missing or the wrong version: `{h['version_cmd']}` must print "
+                    f"'{h['version']}'; it printed: {out.strip()[:300]}. The user installs it; provision never does.")
+        lines.append(f"{h['name']} ok: {h['version']}")
+    return None
 
-    Leaves the recognised edition in toolchain()["target"]["edition"].
 
-    full=False trusts the last passed check while toolchain.json, the target, and every
-    required file keep the same size and modification time.
-    """
-    tc = toolchain()
-    loc = local_dir()
+def tool_failure(t, env):
+    """Why tool t is not the one toolchain.json pins, or None when it is."""
+    missing = [f for f in t.get("files", []) if not (Path(t["root"]) / f).exists()]
+    if missing:
+        return f"{t['name']}: missing under {t['root']}: {missing}"
+    out = version_output(tool_command(t["banner_cmd"], root=t["root"]), env)
+    if t["banner"] not in out:
+        return f"{t['name']}: banner lacks '{t['banner']}'; the command printed: {out.strip()[:300]}"
+    return None
+
+
+def environment_stamp(tc):
+    """Changes whenever toolchain.json, the target, or a required file does."""
     tgt = tc["target"]
     watched = ([Path(tgt["path"])] if tgt["path"] else []) + [
         Path(t["root"]) / f for t in tc["tools"] for f in t.get("files", [])]
@@ -188,12 +280,30 @@ def doctor(full=True):
             stamp.append(f"{p}:{st.st_size}:{st.st_mtime_ns}")
         except OSError:
             stamp.append(f"{p}:missing")
-    stamp = sha("\n".join(stamp).encode())
+    return sha("\n".join(stamp).encode())
+
+
+def doctor(full=True, need=None):
+    """Stop unless the target, host prerequisites, and tools equal toolchain.json. Returns the report lines.
+
+    need names the tools that must pass (None: all of them). A tool outside need that fails
+    is reported and left in toolchain()["unusable"], so only the units built with it stop.
+    Leaves the recognised edition in toolchain()["target"]["edition"].
+
+    full=False trusts the last check that passed in full while toolchain.json, the target,
+    and every required file keep the same size and modification time.
+    """
+    tc = toolchain()
+    loc = local_dir()
+    tgt = tc["target"]
+    tc["unusable"] = {}
+    stamp = environment_stamp(tc)
     cache = loc / "doctor.json"
     if not full and cache.exists():
         last = json.loads(cache.read_text(encoding="utf-8"))
-        if last.get("ok") == stamp and edition_named(last.get("edition")):
-            tgt["edition"] = edition_named(last["edition"])
+        edition = edition_named(last.get("edition"))
+        if last.get("ok") == stamp and edition:
+            tgt["edition"] = edition
             return []
     bad, lines = [], []
     if not tgt["path"]:
@@ -204,60 +314,68 @@ def doctor(full=True):
         tgt["edition"], line = recognise(tgt)
         (lines if tgt["edition"] else bad).append(line)
     env = tool_env()
-    tools = tc["tools"]
-    for h in tc.get("prerequisites", []):  # the user installs these; a tool behind a missing one fails confusingly
-        out = banner_of(h["version_cmd"], env)
-        if h["version"] not in out:
-            bad.append(f"prerequisite {h['name']}: missing or the wrong version: `{h['version_cmd']}` must print "
-                       f"'{h['version']}'; it printed: {out.strip()[:300]}. The user installs it; provision never does.")
-            tools = []
-            break
-        lines.append(f"{h['name']} ok: {h['version']}")
-    for t in tools:
-        missing = [f for f in t.get("files", []) if not (Path(t["root"]) / f).exists()]
-        if missing:
-            bad.append(f"{t['name']}: missing under {t['root']}: {missing}")
-            continue
-        out = banner_of(t["banner_cmd"].replace("{root}", t["root"]).replace("{tools}", str(ROOT / "tools")), env)
-        if t["banner"] not in out:
-            bad.append(f"{t['name']}: banner lacks '{t['banner']}'; the command printed: {out.strip()[:300]}")
-        else:
-            lines.append(f"{t['name']} ok: {t['banner']}")
+    behind = prerequisite_failure(tc, env, lines)
+    if behind:
+        bad.append(behind)
+    else:
+        for t in tc["tools"]:
+            why = tool_failure(t, env)
+            if why is None:
+                lines.append(f"{t['name']} ok: {t['banner']}")
+            elif need is None or t["name"] in need:
+                bad.append(why)
+            else:
+                tc["unusable"][t["name"]] = why
+                lines.append(f"not usable here: {why}")
     if bad:
         cache.unlink(missing_ok=True)
         for b in bad:
             print(f"ENVIRONMENT: {b}", file=sys.stderr)
         die("this machine does not match toolchain.json; nothing was built or recorded. "
             "Fix it with `decomp.py provision` or the user's own install, never by editing toolchain.json.", ENV_EXIT)
-    loc.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": tgt["edition"]["name"]}), encoding="utf-8")
+    if tc["unusable"]:
+        cache.unlink(missing_ok=True)
+    else:
+        loc.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": tgt["edition"]["name"]}), encoding="utf-8")
     return lines
 
 
-def differs(t):
-    """True when the recognised edition holds ticket t's function differently."""
-    held = toolchain()["target"].get("edition", {}).get("differs", [])
-    return int(t["address"], 16) in {int(a, 16) for a in held}
+def edition_differs(t):
+    """True when the recognised edition holds ticket t's function differently. Needs doctor first."""
+    held = toolchain()["target"]["edition"].get("differs", [])
+    return (t["id"] in held or t["id"].split("-", 1)[1] in held
+            or same_address(t["address"]) in {same_address(a) for a in held if ":" in a or HEX.fullmatch(a)})
 
 
-def unit_compiler(unit):
-    """The manifest tool that builds this unit: its own when the contract maps one, else the default."""
+def compiler_for(unit):
+    """The manifest tool that builds this unit: its own when the contract maps one, else the default.
+
+    Stops with the environment exit when toolchain.json has no such tool for this host.
+    """
     name = CFG.get("unit_compilers", {}).get(unit) or CFG.get("compiler", "")
-    if name and name not in {t["name"] for t in toolchain()["tools"]}:
-        print(f"ENVIRONMENT: unit {unit} is built with '{name}', which toolchain.json does not list", file=sys.stderr)
+    tc = toolchain()
+    if name and name not in {t["name"] for t in tc["tools"]}:
+        where = f"lists only for another host than this one ({sys.platform})" if name in tc["elsewhere"] else "does not list"
+        print(f"ENVIRONMENT: unit {unit} is built with '{name}', which toolchain.json {where}", file=sys.stderr)
         die("nothing was built or recorded; a unit is never built with another compiler than its own.", ENV_EXIT)
     return name
 
 
-def countable(t):
-    """After doctor: stop with the environment exit when no result for ticket t could count on this machine."""
-    if differs(t):
+def tools_needed(units):
+    """Every tool but the compilers that build none of these units."""
+    every = {CFG.get("compiler", "")} | set(CFG.get("unit_compilers", {}).values())
+    return {t["name"] for t in toolchain()["tools"]} - (every - {compiler_for(u) for u in units})
+
+
+def stop_if_edition_differs(t):
+    """After doctor: stop with the environment exit when this machine's edition cannot judge ticket t."""
+    if edition_differs(t):
         e = toolchain()["target"]["edition"]
         print(f"ENVIRONMENT: edition '{e['name']}' holds {t['id']} ({t['address']}) differently from the "
               "contract's expected bytes", file=sys.stderr)
         die("nothing was built or recorded; this function is matched only on an edition that holds it unchanged.",
             ENV_EXIT)
-    unit_compiler(t["unit"])
 
 
 def cmd_doctor(a):
@@ -272,6 +390,10 @@ def cmd_provision(a):
     dl = local_dir() / "downloads"
     dl.mkdir(parents=True, exist_ok=True)
     env = tool_env()
+    behind = prerequisite_failure(tc, env, [])
+    if behind:  # an unpack step behind a missing archive tool fails without saying why
+        print(f"ENVIRONMENT: {behind}", file=sys.stderr)
+        die("nothing was downloaded or unpacked.", ENV_EXIT)
     for t in tc["tools"]:
         if a.tool and t["name"] != a.tool:
             continue
@@ -286,7 +408,8 @@ def cmd_provision(a):
             die(f"{t['name']}: source url must be https")
         archive = dl / (src.get("file") or src["url"].split("?")[0].rsplit("/", 1)[-1])
         digest = file_sha(archive) if archive.exists() else None
-        if digest is None or (src.get("sha256") and digest != src["sha256"]):
+        stale = digest is not None and src.get("sha256") and digest != src["sha256"]
+        if digest is None or (stale and a.force):
             print(f"{t['name']}: downloading {src['url']}")
             part = archive.with_name(archive.name + ".part")
             try:
@@ -302,12 +425,12 @@ def cmd_provision(a):
             die(f"{t['name']}: toolchain.json has no sha256 for this source. Record the size and hash above "
                 "with where they come from, then run provision again. Nothing was unpacked.", ENV_EXIT)
         if digest != src["sha256"] or size != src.get("size", size):
-            die(f"{t['name']}: {archive.name} is {size} B sha256 {digest}; toolchain.json says "
-                f"{src.get('size')} B sha256 {src['sha256']}. Nothing was unpacked.", ENV_EXIT)
+            die(f"{t['name']}: {archive} is {size} B sha256 {digest}; toolchain.json says "
+                f"{src.get('size')} B sha256 {src['sha256']}. Nothing was unpacked. "
+                "`provision --force` downloads it again.", ENV_EXIT)
         root.mkdir(parents=True, exist_ok=True)
         for c in t.get("unpack", []):
-            c = (c.replace("{archive}", str(archive)).replace("{root}", str(root))
-                 .replace("{tools}", str(ROOT / "tools")))
+            c = tool_command(c, archive=archive, root=root)
             if subprocess.run(c, shell=True, cwd=dl, env=env).returncode != 0:
                 die(f"{t['name']}: unpack step failed: {c}", ENV_EXIT)
         print(f"{t['name']}: unpacked to {root}")
@@ -389,66 +512,148 @@ def records(name):
 
 # ---------- build and compare ----------
 
-def operator_text(rest):
-    """The text inside a pragma operator's parentheses, a string literal unquoted. None when it does not close."""
-    m = re.match(r"\s*\(", rest)
+def lexed(text):
+    """Two copies of a source text, each the same length with the same line breaks.
+
+    code: comments, and the insides of string and character literals, blanked.
+    bare: comments blanked, literals kept.
+    Text that only looks like a literal (an unclosed quote, a digit separator) stays code.
+    """
+    code, bare = list(text), list(text)
+
+    def blank(out, a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(code, i, j), blank(bare, i, j)
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(code, i, j), blank(bare, i, j)
+        elif c == '"':
+            raw = RAW_STRING.match(text, i - 1) if i and text[i - 1] == "R" else None
+            if raw:
+                j = text.find(")" + raw.group(1) + '"', raw.end())
+                j = -1 if j < 0 else j + len(raw.group(1)) + 1
+            else:
+                j = i + 1
+                while j < n and text[j] not in '"\n':
+                    j += 2 if text[j] == "\\" else 1
+                j = j if j < n and text[j] == '"' else -1
+            if j < 0:
+                j = i  # not closed: leave it as code
+            else:
+                blank(code, i + 1, j)
+            j += 1
+        elif c == "'" and CHAR_LITERAL.match(text, i):
+            j = CHAR_LITERAL.match(text, i).end()
+            blank(code, i + 1, j - 1)
+        else:
+            j = i + 1
+        i = j
+    return "".join(code), "".join(bare)
+
+
+def parenthesised(code, bare, start):
+    """The (...) that opens at or after start: (its text from bare, the index after it). None when it does not close.
+
+    Parentheses are counted in code, where no literal can hold one.
+    """
+    m = re.compile(r"\s*\(").match(code, start)
     if not m:
         return None
-    depth, quoted, end = 1, False, None
-    for i in range(m.end(), len(rest)):
-        c = rest[i]
-        if quoted:
-            quoted = c != '"' or rest[i - 1] == "\\"
-        elif c == '"':
-            quoted = True
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-    if end is None:
-        return None
-    inner = rest[m.end():end].strip()
+    depth = 1
+    for i in range(m.end(), len(code)):
+        depth += {"(": 1, ")": -1}.get(code[i], 0)
+        if depth == 0:
+            return bare[m.end():i], i + 1
+    return None
+
+
+def as_directive(inner):
+    """What a pragma operator stands for: `#pragma` and its argument, a string literal unquoted."""
+    inner = inner.strip()
     lit = re.fullmatch(r'L?"(.*)"', inner)
-    return re.sub(r"\\(.)", r"\1", lit.group(1)) if lit else inner
+    return "#pragma " + (re.sub(r"\\(.)", r"\1", lit.group(1)) if lit else inner)
 
 
 def scan(text):
-    """Guardrail scan of one source file, on its raw text. Returns a list of violations.
+    """Guardrail scan of one source file. Returns a list of violations.
 
-    Forms that hide a directive from a line scan are refused, never interpreted.
+    Comments and literals are set aside first, so neither can hide code nor be mistaken for it.
+    Forms that hide a directive or a keyword from a line scan are refused, never interpreted.
     """
     bad = []
-    allow = [re.compile(a) for a in CFG.get("pragma_allow", [])]
-    extra = [(b, "contract ban") for b in CFG.get("banned", [])]
-    for n, line in enumerate(text.splitlines(), 1):
+    pragmas = [re.compile(a) for a in CFG.get("pragma_allow", [])]
+    attributes = [re.compile(a) for a in CFG.get("attribute_allow", [])]
+    banned = BANNED + [(b, "contract ban") for b in CFG.get("banned", [])]
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    code_text, bare_text = lexed(text)
+    rows = zip(text.split("\n"), code_text.split("\n"), bare_text.split("\n"))
+    for n, (line, code, bare) in enumerate(rows, 1):
+        def refuse(why):
+            bad.append(f"line {n}: {why}: {line.strip()}")
+
         if TRIGRAPH.search(line):
-            bad.append(f"line {n}: trigraph: {line.strip()}")
-        if re.search(r"\\[ \t]*$", line):
-            bad.append(f"line {n}: line continuation: {line.strip()}")
-        if re.match(r"\s*%:", line):
-            bad.append(f"line {n}: digraph directive: {line.strip()}")
-        code = re.sub(r"//.*", "", line)
+            refuse("trigraph")
+        if CONTINUATION.search(line):
+            refuse("line continuation")
+        if "%:" in code:
+            refuse("digraph directive")
+        if "##" in code:
+            refuse("token pasting")
         for m in PRAGMA_OPERATOR.finditer(code):  # held to the allowlist as the #pragma it stands for
-            inner = operator_text(code[m.end():])
-            if inner is None or not any(a.search(f"#pragma {inner}") for a in allow):
-                bad.append(f"line {n}: {m.group(1)} not in allowlist: {line.strip()}")
-        for pat, why in BANNED + extra:
+            found = parenthesised(code, bare, m.end())
+            if not found or not any(a.search(as_directive(found[0])) for a in pragmas):
+                refuse(f"{m.group(1)} not in allowlist")
+        spans = [(m.start(), m.end()) for m in BRACKET_ATTRIBUTE.finditer(code)]
+        for m in ATTRIBUTE.finditer(code):
+            found = parenthesised(code, bare, m.end())
+            spans.append((m.start(), found[1] if found else None))
+        for start, end in spans:
+            if end is None:
+                refuse("attribute does not close on its line")
+                continue
+            written = bare[start:end]
+            if NAKED.search(written):
+                refuse("naked function")
+            elif PLACEMENT.search(written):
+                refuse("section placement")
+            elif not any(a.search(written) for a in attributes):
+                refuse("attribute not in allowlist")
+        for pat, why in banned:
             if re.search(pat, code):
-                bad.append(f"line {n}: {why}: {line.strip()}")
-        if re.match(r"\s*#\s*pragma\b", code) and not any(a.search(code) for a in allow):
-            bad.append(f"line {n}: pragma not in allowlist: {line.strip()}")
+                refuse(why)
+        if DIRECTIVE_PRAGMA.match(code) and not any(a.search(bare) for a in pragmas):
+            refuse("pragma not in allowlist")
     return bad
 
 
 def fill(template, t, obj, report, tree):
-    return template.format(
-        id=t["id"], unit=t["unit"], source=t["source"], expected=t["expected"],
+    return expand(
+        template, id=t["id"], unit=t["unit"], source=t["source"], expected=t["expected"],
         address=t["address"], obj=obj, report=report,
-        symbols=str(Path(tree) / SYMBOLS), compiler=unit_compiler(t["unit"]),
+        symbols=Path(tree) / SYMBOLS, compiler=compiler_for(t["unit"]),
+        tools=Path(tree) / "tools", python=sys.executable,
     )
+
+
+def adapter(template, t, obj, report, tree, env):
+    """Run one adapter command. A tool's output is in the tool's encoding, never assumed to be this system's."""
+    return subprocess.run(fill(template, t, obj, report, tree), shell=True, cwd=tree, env=env,
+                          capture_output=True, text=True, errors="replace")
+
+
+def marker_count(text, tid):
+    """How often the ticket's marker stands in a source: `// @decomp <id>` or `/* @decomp <id> */`."""
+    return len(re.findall(r"(?://|/\*)[ \t]*@decomp " + re.escape(tid) + r"(?![\w.-])", text))
 
 
 def build_and_diff(t, tree, report):
@@ -457,9 +662,9 @@ def build_and_diff(t, tree, report):
     if not src.exists():
         return "build-fail", None, f"missing {t['source']}"
     text = src.read_text(encoding="utf-8", errors="replace")
-    marks = text.count(f"// @decomp {t['id']}")
+    marks = marker_count(text, t["id"])
     if marks != 1:
-        return "guardrail", None, f"expected one '// @decomp {t['id']}' marker, found {marks}"
+        return "guardrail", None, f"expected one '@decomp {t['id']}' marker comment, found {marks}"
     bad = scan(text)
     for inc in sorted(includes(text)):  # project headers obey the same guardrails
         h = Path(tree) / "include" / inc
@@ -469,10 +674,10 @@ def build_and_diff(t, tree, report):
         return "guardrail", None, "\n".join(bad)
     obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
     env = tool_env()
-    b = subprocess.run(fill(CFG["build"], t, obj, report, tree), shell=True, cwd=tree, env=env, capture_output=True, text=True)
+    b = adapter(CFG["build"], t, obj, report, tree, env)
     if b.returncode != 0:
         return "build-fail", None, (b.stderr or b.stdout)[-4000:]
-    d = subprocess.run(fill(CFG["diff"], t, obj, report, tree), shell=True, cwd=tree, env=env, capture_output=True, text=True)
+    d = adapter(CFG["diff"], t, obj, report, tree, env)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -512,7 +717,9 @@ class Worktree:
 
 def cmd_gen_specs(a):
     inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
-    funcs = sorted(inv["functions"], key=lambda f: int(f["address"], 16))
+    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
+        f["key"] = key
+    funcs = sorted(inv["functions"], key=lambda f: address_order(f["address"]))
     for u in inv["units"]:
         mine = [f for f in funcs if f["unit"] == u["id"]]
         inn = [f for f in mine if f["scope"] == "in"]
@@ -521,12 +728,13 @@ def cmd_gen_specs(a):
             f"# Unit {u['id']}", "",
             f"Source: `{u['source']}`. Range {u['start']} to {u['end']}. Evidence: {u.get('evidence', 'address order')}.", "",
             "**Success:** every ticket below reaches `matched` through `tools/decomp.py`, with the functions "
-            "in address order in the source file, each under its `// @decomp <id>` marker.", "",
+            "in the contract's order in the source file (address order unless it says otherwise), each "
+            "under its `@decomp <id>` marker comment.", "",
             f"In scope: {len(inn)} functions, {sum(f['size'] for f in inn)} B.", "",
             "| Ticket | Size | Tier |", "| --- | --- | --- |",
         ]
         for f in inn:
-            lines.append(f"| {u['id']}-{int(f['address'], 16):08X} | {f['size']} | {tier(f['size'])} |")
+            lines.append(f"| {u['id']}-{f['key']} | {f['size']} | {tier(f['size'])} |")
         if out:
             lines += ["", "## Excluded", "", "| Address | Size | Scope | Evidence |", "| --- | --- | --- | --- |"]
             for f in out:
@@ -541,15 +749,15 @@ def cmd_gen_tickets(a):
     inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
     units = {u["id"]: u for u in inv["units"]}
     made = kept = 0
-    for f in inv["functions"]:
+    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
         if f["scope"] != "in":
             continue
-        addr = int(f["address"], 16)
-        tid = f"{f['unit']}-{addr:08X}"
+        tid = f"{f['unit']}-{key}"
+        plain = HEX.fullmatch(f["address"])
         fields = {
-            "id": tid, "unit": f["unit"], "address": f"0x{addr:08X}", "size": f["size"],
-            "tier": tier(f["size"]), "source": units[f["unit"]]["source"],
-            "expected": f"expected/{addr:08X}.bin", "status": "open", "claimed_by": "", "claimed_at": "",
+            "id": tid, "unit": f["unit"], "address": f"0x{int(f['address'], 16):08X}" if plain else f["address"],
+            "size": f["size"], "tier": tier(f["size"]), "source": units[f["unit"]]["source"],
+            "expected": f.get("expected") or f"expected/{key}.bin", "status": "open", "claimed_by": "", "claimed_at": "",
         }
         body = "## Notes\n"
         if ticket_path(tid).exists():
@@ -569,7 +777,7 @@ def cmd_next(a):
     started = {t["unit"] for t in ts if t["status"] in MATCHED}
     ready = [t for t in ts if t["status"] in ("open", "regressed") and t["unit"] not in busy]
     order = {"TINY": 0, "SMALL": 1, "MEDIUM": 2, "LARGE": 3}
-    ready.sort(key=lambda t: (t["unit"] not in started, order[t["tier"]], int(t["address"], 16)))
+    ready.sort(key=lambda t: (t["unit"] not in started, order[t["tier"]], address_order(t["address"])))
     picked, units = [], set()
     for t in ready:  # one ticket per unit: units are one writer at a time
         if t["unit"] not in units:
@@ -585,7 +793,7 @@ def cmd_next(a):
 
 
 def lockfile(name):
-    d = ROOT / ".decomp" / "locks"
+    d = checkout_dir() / "locks"  # one set per repository, so every worktree sees a claim
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{name}.lock"
 
@@ -624,8 +832,8 @@ def cmd_release(a):
 
 def cmd_check(a):
     t, _ = read_ticket(a.id)
-    doctor(full=False)
-    countable(t)
+    doctor(full=False, need=tools_needed([t["unit"]]))
+    stop_if_edition_differs(t)
     report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
     result, n, log = build_and_diff(t, os.getcwd(), report)
     print(json.dumps({"result": result, "differ_bytes": n, "report": report}))
@@ -635,13 +843,13 @@ def cmd_check(a):
 
 def cmd_verify(a):
     frozen_check()
-    doctor()
     t, _ = read_ticket(a.id)
+    doctor(need=tools_needed([t["unit"]]))
     if t["status"] != "claimed":
         die(f"{a.id} is {t['status']}; verify needs a claimed ticket")
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
-    countable(t)
+    stop_if_edition_differs(t)
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
     stamp = now()
@@ -718,7 +926,10 @@ def includes(text):
 
 def cmd_revalidate(a):
     frozen_check()
-    doctor()
+    ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
+    built_with = {t["unit"]: compiler_for(t["unit"]) for t in ts}  # stops here, before any status is written
+    doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
+    unusable = toolchain()["unusable"]
     ref = a.ref or CFG["integration_branch"]
     on_integ = ref == CFG["integration_branch"]
     if not on_integ:
@@ -727,17 +938,21 @@ def cmd_revalidate(a):
         if outside:
             append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
             die(f"{ref} touches paths outside include/ and {SYMBOLS}: {outside}", 5)
-    ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
-    for t in [t for t in ts if differs(t)]:  # its bytes cannot be measured on this edition, either way
-        print(f"SKIPPED {t['id']}: this machine's edition holds it differently")
-    ts = [t for t in ts if not differs(t)]
-    bad = 0
+    bad = skipped = measured = 0
     with Worktree(ref) as tree:
         if a.header:
             name = Path(a.header).name
             ts = [t for t in ts if (Path(tree) / t["source"]).exists() and any(
                 Path(i).name == name for i in includes((Path(tree) / t["source"]).read_text(errors="replace")))]
         for t in ts:
+            why = ("this machine's edition holds it differently" if edition_differs(t) else
+                   f"its compiler '{built_with[t['unit']]}' is not usable here" if built_with[t["unit"]] in unusable
+                   else "")
+            if why:  # its bytes cannot be measured on this machine, either way
+                skipped += 1
+                print(f"SKIPPED {t['id']}: {why}")
+                continue
+            measured += 1
             report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
             result, n, _ = build_and_diff(t, tree, report)
             ok = result == "bytes-match"
@@ -753,8 +968,12 @@ def cmd_revalidate(a):
                     append("events.jsonl", {"unix": now(), "ticket": t["id"], "event": "regressed"})
     if bad and not on_integ:
         append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
-    print(f"revalidated {len(ts)} on {ref}: {bad} regressed")
-    sys.exit(5 if bad else 0)
+    print(f"revalidated {measured} on {ref}: {bad} regressed, {skipped} skipped")
+    if bad:
+        sys.exit(5)
+    if skipped and not on_integ:  # a repair is accepted only where every match it could break was rebuilt
+        print(f"ENVIRONMENT: {skipped} matched tickets could not be measured on this machine", file=sys.stderr)
+        die(f"{ref} is not proven here; revalidate it on a machine that can build every ticket above.", ENV_EXIT)
 
 
 def cmd_note(a):
@@ -872,7 +1091,7 @@ def cmd_report(a):
     print(f"tried:     {len(tried)} tickets, {len(atts)} attempts")
 
 
-PATTERN = re.compile(r"^- .+\[proven: (u\d{4}-[0-9A-F]{8})\] \[added: (\d+)\]\s*$")
+PATTERN = re.compile(r"^- .+\[proven: (u\d{4,}-[0-9A-Za-z_.]+)\] \[added: (\d+)\]\s*$")
 
 
 def pattern_lines():
@@ -929,7 +1148,7 @@ def cmd_sync(a):
 
     nums = {}
     for u, tt in sorted(units.items()):
-        tt.sort(key=lambda t: int(t["address"], 16))
+        tt.sort(key=lambda t: address_order(t["address"]))
         body = "\n".join([f"Unit `{u}`: `{tt[0]['source']}`. Generated by `decomp.py sync`; do not edit.", ""] + [
             f"- [{'x' if t['status'] in MATCHED else ' '}] `{t['id']}` {t['size']} B {t['tier']} ({t['status']})" for t in tt])
         nums[u] = push(u, f"decomp unit {u}", body + "\n", all(t["status"] in MATCHED for t in tt))

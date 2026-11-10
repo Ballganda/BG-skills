@@ -18,7 +18,8 @@ The contract names exact tools. Provisioning puts those tools on this machine, r
   },
   "host": "Windows runs the tools natively; Linux and macOS need Wine 8 or later",
   "prerequisites": [
-    {"name": "7z", "version_cmd": "7z", "version": "7-Zip 23.01"}
+    {"name": "7z", "version_cmd": "7z", "version": "7-Zip 23.01"},
+    {"name": "wine", "version_cmd": "wine --version", "version": "wine-8", "hosts": ["linux", "darwin"]}
   ],
   "tools": [
     {
@@ -45,7 +46,8 @@ The contract names exact tools. Provisioning puts those tools on this machine, r
 - `name` is how adapters find the tool: `decomp.py` exports each tool's folder as `DECOMP_TOOL_<NAME>` and the target's path as `DECOMP_TARGET`. Adapters and `banner_cmd` use those and `{root}`, never an absolute path.
 - `files` lists everything a build needs that an incomplete install tends to lack (the compiler binary, the platform headers the sources include).
 - `banner` is a literal substring of what `banner_cmd` prints, on stdout or stderr. It carries the full version, so a neighbouring build cannot pass.
-- `unpack` steps run in the downloads folder. `{tools}` is the project's `tools/` folder, so a step can run a script the project ships (see [Unpack scripts](#unpack-scripts)).
+- `unpack` steps run in the downloads folder. `{tools}` is the project's `tools/` folder, so a step can run a script the project ships (see [Unpack scripts](#unpack-scripts)). `{python}` is the interpreter running `decomp.py`: write it, never a bare `python`, in every command the manifest or `decomp.json` holds, because some systems have only `python3`.
+- `hosts` limits a prerequisite or a tool entry to the systems whose `sys.platform` starts with one of its values (`win32`, `linux`, `darwin`). Without it the entry applies everywhere. A tool that needs another archive, other files, or another banner per system gets one entry per host under the same `name`.
 - A tool the user installs has `"installed_by": "user"` and no `source` or `unpack`.
 - A unit built with another compiler build than the rest gets that build as its own tool entry. `decomp.json` names the default in `compiler` and maps the unit in `unit_compilers`.
 
@@ -67,13 +69,13 @@ A tool with no entry in `roots` lives in `.decomp/toolchain/<name>/`, where `pro
 
    Prefer unpacking to installing: extract only the files the build needs into `.decomp/toolchain/<name>/`, so nothing touches the system, no installer runs, and removing the folder undoes it. If a tool only works installed, it is the user's to install.
 4. **Write** `toolchain.json` and `.decomp/local.json`, copy [scripts/decomp.py](scripts/decomp.py) into `tools/` if it is not there yet, and write the [wrapper](#the-wrapper) and any [unpack scripts](#unpack-scripts).
-5. **Provision.** Run `python tools/decomp.py provision`. It downloads over HTTPS, compares size and SHA-256 before unpacking anything, and stops on a difference. When the vendor publishes no hash, leave `sha256` empty for the first run: `provision` prints the download's size and hash and unpacks nothing. Record them with `hash_from` as `first download on <Unix time>`, tell the user that this hash pins the file but does not vouch for it, and run again.
+5. **Provision.** Run `python tools/decomp.py provision`. It checks the host prerequisites, downloads over HTTPS, compares size and SHA-256 before unpacking anything, and stops on a difference. A file already in `.decomp/downloads/` (one the user supplied, or an earlier download) is compared as it is, and downloaded again only with `--force`. When the vendor publishes no hash, leave `sha256` empty for the first run: `provision` prints the download's size and hash and unpacks nothing. Record them with `hash_from` as `first download on <Unix time>`, tell the user that this hash pins the file but does not vouch for it, and run again.
 6. **Prove.** Run `python tools/decomp.py doctor`. It passes only when the target is an accepted edition and every prerequisite, listed file, and banner equals `toolchain.json`. Paste its output into `DECOMP.md`.
 7. **Probe.** With the toolchain present, run the probes `IDENTIFY.md` listed for this candidate and record each result there. A probe that kills the candidate sends you back to step 1 with the next one: remove the dead candidate's folder and its `toolchain.json` entry.
 
 ## Unpack scripts
 
-An old compiler often sits inside an installer image that no one-line command opens. Write a script in `tools/` that extracts exactly the files the build needs, and call it from `unpack`: `python "{tools}/unpack_compiler.py" "{archive}" "{root}"`.
+An old compiler often sits inside an installer image that no one-line command opens. Write a script in `tools/` that extracts exactly the files the build needs, and call it from `unpack`: `"{python}" "{tools}/unpack_compiler.py" "{archive}" "{root}"`.
 
 - It uses only the standard library and the declared host prerequisites.
 - It is frozen with the rest of `tools/` by the `decomp-setup` tag.
@@ -81,7 +83,7 @@ An old compiler often sits inside an installer image that no one-line command op
 
 ## The wrapper
 
-Write one wrapper in `tools/` (`tools/run_tool.py`). The adapters and every `banner_cmd` invoke a tool through it, never directly: `python "{tools}/run_tool.py" compiler /c ...`.
+Write one wrapper in `tools/` (`tools/run_tool.py`). The adapters and every `banner_cmd` invoke a tool through it, never directly: `"{python}" "{tools}/run_tool.py" compiler <the tool's arguments>`.
 
 - It owns the environment: include and library paths, built from `DECOMP_TOOL_<NAME>`.
 - It owns path conversion between the host and what the tool expects.
@@ -96,8 +98,7 @@ Two editions of a product often carry the same code and differ only outside it (
 
 - **Whole-file edition**: `name`, `sha256`, `size`. The edition `expected/` was cut from is always one of these.
 - **Probe edition**: `name`, `probes_needed`, and `differs`. It is accepted when at least `probes_needed` of the `probes` match.
-- **Probes**: file offsets and lengths with the SHA-256 of each range, chosen inside the code the editions share. Compute them from the reference edition. They hold hashes only, never target bytes.
-- **`differs`**: the address of every function the edition holds differently, each proven by comparing the two editions. `check` and `verify` exit 6 on those tickets on that edition, so no match is measured against the wrong bytes.
+- **Probes**: file offsets and lengths with the SHA-256 of each range, chosen inside the code the editions share. Compute them from the reference edition. They hold hashes only, never target bytes. A product that ships its code compressed or encrypted has no stable offsets: make the unpacked image the contract's target, and record in `DECOMP.md` how the user produces it.- **`differs`**: every function the edition holds differently, by address (or by key, where one address names more than one function), each proven by comparing the two editions. `check` and `verify` exit 6 on those tickets on that edition, so no match is measured against the wrong bytes.
 - **Known-wrong edition**: `name`, `sha256`, and a `message` telling the user what to do.
 
 Adding an edition is a contract change: an ADR, the user's go-ahead, a tag move, then `revalidate`.

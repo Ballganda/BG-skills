@@ -2,6 +2,8 @@
 
 Start from the **first** differing instruction: later differences are often its echoes. A difference of one or two instructions can still come from a misunderstanding. Correct the source so the compiler produces the bytes on its own; never steer it with constructs outside the guardrails.
 
+The Check column gives x86 spellings as examples. On another architecture, look for the same distinction in its own instructions: sign versus zero extension, signed versus unsigned compare and shift, the load and store width, the frame's offsets, the convention's argument registers.
+
 | Category | Check | Source levers |
 | --- | --- | --- |
 | `signedness` | `movsx`/`movzx`, `jl`/`jb`, `jg`/`ja`, `sar`/`shr`, `idiv`/`div`, `imul`/`mul` | Signedness of the variable, the field, the parameter, or the return type; an unsigned constant suffix |
@@ -21,7 +23,7 @@ Start from the **first** differing instruction: later differences are often its 
 
 ## Relocated operands
 
-The diff masks a relocated operand only when its target is proven to be the original's. Two lines in the report are not ordinary byte differences:
+The diff masks a relocated operand (the bits one relocation fills, which on some architectures are spread over two instructions) only when its target is proven to be the original's. Two lines in the report are not ordinary byte differences:
 
 | The report says | It means | Do |
 | --- | --- | --- |

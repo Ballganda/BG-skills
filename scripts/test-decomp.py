@@ -188,8 +188,73 @@ def test_clean_source_matches(base):
     expect_match(Project(base))
 
 
-def test_scan_refuses_assembly_and_unlisted_pragma(base):
+def test_scan_refuses_assembly(base):
     expect_guardrail(Project(base, source=CLEAN + "void g(void) { __asm nop }\n"), "assembly", "__asm nop")
+
+
+def each(base, cases):
+    """One scratch folder per case, so a test can build several projects."""
+    for n, case in enumerate(cases):
+        d = Path(base) / str(n)
+        d.mkdir()
+        yield d, case
+
+
+def test_scan_sees_code_behind_literals_and_comments(base):
+    hidden = ['const char *u = "http://x"; __asm nop',
+              "int n = 1'0; __asm nop; int m = 2'0;",
+              'const char *r = R"(")"; __asm nop',
+              "/* note */ __asm nop",
+              "char q = '\"'; __asm nop; char p = '\"';"]
+    for d, line in each(base, hidden):
+        expect_guardrail(Project(d, source=CLEAN + line + "\n"), "assembly", line)
+
+
+def test_scan_passes_banned_words_in_literals_and_comments(base):
+    src = (CLEAN + 'const char *p = "src\\\\asm\\\\x.c";\n/* was inline asm in the original */\n'
+           "// __declspec(naked) once\nint tag = 'asm';\nconst char *s = \"#pragma optimize\";\n")
+    expect_match(Project(base, source=src))
+
+
+def test_scan_refuses_directive_hidden_from_a_line_reader(base):
+    hidden = [('#\fpragma optimize("", off)', "pragma"), ('#\vpragma optimize("", off)', "pragma"),
+              ('/**/#pragma optimize("", off)', "pragma"), ('/**/%:pragma optimize("", off)', "digraph"),
+              ("#define J(a, b) a##b", "token pasting"), ("#define J(a, b) a%:%:b", "digraph")]
+    for d, (line, why) in each(base, hidden):
+        expect_guardrail(Project(d, source=CLEAN + line + "\n"), why, line.strip())
+
+
+def test_scan_refuses_naked_and_placement_in_every_spelling(base):
+    spelled = [("__declspec(naked) void g(void) {}", "naked"),
+               ("void g(void) __attribute__((noinline, naked));", "naked"),
+               ("void g(void) __attribute__((__naked__));", "naked"),
+               ("[[gnu::naked]] void g(void);", "naked"),
+               ('int v __attribute__((__section__(".sdata"))) = 1;', "section placement"),
+               ('__declspec(section ".init") void g(void);', "section placement"),
+               ('__declspec(allocate(".seg")) int v = 1;', "section placement")]
+    allow_all = {"attribute_allow": ["."]}  # no allowlist reaches these
+    for d, (line, why) in each(base, spelled):
+        expect_guardrail(Project(d, source=CLEAN + line + "\n", config=allow_all), why, line)
+
+
+def test_scan_holds_attributes_to_the_allowlist(base):
+    unlisted = ['void g(void) __attribute__((optimize("O0")));', "__declspec(noinline) void g(void);",
+                "[[gnu::noinline]] void g(void);", "void g(void) __attribute__((noinline", ]
+    for d, line in each(Path(base), unlisted):
+        expect_guardrail(Project(d, source=CLEAN + line + "\n"), "attribute", line)
+    d = Path(base) / "listed"
+    d.mkdir()
+    src = CLEAN + "__declspec(dllimport) int g(void);\nstruct S { char c; } __attribute__((packed));\n"
+    expect_match(Project(d, source=src, config={"attribute_allow": [r"^__declspec\(dllimport\)$", r"\(\(packed\)\)"]}))
+
+
+def test_marker_may_be_a_block_comment(base):
+    expect_match(Project(base, source=f"/* @decomp {TID} */\nint f(void) {{ return 1; }} /* MATCH */\n"))
+
+
+def test_marker_of_a_longer_id_does_not_count(base):
+    r, out = Project(base, source=f"// @decomp {TID}0\nint f(void) {{ return 1; }} /* MATCH */\n").check()
+    expect(out is not None and out["result"] == "guardrail" and "marker" in r.stdout, "the marker is missing", r)
 
 
 def test_scan_refuses_unlisted_pragma(base):
@@ -289,6 +354,79 @@ def test_check_runs_on_the_whole_file_edition_of_the_same_contract(base):
     expect_match(Project(base, manifest=editions_manifest()))
 
 
+def test_differs_may_name_a_function_by_its_key(base):
+    m = editions_manifest()
+    m["target"]["editions"][1]["differs"] = ["00401000"]
+    r = Project(base, manifest=m, target=STORE).run("check", TID)
+    expect(r.returncode == ENV_EXIT and "store re-release" in r.stderr, "check should exit 6 on a differs key", r)
+
+
+def test_revalidate_skips_on_the_integration_branch_and_says_so(base):
+    p = Project(base, manifest=editions_manifest(), target=STORE, status="integrated")
+    r = p.run("revalidate")
+    expect(r.returncode == 0 and f"SKIPPED {TID}" in r.stdout and "1 skipped" in r.stdout, "it should skip, exit 0", r)
+    expect("status: integrated" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
+
+
+def test_revalidate_does_not_accept_a_repair_it_could_not_measure(base):
+    p = Project(base, manifest=editions_manifest(), target=STORE, status="matched")
+    p.branch("r/sym", {"include/keep.h": "/* shared, repaired */\n"})
+    r = p.run("revalidate", "--ref", "r/sym")
+    expect(r.returncode == ENV_EXIT and f"SKIPPED {TID}" in r.stdout, "an unmeasured repair should exit 6", r)
+    expect("not proven here" in r.stderr, "it should say the repair is unproven", r)
+
+
+# ---- functions named by more than an address ----
+
+def inventory(*functions):
+    return {"inventory.json": json.dumps({
+        "units": [{"id": UNIT, "source": SOURCE, "start": "0", "end": "0"}],
+        "functions": [dict({"size": 8, "unit": UNIT, "scope": "in"}, **f) for f in functions]})}
+
+
+def tickets_of(p):
+    return sorted(f.stem for f in (p.root / "tickets" / UNIT).glob("*.md"))
+
+
+def test_tickets_for_a_64_bit_target(base):
+    p = Project(base, files=inventory({"address": "0x0000000140001000"}))
+    r = p.run("gen-tickets")
+    expect(r.returncode == 0 and "u0001-140001000" in tickets_of(p), f"got {tickets_of(p)}", r)
+    text = (p.root / f"tickets/{UNIT}/u0001-140001000.md").read_text()
+    expect("expected: expected/140001000.bin" in text and "address: 0x140001000" in text, text, r)
+    p.write("PATTERNS.md", "# Patterns\n- a => b [proven: u0001-140001000] [added: 1789000000]\n")
+    r = p.run("report")
+    expect(r.returncode == 0 and "PATTERN-MALFORMED" not in r.stdout, "a 64-bit ticket id is well formed", r)
+    expect("PATTERN-UNPROVEN: line 2" in r.stdout, "the line should be read as a pattern", r)
+
+
+def test_functions_sharing_an_address_need_keys(base):
+    shared = [{"address": "0x80101000"}, {"address": "0x80101000"}]
+    r = Project(base, files=inventory(*shared)).run("gen-tickets")
+    expect(r.returncode != 0 and "share the key" in r.stderr, "two functions at one address should stop", r)
+
+
+def test_keyed_functions_get_their_own_tickets_and_expected_files(base):
+    d = Path(base) / "keys"
+    d.mkdir()
+    p = Project(d, files=inventory({"address": "0x80101000", "key": "ovl1_80101000"},
+                                   {"address": "0x80101000", "key": "ovl2_80101000"}))
+    r = p.run("gen-tickets")
+    expect(r.returncode == 0 and {"u0001-ovl1_80101000", "u0001-ovl2_80101000"} <= set(tickets_of(p)),
+           f"got {tickets_of(p)}", r)
+    expect("expected: expected/ovl2_80101000.bin" in (p.root / f"tickets/{UNIT}/u0001-ovl2_80101000.md").read_text(),
+           "each key should name its own expected file", r)
+    expect(p.run("gen-specs").returncode == 0 and "u0001-ovl1_80101000" in (p.root / "units/u0001.md").read_text(),
+           "the unit spec should list tickets by key")
+    d = Path(base) / "banks"
+    d.mkdir()
+    p = Project(d, files=inventory({"address": "03:8000"}, {"address": "02:C000"}))
+    r = p.run("gen-tickets")
+    expect(r.returncode == 0 and {"u0001-02_C000", "u0001-03_8000"} <= set(tickets_of(p)), f"got {tickets_of(p)}", r)
+    r = p.run("next", "--n", "5")
+    expect(r.returncode == 0, "a bank:offset address should sort", r)
+
+
 # ---------- symbol map ----------
 
 def test_diff_adapter_receives_symbol_map_path(base):
@@ -376,9 +514,10 @@ def sourced_manifest(archive, digest=None):
     return m
 
 
-def provision_project(base, digest=None):
+def provision_project(base, digest=None, manifest=None):
     archive = FAKE_TOOL.encode()
-    p = Project(base, manifest=sourced_manifest(archive, digest), installed=(), files={"tools/unpack.py": UNPACK})
+    p = Project(base, manifest=manifest or sourced_manifest(archive, digest), installed=(),
+                files={"tools/unpack.py": UNPACK})
     (p.root / ".decomp" / "downloads").mkdir(parents=True)
     (p.root / ".decomp" / "downloads" / "cc-1.0.bin").write_bytes(archive)
     return p
@@ -398,7 +537,61 @@ def test_provision_unpacks_nothing_on_hash_mismatch(base):
     p = provision_project(base, digest="0" * 64)
     r = p.run("provision")
     expect(r.returncode == ENV_EXIT, "a wrong hash should exit 6", r)
+    expect("0" * 64 in r.stderr and sha(FAKE_TOOL.encode()) in r.stderr, "both hashes should print", r)
+    expect("downloading" not in r.stdout, "a file already there is compared, never silently replaced", r)
     expect(not (p.root / ".decomp/toolchain/compiler/cc.py").exists(), "nothing should be unpacked", r)
+
+
+def test_provision_unpacks_nothing_on_size_mismatch(base):
+    m = sourced_manifest(FAKE_TOOL.encode())
+    m["tools"][0]["source"]["size"] += 1
+    p = provision_project(base, manifest=m)
+    r = p.run("provision")
+    expect(r.returncode == ENV_EXIT and "Nothing was unpacked" in r.stderr, "a wrong size should exit 6", r)
+    expect(not (p.root / ".decomp/toolchain/compiler/cc.py").exists(), "nothing should be unpacked", r)
+
+
+def test_provision_names_a_missing_host_prerequisite(base):
+    m = sourced_manifest(FAKE_TOOL.encode())
+    m["prerequisites"] = [{"name": "archiver", "version_cmd": "no-such-archiver-zz9 --version", "version": "Archiver 9"}]
+    p = provision_project(base, manifest=m)
+    r = p.run("provision")
+    expect(r.returncode == ENV_EXIT and "prerequisite archiver" in r.stderr, "the prerequisite should be named", r)
+    expect(not (p.root / ".decomp/toolchain/compiler/cc.py").exists(), "nothing should be unpacked", r)
+
+
+# ---- hosts ----
+
+HERE, ELSEWHERE = [sys.platform], ["no-such-host"]
+
+
+def test_prerequisite_for_another_host_is_not_checked(base):
+    m = with_prerequisites(("layer", "no-such-layer-zz9 --version", "Layer 8"))
+    m["prerequisites"][0]["hosts"] = ELSEWHERE
+    r = Project(base, manifest=m).run("doctor")
+    expect(r.returncode == 0 and "layer" not in r.all, "another host's prerequisite should be ignored", r)
+
+
+def test_prerequisite_for_this_host_is_checked(base):
+    m = with_prerequisites(("layer", "no-such-layer-zz9 --version", "Layer 8"))
+    m["prerequisites"][0]["hosts"] = HERE
+    r = Project(base, manifest=m).run("doctor")
+    expect(r.returncode == ENV_EXIT and "prerequisite layer" in r.stderr, "this host's prerequisite should fail", r)
+
+
+def test_tool_entry_is_chosen_by_host(base):
+    m = legacy_manifest()
+    here, there = dict(tool_entry(), hosts=HERE), dict(tool_entry(), hosts=ELSEWHERE, banner="OtherCC 9", files=["no.exe"])
+    m["tools"] = [there, here]
+    r = Project(base, manifest=m).run("doctor")
+    expect(r.returncode == 0 and "compiler ok: FakeCC 1.0" in r.stdout, "this host's entry should be the one checked", r)
+
+
+def test_compiler_listed_only_for_another_host_is_an_environment_result(base):
+    m = legacy_manifest()
+    m["tools"] = [dict(tool_entry(), hosts=ELSEWHERE)]
+    r = Project(base, manifest=m, config={"compiler": "compiler"}).run("check", TID)
+    expect(r.returncode == ENV_EXIT and "another host" in r.stderr and '"result"' not in r.stdout, "check should exit 6", r)
 
 
 def test_provision_unpacks_nothing_without_a_recorded_hash(base):
@@ -443,6 +636,69 @@ def test_unit_mapped_to_unprovisioned_compiler_is_an_environment_result(base):
                 config={"compiler": "compiler", "unit_compilers": {UNIT: "compiler2"}})
     r = p.run("check", TID)
     expect(r.returncode == ENV_EXIT and "compiler2" in r.stderr and '"result"' not in r.stdout, "check should exit 6", r)
+
+
+def test_another_units_unprovisioned_compiler_stops_only_that_unit(base):
+    p = Project(base, manifest=two_compilers(), installed=("compiler",),
+                config={"compiler": "compiler", "unit_compilers": {"u0002": "compiler2"}})
+    r, out = expect_match(p)
+    expect(built_with(out) == ["compiler=compiler"], f"wrong compiler: {built_with(out)}", r)
+    r = p.run("doctor")
+    expect(r.returncode == ENV_EXIT and "compiler2" in r.stderr, "a full doctor still reports the missing compiler", r)
+
+
+def test_revalidate_skips_a_unit_whose_compiler_is_not_usable(base):
+    p = Project(base, manifest=two_compilers(), installed=("compiler",), status="integrated",
+                config={"compiler": "compiler", "unit_compilers": {UNIT: "compiler2"}})
+    r = p.run("revalidate")
+    expect(r.returncode == 0 and f"SKIPPED {TID}" in r.stdout and "compiler2" in r.stdout, "it should skip that unit", r)
+    expect("status: integrated" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
+
+
+def test_revalidate_stops_before_any_write_on_a_compiler_outside_the_manifest(base):
+    p = Project(base, status="integrated", config={"compiler": "compiler", "unit_compilers": {UNIT: "ghost"}})
+    r = p.run("revalidate")
+    expect(r.returncode == ENV_EXIT and "ghost" in r.stderr and not (p.root / "ledger").exists(), "exit 6, no record", r)
+
+
+# ---- adapter commands ----
+
+def test_adapter_commands_fill_tools_and_python(base):
+    script = "import sys\nopen(sys.argv[2], 'w').write(open(sys.argv[1]).read() + chr(10) + 'compiler=wrapped' + chr(10))\n"
+    p = Project(base, files={"tools/cc_wrap.py": script},
+                config={"build": '"{python}" "{tools}/cc_wrap.py" "{source}" "{obj}"'})
+    r, out = expect_match(p)
+    expect(built_with(out) == ["compiler=wrapped"], "the build should run the project's script", r)
+
+
+def test_adapter_command_keeps_braces_it_does_not_know(base):
+    build = PY + (' -c "import sys;d={1:chr(10)};open(sys.argv[2],\'w\').write(open(sys.argv[1]).read()+d[1]'
+                  '+\'compiler={other}\'+d[1])" "{source}" "{obj}"')
+    r, out = expect_match(Project(base, config={"build": build}))
+    expect(built_with(out) == ["compiler={other}"], f"an unknown brace should stay as written: {built_with(out)}", r)
+
+
+def test_tool_output_in_another_encoding_does_not_lose_the_result(base):
+    diff = PY + (' -c "import sys;sys.stdout.buffer.write(bytes([0x83,0x65,0x81,10]));'
+                 'sys.stderr.buffer.write(bytes([0x93,0xfa]));'
+                 'print(chr(123)+chr(34)+\'match\'+chr(34)+\': true, \'+chr(34)+\'differ_bytes\'+chr(34)+\': 0\'+chr(125))"')
+    expect_match(Project(base, config={"diff": diff}))
+
+
+# ---- locks ----
+
+def test_a_claim_in_one_worktree_holds_in_every_other(base):
+    p = Project(base)
+    wt = p.base / "wt"
+    p.git("worktree", "add", "-q", str(wt), "-b", "side")
+    r = p.run("claim", TID, "--by", "w1", cwd=wt)
+    expect(r.returncode == 0, "the claim should succeed", r)
+    r = p.run("claim", TID, "--by", "w2")
+    expect(r.returncode == 3 and "locked" in r.stderr and "w1" in r.stderr, "the main checkout should see the lock", r)
+    r = p.run("lock", "reference", "--by", "c")
+    expect(r.returncode == 0, "another lock is free", r)
+    r = p.run("lock", "reference", "--by", "d", cwd=wt)
+    expect(r.returncode == 3, "the worktree should see the reference lock", r)
 
 
 def test_unit_mapped_to_tool_outside_manifest_is_an_environment_result(base):

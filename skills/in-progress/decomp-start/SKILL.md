@@ -12,13 +12,14 @@ Call the Skill tool with `decomp-standards` first.
 
 ## 1. Inventory
 
-Run the `inventory` adapter from `decomp.json`. It writes `inventory.json` and `expected/`.
+Run the `inventory` adapter from `decomp.json`. It writes `inventory.json` and `expected/`, and seeds `symbols.json`.
 
 Check it before anything depends on it:
 
 - [ ] The functions' address ranges do not overlap, and every size follows the tier rule.
 - [ ] Every function outside scope (`library`, `compiler`, `asm-origin`, `excluded`) carries evidence that a reader can check, per the contract's scope rules.
-- [ ] In-scope bytes plus excluded bytes plus padding account for the whole code section; name any remainder.
+- [ ] In-scope bytes plus excluded bytes plus padding account for every executable section; name any remainder.
+- [ ] No two functions share a key. Where two share an address (overlays, modules, banks), each has a `key` of its own.
 - [ ] Every expected file's length equals its function's size.
 
 Review by hand only what the adapter marked uncertain. A function you cannot classify stays `in` scope, so no code drops out of the denominator without evidence.
@@ -33,6 +34,6 @@ Call the Skill tool with `decomp-ticket-gen`.
 
 ## 4. Freeze and report
 
-Commit `inventory.json`, `expected/`, `units/`, and `tickets/`, then tag `decomp-start` so the ground truth stays frozen. Report, from `python tools/decomp.py report`: in-scope bytes and functions per tier, and exclusions per scope. Tell the user to run `/decomp-run`.
+Commit `inventory.json`, `expected/`, the seeded `symbols.json`, `units/`, and `tickets/`, then tag `decomp-start` so the ground truth stays frozen. Report, from `python tools/decomp.py report`: in-scope bytes and functions per tier, and exclusions per scope. Tell the user to run `/decomp-run`.
 
 Redoing the inventory later (a better function finder, a scope change) needs the user's go-ahead: regenerate, re-run both generators (statuses and notes survive), move the tag, and run `revalidate`.

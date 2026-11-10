@@ -37,9 +37,9 @@ Then run the probes `IDENTIFY.md` could only list, and settle every question the
 ## 5. Write the system
 
 - `DECOMP.md` from [CONTRACT.md](CONTRACT.md), every section filled.
-- `decomp.json`: `integration_branch`, the adapter commands (`inventory`, `build`, `diff`, `disasm`), `pragma_allow`, `banned`, `compiler` (the default compiler's tool name), `unit_compilers` (unit id to tool name, only with evidence), and `github` (`enabled`, `repo`).
+- `decomp.json`: `integration_branch`, the adapter commands (`inventory`, `build`, `diff`, `disasm`), `pragma_allow` and `attribute_allow` (regexes: a `#pragma` line, or an attribute as written from its keyword to its closing bracket, passes only when one matches), `banned`, `compiler` (the default compiler's tool name), `unit_compilers` (unit id to tool name, only with evidence), and `github` (`enabled`, `repo`).
 - `tools/decomp.py`: copy [scripts/decomp.py](scripts/decomp.py) unchanged.
-- The four adapters in `tools/`, built to the adapter contracts in `decomp-standards`' layout. They reach the target and the tools through `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>`, never an absolute path, and run every tool through the wrapper. The `build` adapter compiles with the tool `{compiler}` names. The `diff` adapter applies the layout's default relocation policy, reading `{symbols}`, and nothing looser.
+- The four adapters in `tools/`, built to the adapter contracts in `decomp-standards`' layout. They reach the target and the tools through `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>`, never an absolute path, run every tool through the wrapper, and start scripts with `"{python}" "{tools}/<script>"`. The `build` adapter compiles with the tool `{compiler}` names. The `diff` adapter applies the layout's default relocation policy, reading `{symbols}`, and nothing looser.
 - `symbols.json`: `{}` until `inventory` seeds it.
 - Empty `PATTERNS.md` (header only) and `OPEN.md`.
 
@@ -49,16 +49,18 @@ Prove the system works without reconstructing anything. Run every check in a thr
 
 - [ ] `doctor` passes and prints the edition.
 - [ ] `doctor` exits 6 when `DECOMP_TARGET` points at any other file, and `verify` then records nothing.
-- [ ] A stub unit (one trivial function under a `// @decomp` marker) builds.
+- [ ] A stub unit (one trivial function under an `@decomp` marker comment) builds.
 - [ ] The stub diffed against its own compiled bytes reports `match`.
 - [ ] The stub diffed against a real function's bytes from the target reports a nonzero `differ_bytes`.
 - [ ] The stub calling a function the symbol map places at another address than the original's operand reports `differ`, and the report names the symbol and both addresses.
 - [ ] The stub calling a function the symbol map does not hold reports `differ`, and the report names the symbol.
 - [ ] The stub with one extra instruction after a matching body reports `differ`.
-- [ ] `verify` rejects a branch that touches a guarded path (try `symbols.json`), a source containing `__asm`, a `#pragma` outside the allowlist, a trigraph, a backslash line continuation, a `%:` directive, and a `__pragma` outside the allowlist, each with result `guardrail`.
+- [ ] `verify` rejects a branch that touches a guarded path (try `symbols.json`), a source containing `__asm`, a `#pragma` outside the allowlist, a trigraph, a backslash line continuation, a `%:` directive, a `__pragma` outside the allowlist, token pasting, a naked function and an unlisted attribute in this compiler's own spelling, and assembly on a line after a string literal that holds `//`, each with result `guardrail`.
+- [ ] A source whose only banned words sit inside a string literal or a comment passes the scan.
+- [ ] A build whose compiler prints a message outside ASCII (in the tool's own encoding) still reports its result.
 - [ ] Each tool's banner prints through the wrapper, and a build through it leaves no process waiting.
 - [ ] `verify` refuses to run after a frozen path is edited on the integration branch.
-- [ ] `inventory` runs on the target, and its byte total for in-scope functions is no larger than the code section.
+- [ ] `inventory` runs on the target, and its byte total for in-scope functions is no larger than the target's executable sections, and no two functions share a key.
 
 Every box ticked, each with the command you ran and its output: that is the completion criterion. Record the results and the Unix time in `DECOMP.md`.
 

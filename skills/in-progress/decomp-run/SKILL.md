@@ -23,7 +23,7 @@ Repeat until the requested number of tickets have been attempted, or nothing is 
 
 ### 1. Check health
 
-Run `python tools/decomp.py doctor`. On exit 6, stop and show the user what it printed: the target, a host prerequisite, or a tool on this machine no longer equals the contract, and `/decomp-setup`'s provisioning step restores it. Note the edition it prints: on an edition with a `differs` list, `check` and `verify` exit 6 for those tickets, so `release` them and leave them for a machine with an edition that holds them unchanged.
+Run `python tools/decomp.py doctor`. On exit 6, stop and show the user what it printed: the target, a host prerequisite, or a tool on this machine no longer equals the contract, and `/decomp-setup`'s provisioning step restores it. Note the edition it prints: on an edition with a `differs` list, `check` and `verify` exit 6 for those tickets, so `release` them and leave them for a machine with an edition that holds them unchanged. A `not usable here` line names a compiler this machine lacks: the same goes for the units built with it.
 
 Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user the contract's compiler or flags are suspect: they rerun `/decomp-setup`, which can start `decomp-identify` again. Read `OPEN.md`.
 
@@ -31,7 +31,7 @@ Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user 
 
 If any ticket is `blocked-reference` and no repair is running: `python tools/decomp.py lock reference --by coordinator`, then start one background subagent. Tell it to call the Skill tool with `decomp-reference`, and give it the blocked tickets' paths. A gap unblocks many tickets at once, so this goes ahead of new writers.
 
-When it reports, re-run `revalidate --ref <its branch>` yourself, because its own result does not count. On exit 0: merge the branch, `release <id> --to open` for each ticket it fixed, run `revalidate`, then `unlock reference`. On a regression: discard the branch, `unlock reference`, and leave the tickets blocked with a note.
+When it reports, re-run `revalidate --ref <its branch>` yourself, because its own result does not count. On exit 0: merge the branch, `release <id> --to open` for each ticket it fixed, run `revalidate`, then `unlock reference`. On a regression (exit 5): discard the branch, `unlock reference`, and leave the tickets blocked with a note. On exit 6 with `SKIPPED` lines, this machine could not rebuild every match the repair could break: keep the branch, `unlock reference`, and tell the user it needs a machine that can.
 
 ### 3. Pick and dispatch
 

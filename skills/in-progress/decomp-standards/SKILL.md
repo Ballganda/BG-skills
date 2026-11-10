@@ -17,7 +17,7 @@ Read [GUARDRAILS.md](GUARDRAILS.md) before you write, audit, or repair any sourc
 
 ## Size tiers
 
-Size runs from a function's first byte to the end of its last instruction: trailing alignment padding excluded, jump tables embedded in the function included.
+Size runs from a function's first byte to the end of its last instruction: trailing alignment padding excluded, and jump tables or literal pools the compiler places inside the function included.
 
 | Tier | Size |
 | --- | --- |
@@ -40,7 +40,7 @@ Tag every failed attempt with exactly one, the one that best explains the first 
 | --- | --- |
 | `build-fail` | the source does not compile, for a reason local to it |
 | `reference-gap` | a missing or wrong shared declaration (field, type, signature, convention) or symbol map entry |
-| `signedness` | signed versus unsigned (`movsx`/`movzx`, `jl`/`jb`, `sar`/`shr`) |
+| `signedness` | signed versus unsigned: sign or zero extension, the compare, the shift (on x86: `movsx`/`movzx`, `jl`/`jb`, `sar`/`shr`) |
 | `width` | integer promotion, truncation, or operand size |
 | `operator` | a comparison, arithmetic, or logical operator |
 | `control-flow` | branch or loop shape: inverted condition, `for`/`while`/`do`, `switch` lowering |
