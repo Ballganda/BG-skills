@@ -727,6 +727,86 @@ def test_tool_output_in_another_encoding_does_not_lose_the_result(base):
     expect_match(Project(base, config={"diff": diff}))
 
 
+# ---- inventory and disasm through the project tool ----
+
+# The fake adapters record what they received: the inventory in the file it writes,
+# the disassembler on stdout.
+RECEIVED = ("import json, os, sys\n"
+            "got = {'argv': sys.argv[1:], 'env': {k: v for k, v in os.environ.items() if k.startswith('DECOMP_T')}}\n")
+ADAPTERS = {"tools/inv.py": RECEIVED + "json.dump(got, open('inventory.json', 'w'))\n",
+            "tools/dis.py": RECEIVED + "print(json.dumps(got))\n"}
+ADAPTER_CMDS = {"inventory": '"{python}" "{tools}/inv.py"',
+                "disasm": '"{python}" "{tools}/dis.py" "{expected}" "{address}"'}
+
+
+def adapter_project(base, config=None, **kw):
+    return Project(base, files=ADAPTERS, config=dict(ADAPTER_CMDS, **(config or {})), **kw)
+
+
+def expect_tool_env(p, env, r):
+    expect(Path(env.get("DECOMP_TARGET", "")) == p.target, f"wrong DECOMP_TARGET: {env}", r)
+    expect(Path(env.get("DECOMP_TOOL_COMPILER", "")) == p.root / ".decomp" / "toolchain" / "compiler",
+           f"wrong DECOMP_TOOL_COMPILER: {env}", r)
+
+
+def test_inventory_adapter_receives_the_tool_environment(base):
+    p = adapter_project(base)
+    r = p.run("inventory")
+    expect(r.returncode == 0 and (p.root / "inventory.json").is_file(), "the inventory adapter should run", r)
+    expect_tool_env(p, json.loads((p.root / "inventory.json").read_text())["env"], r)
+
+
+def test_inventory_writes_nothing_on_a_target_that_is_not_accepted(base):
+    p = adapter_project(base, target=STORE)
+    r = p.run("inventory")
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT: target" in r.stderr, "a wrong target should exit 6", r)
+    expect(not (p.root / "inventory.json").exists(), "the adapter should not run", r)
+
+
+def test_inventory_never_trusts_the_cached_environment_check(base):
+    p = adapter_project(base)
+    expect_match(p)  # leaves a cached pass behind
+    r = p.run("inventory", env={"FAKE_BANNER": "FakeCC 2.0"})
+    expect(r.returncode == ENV_EXIT and not (p.root / "inventory.json").exists(), "inventory runs the full check", r)
+
+
+def test_inventory_refuses_once_the_decomp_start_tag_exists(base):
+    p = adapter_project(base)
+    p.git("tag", "decomp-start")
+    r = p.run("inventory")
+    expect(r.returncode not in (0, ENV_EXIT), "a frozen inventory should be refused", r)
+    expect("decomp-start" in r.stderr and "redo" in r.stderr, "the refusal should name the redo flow", r)
+    expect(not (p.root / "inventory.json").exists(), "the adapter should not run", r)
+
+
+def test_inventory_redo_runs_with_the_decomp_start_tag(base):
+    p = adapter_project(base)
+    p.git("tag", "decomp-start")
+    r = p.run("inventory", "--redo")
+    expect(r.returncode == 0 and (p.root / "inventory.json").is_file(), "--redo should run the adapter", r)
+
+
+def test_inventory_exits_with_the_adapters_failure(base):
+    p = adapter_project(base, config={"inventory": '"{python}" -c "raise SystemExit(3)"'})
+    r = p.run("inventory")
+    expect(r.returncode not in (0, ENV_EXIT), "a failed adapter is a failed inventory, never an environment result", r)
+
+
+def test_disasm_adapter_receives_the_tickets_file_and_address(base):
+    p = adapter_project(base)
+    r = p.run("disasm", TID)
+    expect(r.returncode == 0 and r.stdout.strip(), "the disasm adapter's output should be printed", r)
+    got = json.loads(r.stdout.splitlines()[-1])
+    expect(got["argv"] == ["expected/00401000.bin", ADDRESS], f"wrong expected file or address: {got['argv']}", r)
+    expect_tool_env(p, got["env"], r)
+
+
+def test_disasm_stops_on_a_target_that_is_not_accepted(base):
+    r = adapter_project(base, target=STORE).run("disasm", TID)
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT: target" in r.stderr, "a wrong target should exit 6", r)
+    expect("argv" not in r.stdout, "the adapter should not run", r)
+
+
 # ---- locks ----
 
 def test_a_claim_in_one_worktree_holds_in_every_other(base):
