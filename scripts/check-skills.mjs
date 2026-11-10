@@ -114,7 +114,33 @@ function checkDescriptionLengths({ fail }) {
   }
 }
 
-const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc, checkAgentDefinitions, checkImplementFormats];
+// The plugin icon sits beside the plugin manifest and meets the plugin
+// validator's rules. Width and height come from the PNG IHDR chunk, which
+// starts right after the 8-byte signature.
+const iconRel = ".claude-plugin/icon.png";
+
+function checkPluginIcon({ fail }) {
+  let png;
+  try {
+    png = readFileSync(join(root, iconRel));
+  } catch {
+    fail(`${iconRel}: plugin icon is missing`);
+    return;
+  }
+  if (png.length < 24 || png.toString("ascii", 12, 16) !== "IHDR") {
+    fail(`${iconRel}: plugin icon is not a PNG`);
+    return;
+  }
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  if (width !== height) fail(`${iconRel}: plugin icon is ${width}x${height}, not square`);
+  for (const side of new Set([width, height])) {
+    if (side < 512 || side > 2048) fail(`${iconRel}: plugin icon side is ${side} px, outside 512 to 2048`);
+  }
+  if (png.length > 2 * 1024 * 1024) fail(`${iconRel}: plugin icon is ${png.length} bytes, over 2 MB`);
+}
+
+const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc, checkAgentDefinitions, checkImplementFormats, checkPluginIcon];
 
 for (const check of checks) check(ctx);
 
