@@ -65,12 +65,16 @@ Keep it under 200 characters, with no explanation. Writers read this file before
 
 After every N integrations (N is in the contract), run `revalidate`. On a regression, stop picking in that unit and tell the user which tickets regressed. Its tickets are claimable again as `regressed`. After each batch of integrations, run `sync` if GitHub is enabled.
 
+### 7. Link
+
+After the revalidation step, run `python tools/decomp.py report` and read its `milestone:` line. When it says `due`, run `python tools/decomp.py link` and tell the user its result line. When the state is `finished`, run the link regardless of the milestone. A link that exits 7 means the target cannot be linked whole: not an error, and the `milestone:` line never says `due` for it.
+
 ## Finish
 
 Report only numbers that `python tools/decomp.py report` printed: bytes and functions matched, the change since this run began, credit per model, open problems, and blocked tickets. Relay the `state:` line as the tool printed it; never decide the state yourself. Then give the next input for that state:
 
 - **more**: run `/decomp-run` again. Say how many bytes and functions remain, from the report.
 - **stuck**: name the blocked and regressed tickets, and tell the user to resolve what blocks them (a reference gap, a regression, or a machine that can build them) before running again.
-- **finished**: nothing is left to run.
+- **finished**: nothing is left to run. State the link result (`pass`, or `mismatch` with its first differing offset and owner), or, when the link exited 7, that a whole-binary link is not available for this target.
 
 End by telling the user to start a new chat before the next `/decomp-run`.
