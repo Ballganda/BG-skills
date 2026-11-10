@@ -67,4 +67,10 @@ After every N integrations (N is in the contract), run `revalidate`. On a regres
 
 ## Finish
 
-Report only numbers that `python tools/decomp.py report` printed: bytes and functions matched, the change since this run began, credit per model, open problems, and blocked tickets.
+Report only numbers that `python tools/decomp.py report` printed: bytes and functions matched, the change since this run began, credit per model, open problems, and blocked tickets. Relay the `state:` line as the tool printed it; never decide the state yourself. Then give the next input for that state:
+
+- **more**: run `/decomp-run` again. Say how many bytes and functions remain, from the report.
+- **stuck**: name the blocked and regressed tickets, and tell the user to resolve what blocks them (a reference gap, a regression, or a machine that can build them) before running again.
+- **finished**: nothing is left to run.
+
+End by telling the user to start a new chat before the next `/decomp-run`.
