@@ -136,6 +136,7 @@ def function_keys(functions):
 # ---------- environment ----------
 
 ENV_EXIT = 6  # the machine's target or toolchain differs from toolchain.json
+LINK_UNAVAILABLE_EXIT = 7  # the contract records that this target cannot be linked whole
 _TOOLCHAIN = None
 
 
@@ -1175,6 +1176,121 @@ def cmd_unlock(a):
     print(f"unlocked {a.name}")
 
 
+LINK_MISMATCH_EXIT = 4  # the linked file is not the edition on this machine
+
+
+def link_plan(ts, inv):
+    """Which units link from source, and the raw blocks of the target around them. Needs doctor first.
+
+    Returns (source units: unit id to its in-scope functions in offset order, blocks, in-scope bytes).
+    A unit links from source only when every in-scope function in it is integrated or revalidated
+    and none is on this edition's differs list. Every other byte is a raw block.
+    """
+    status = {t["id"]: t for t in ts}
+    funcs = [dict(f, id=f"{f['unit']}-{key}") for f, key in zip(inv["functions"], function_keys(inv["functions"]))]
+    inn = [f for f in funcs if f["scope"] == "in"]
+    by_unit = {}
+    for f in inn:
+        by_unit.setdefault(f["unit"], []).append(f)
+    source = {}
+    for unit, mine in by_unit.items():
+        held = [status.get(f["id"]) for f in mine]
+        if all(t and t["status"] in ("integrated", "revalidated") and not edition_differs(t) for t in held):
+            missing = [f["id"] for f in mine if not isinstance(f.get("offset"), int)]
+            if missing:
+                die(f"inventory.json gives no file `offset` for {missing}; the link places a function by it. "
+                    "Add it through the change flow (an inventory redo).")
+            source[unit] = sorted(mine, key=lambda f: f["offset"])
+    size = Path(toolchain()["target"]["path"]).stat().st_size
+    placed = sorted((f["offset"], f["offset"] + f["size"]) for mine in source.values() for f in mine)
+    blocks, at = [], 0
+    for start, end in placed + [(size, size)]:
+        if start > at:
+            blocks.append({"offset": at, "size": start - at})
+        at = max(at, end)
+    return source, blocks, sum(f["size"] for f in inn)
+
+
+def link_owner(offset, source, blocks, inv):
+    """What owns a file offset of the target: a unit's function, the header, or a raw block."""
+    for unit, mine in source.items():
+        for f in mine:
+            if f["offset"] <= offset < f["offset"] + f["size"]:
+                return f"unit {unit} function {f['id']}"
+    first = min((f["offset"] for f in inv["functions"] if isinstance(f.get("offset"), int)), default=None)
+    if first is not None and offset < first:
+        return "header"
+    for b in blocks:
+        if b["offset"] <= offset < b["offset"] + b["size"]:
+            return f"raw block 0x{b['offset']:X} to 0x{b['offset'] + b['size']:X}"
+    return "past the end of the target"
+
+
+def cmd_link(a):
+    if CFG.get("link_unavailable"):
+        die(f"a whole-binary link is not available for this target: {CFG['link_unavailable']}", LINK_UNAVAILABLE_EXIT)
+    if not CFG.get("link"):
+        die("this project has no link adapter: decomp.json has no `link` command. It reaches a project past "
+            "setup through the skill-upgrade section of /decomp-setup, as a change on a candidate branch.")
+    ts = all_tickets()
+    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in ("integrated", "revalidated")}
+    doctor(need=tools_needed(sorted(whole)))
+    edition = toolchain()["target"]["edition"]
+    target = Path(toolchain()["target"]["path"])
+    source, blocks, in_scope = link_plan(ts, inv)
+    out = local_dir() / "link" / target.name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.unlink(missing_ok=True)
+    from_source = sum(f["size"] for mine in source.values() for f in mine)
+    rec = {"unix": now(), "ref": CFG["integration_branch"], "event": "link", "edition": edition["name"],
+           "units": sorted(source), "source_bytes": from_source, "in_scope_bytes": in_scope}
+    first, why = None, ""
+    with Worktree(CFG["integration_branch"]) as tree:
+        objdir = Path(tempfile.mkdtemp(prefix="decomp-link-"))
+        env = tool_env()
+        objects = []
+        for unit, mine in sorted(source.items()):
+            t = next(t for t in ts if t["unit"] == unit)
+            obj = objdir / f"{unit}.obj"
+            b = adapter(CFG["build"], t, str(obj), "", tree, env)
+            if b.returncode != 0:
+                why = f"unit {unit} did not build: {(b.stderr or b.stdout)[-2000:]}"
+                break
+            objects.append({"unit": unit, "source": t["source"], "obj": str(obj), "functions": [
+                {k: f[k] for k in ("id", "address", "offset", "size")} for f in mine]})
+        if not why:
+            plan = objdir / "plan.json"
+            plan.write_text(json.dumps({"objects": objects, "blocks": blocks, "output": str(out)}, indent=1),
+                            encoding="utf-8")
+            r = subprocess.run(tool_command(CFG["link"], plan=plan, out=out), shell=True, cwd=tree, env=env,
+                               capture_output=True, text=True, errors="replace")
+            if r.returncode != 0 or not out.is_file():
+                why = f"the link adapter failed (exit {r.returncode}): {(r.stderr or r.stdout)[-2000:]}"
+    share = f"{from_source} / {in_scope} in-scope code B from source ({100 * from_source / in_scope:.2f}%)" \
+        if in_scope else "no in-scope code"
+    if why:
+        rec["result"] = "fail"
+        append("events.jsonl", rec)
+        print(f"link: fail; {share}; output {out}")
+        die(why)
+    got, want = out.read_bytes(), target.read_bytes()
+    rec.update(sha256=sha(got), size=len(got))
+    if got == want:
+        rec["result"] = "pass"
+    else:
+        rec["result"] = "mismatch"
+        first = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
+        rec["first_differ"] = first
+    append("events.jsonl", rec)
+    print(f"link: {rec['result']}; {share}; output {out}")
+    if first is not None:
+        print(f"first difference at file offset 0x{first:X}: {link_owner(first, source, blocks, inv)}; "
+              f"output {len(got)} B sha256 {sha(got)[:16]}, edition '{edition['name']}' {len(want)} B sha256 "
+              f"{sha(want)[:16]}")
+        sys.exit(LINK_MISMATCH_EXIT)
+
+
 def project_state(ts):
     """finished, stuck or more. Regressed and blocked-reference tickets are not ready work here."""
     if ts and all(t["status"] == "revalidated" for t in ts):
@@ -1374,6 +1490,7 @@ def main():
     x = s.add_parser("similar"); x.add_argument("id"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_similar)
     x = s.add_parser("lock"); x.add_argument("name"); x.add_argument("--by", required=True); x.set_defaults(f=cmd_lock)
     x = s.add_parser("unlock"); x.add_argument("name"); x.set_defaults(f=cmd_unlock)
+    s.add_parser("link").set_defaults(f=cmd_link)
     s.add_parser("report").set_defaults(f=cmd_report)
     s.add_parser("sync").set_defaults(f=cmd_sync)
     a = p.parse_args()

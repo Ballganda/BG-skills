@@ -1168,6 +1168,147 @@ def test_report_does_not_state_finished_for_integrated_tickets(base):
     expect(state_of(p).split()[1] == "more", "integrated, not revalidated, is not finished", p.run("report"))
 
 
+# ---- whole-binary link ----
+
+# The fake linker concatenates the plan's raw blocks and each source function's bytes
+# in file offset order. A function's bytes are what its object holds: the fake compiler
+# copies the source, so a source line `/* bytes <id> <hex> */` is the compiled function.
+FAKE_LINK = ("import json, os, re, sys\n"
+             "plan = json.load(open(sys.argv[1]))\n"
+             "target = open(os.environ['DECOMP_TARGET'], 'rb').read()\n"
+             "pieces = [(b['offset'], target[b['offset']:b['offset'] + b['size']]) for b in plan['blocks']]\n"
+             "for o in plan['objects']:\n"
+             "    held = dict(re.findall(r'bytes (\\S+) ([0-9a-f]+)', open(o['obj']).read()))\n"
+             "    pieces += [(f['offset'], bytes.fromhex(held.get(f['id'], ''))) for f in o['functions']]\n"
+             "open(sys.argv[2], 'wb').write(b''.join(d for _, d in sorted(pieces)))\n"
+             "open(sys.argv[2] + '.plan.json', 'w').write(json.dumps(plan))\n")
+LINK_CMD = '"{python}" "{tools}/link.py" "{plan}" "{out}"'
+TID3 = "u0002-00402030"  # the second unit's second function, never matched
+LAYOUT = [(TID, ADDRESS, 0x400), (TID2, "0x00402000", 0x800), (TID3, "0x00402030", 0x830)]
+LIBRARY_AT = 0x430  # an out-of-scope function in the first unit
+
+
+def code_line(tid, offset, flip=False):
+    data = RETAIL[offset:offset + 37]
+    if flip:
+        data = patched(data, 5)
+    return f"/* bytes {tid} {data.hex()} */\n"
+
+
+def link_project(base, statuses=("integrated", "integrated", "open"), config=None, flip=None, **kw):
+    """Two units: u0001 holds one in-scope and one library function, u0002 two in-scope ones."""
+    functions = [{"address": a, "size": 37, "unit": t.split("-")[0], "scope": "in", "offset": o} for t, a, o in LAYOUT]
+    functions.insert(1, {"address": "0x00401030", "size": 16, "unit": UNIT, "scope": "library", "offset": LIBRARY_AT})
+    inv = {"units": [{"id": UNIT, "source": SOURCE, "start": "0", "end": "0"},
+                     {"id": "u0002", "source": "src/u0002.c", "start": "0", "end": "0"}], "functions": functions}
+    src2 = MATCHING2 + code_line(TID2, 0x800, flip == TID2) + f"// @decomp {TID3}\n" + code_line(TID3, 0x830)
+    files = dict(second_ticket(statuses[1], source=src2), **{
+        "inventory.json": json.dumps(inv), "tools/link.py": FAKE_LINK,
+        f"tickets/u0002/{TID3}.md": ticket_text(TID3, "0x00402030", "src/u0002.c", statuses[2])})
+    files.update(kw.pop("files", {}))
+    p = Project(base, source=CLEAN + code_line(TID, 0x400, flip == TID), status=statuses[0],
+                config=dict({"link": LINK_CMD}, **(config or {})), files=files, **kw)
+    p.git("tag", "decomp-start")
+    return p
+
+
+def link_output(r):
+    """The path the result line names."""
+    line = next(l for l in r.stdout.splitlines() if l.startswith("link:"))
+    return Path(line.split("output ", 1)[1].strip())
+
+
+def received_plan(r):
+    return json.loads(Path(str(link_output(r)) + ".plan.json").read_text())
+
+
+def test_link_takes_a_fully_matched_unit_from_source_and_a_partly_matched_one_from_blocks(base):
+    p = link_project(base)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "the link should reproduce the target", r)
+    plan = received_plan(r)
+    expect([o["unit"] for o in plan["objects"]] == [UNIT], f"only u0001 is from source: {plan['objects']}", r)
+    expect([f["id"] for f in plan["objects"][0]["functions"]] == [TID], "the library function is not from source", r)
+    covered = sorted([(b["offset"], b["size"]) for b in plan["blocks"]] + [(0x400, 37)])
+    expect(covered == [(0, 0x400), (0x400, 37), (0x425, len(RETAIL) - 0x425)], f"blocks cover the rest: {covered}", r)
+    expect(link_output(r).read_bytes() == RETAIL, "the output is the target's bytes", r)
+
+
+def link_events(p):
+    path = p.root / "ledger" / "events.jsonl"
+    return [e for e in map(json.loads, path.read_text().splitlines()) if e["event"] == "link"] if path.exists() else []
+
+
+def ticket_texts(p):
+    return {f: f.read_text() for f in sorted((p.root / "tickets").glob("*/*.md"))}
+
+
+def test_link_takes_a_unit_holding_a_function_the_edition_differs_on_from_blocks(base):
+    manifest = {"target": {"editions": [{"name": "retail 1.0", "sha256": sha(RETAIL), "size": len(RETAIL),
+                                         "differs": ["0x00402000"]}]}, "tools": [tool_entry()]}
+    p = link_project(base, statuses=("integrated",) * 3, manifest=manifest, flip=TID2)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "u0002 comes from blocks, so its source is not linked", r)
+    expect([o["unit"] for o in received_plan(r)["objects"]] == [UNIT], "only u0001 is from source", r)
+
+
+def test_link_reports_the_share_of_in_scope_code_bytes_from_source(base):
+    for d, (statuses, share) in each(base, [(("integrated", "integrated", "open"), "37 / 111 in-scope code B from source (33.33%)"),
+                                            (("revalidated",) * 3, "111 / 111 in-scope code B from source (100.00%)"),
+                                            (("open", "revalidated", "integrated"), "74 / 111 in-scope code B from source (66.67%)")]):
+        r = link_project(d, statuses=statuses).run("link")
+        expect(r.returncode == 0 and share in r.stdout, f"the result line should say {share}", r)
+
+
+def test_link_mismatch_names_the_first_differing_offset_and_its_owner(base):
+    p = link_project(base, flip=TID)
+    before = ticket_texts(p)
+    r = p.run("link")
+    expect(r.returncode not in (0, ENV_EXIT) and "link: mismatch" in r.stdout, "a mismatch should exit nonzero", r)
+    expect(f"first difference at file offset 0x405: unit {UNIT} function {TID}" in r.stdout, "it names the owner", r)
+    expect(ticket_texts(p) == before, "no ticket status changes", r)
+    expect([e["result"] for e in link_events(p)] == ["mismatch"], "the event records the mismatch", r)
+
+
+def test_link_appends_exactly_one_event_per_run(base):
+    p = link_project(base)
+    for n in (1, 2):
+        r = p.run("link")
+        expect(r.returncode == 0 and len(link_events(p)) == n, f"run {n} should leave {n} link events", r)
+    e = link_events(p)[-1]
+    expect(e["result"] == "pass" and e["units"] == [UNIT] and e["source_bytes"] == 37 and e["in_scope_bytes"] == 111,
+           f"the event holds the result: {e}", r)
+
+
+def test_link_output_lands_in_the_uncommitted_machine_folder(base):
+    p = link_project(base)
+    r = p.run("link")
+    out = link_output(r)
+    expect(r.returncode == 0 and out.is_file() and (p.root / ".decomp") in out.parents, f"output at {out}", r)
+    expect(str(out.relative_to(p.root).as_posix()) not in p.git("status", "--porcelain", "--untracked-files=all"),
+           "git never sees the output", r)
+
+
+def test_link_stops_on_the_environment_before_the_adapter_runs(base):
+    p = link_project(base)
+    r = p.run("link", env={"DECOMP_TARGET": str(p.root / "DECOMP.md")})
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT" in r.stderr, "a wrong target exits 6", r)
+    expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
+def test_link_without_a_link_adapter_says_so(base):
+    r = link_project(base, config={"link": ""}).run("link")
+    expect(r.returncode not in (0, ENV_EXIT) and "no link adapter" in r.stderr, "the message names the gap", r)
+
+
+def test_link_marked_unavailable_exits_with_its_own_code_and_reason(base):
+    why = "the header checksum covers the whole file and the linker cannot reproduce it"
+    p = link_project(base, config={"link_unavailable": why})
+    r = p.run("link")
+    expect(r.returncode == 7 and why in r.stderr, "the contract's reason, with exit 7", r)
+    expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
 def test_verify_checks_the_environment_before_recording(base):
     p = Project(base, status="claimed")
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
