@@ -1,13 +1,18 @@
 ---
 name: decomp-setup
-description: Agree a byte-for-byte decomp contract with the user and set up the private project that enforces it. Does no decomp.
+description: Agree a byte-for-byte decomp contract with the user and set up the private project that enforces it, or upgrade an existing decomp project to the current skills. Does no decomp.
 disable-model-invocation: true
-argument-hint: "Path to the target binary"
+argument-hint: "Path to the target binary, or to an existing decomp project"
 ---
 
-Set up a decomp project: a private repo, a **contract** every later agent can work from without asking a question, and the tooling that enforces it. This skill reconstructs nothing. It ends when the pipeline check passes and the `decomp-setup` tag is set; then tell the user to run `/decomp-start`.
+Set up a decomp project, or bring an existing one up to date. A project is a private repo, a **contract** every later agent can work from without asking a question, and the tooling that enforces it. This skill reconstructs nothing.
 
 Call the Skill tool with `decomp-standards` first: its goal, guardrails, and layout are what this setup serves.
+
+Then take one branch:
+
+- **New project** (the user gives a target binary, and no decomp project holds it yet): steps 1 to 7. It ends when the pipeline check passes and the `decomp-setup` tag is set; then tell the user to run `/decomp-start`.
+- **Existing project** (the folder holds `DECOMP.md` and `tools/decomp.py`): go to [Skill upgrade](#skill-upgrade). Steps 1 to 7 are not run again.
 
 ## 1. Project
 
@@ -75,3 +80,27 @@ A new machine needs no contract change: write its `.decomp/local.json`, run `pro
 Accepting another edition, or marking one known-wrong, is a contract change like any other. Prove every `differs` entry by comparing the two editions first.
 
 Only on the user's request: grill the change, write a dated ADR, then update the contract through the [change flow](../decomp-standards/LAYOUT.md#change-flow). The `decomp-setup` tag moves only after the candidate revalidation, on the user's go-ahead. Report every regression, from the candidate run and from the plain `revalidate` that ends the flow.
+
+## Skill upgrade
+
+An existing project keeps the copy of the project tool it was set up with. The user running `/decomp-setup` on that project is the only trigger for bringing it up to date.
+
+**Detect.** Diff the integration branch's `tools/decomp.py` against this skill's [scripts/decomp.py](scripts/decomp.py), ignoring line endings. The tool carries no version constant: the diff is the whole test.
+
+- **Identical**: the project is current. Tell the user so and stop, unless they asked for a contract change (see [Changing the contract later](#changing-the-contract-later)).
+- **Different**: tell the user the project was set up by another version of the skills, and upgrade it as below.
+
+**Upgrade.** A skill upgrade is a contract change. It goes through the [change flow](../decomp-standards/LAYOUT.md#change-flow), and the candidate branch holds all of this:
+
+- A dated ADR: the upgrade, and each contract file it adds or rewrites.
+- `tools/decomp.py`: a fresh copy of [scripts/decomp.py](scripts/decomp.py), unchanged.
+- Every file steps 4 and 5 require, in the form they require it. Compare the project against those two steps line by line, and add or rewrite what falls short. On a project from older skills that is usually:
+  - `toolchain.json` (the manifest) and this machine's `.decomp/local.json`, written by [PROVISION.md](PROVISION.md) from the tools the project already builds with, plus the wrapper.
+  - The adapters, rewired to `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>` and the wrapper, holding no absolute path and no lookup of their own.
+  - `decomp.json` keys and `symbols.json`.
+  - `DECOMP.md` sections [CONTRACT.md](CONTRACT.md) has gained.
+- The pipeline check (step 6) run again in full, in a throwaway clone of the candidate branch, with its results and the Unix time recorded in `DECOMP.md`. Where the `decomp-start` tag exists, the clone's inventory box runs `inventory --redo`: the clone is discarded, so nothing frozen is overwritten. Its `inventory.json` and `expected/` must equal the frozen ones byte for byte. A difference is a fault in the rewired adapter to fix here, never an inventory redo slipped in with the upgrade.
+
+The upgrade carries the contract's decisions over unchanged: same compiler, flags, scope, and policies. Where the newer skills need a decision the contract never made, grill that one decision as in step 3 and record it in the ADR.
+
+**Done when** every pipeline check box is ticked on the candidate branch and the change flow has run to its end. The `decomp-setup` tag moves only after the candidate revalidation, on the user's go-ahead. Report every regression, from the candidate run and from the plain `revalidate` that ends the flow.
