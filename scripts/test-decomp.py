@@ -1252,6 +1252,14 @@ def test_link_takes_a_unit_holding_a_function_the_edition_differs_on_from_blocks
     expect([o["unit"] for o in received_plan(r)["objects"]] == [UNIT], "only u0001 is from source", r)
 
 
+def test_link_from_raw_blocks_alone_reproduces_the_target_hash(base):
+    p = link_project(base, statuses=("open",) * 3)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "a blocks-only link should pass", r)
+    expect(received_plan(r)["objects"] == [], "no unit comes from source", r)
+    expect(sha(link_output(r).read_bytes()) == sha(RETAIL), "the output hashes as the target", r)
+
+
 def test_link_reports_the_share_of_in_scope_code_bytes_from_source(base):
     for d, (statuses, share) in each(base, [(("integrated", "integrated", "open"), "37 / 111 in-scope code B from source (33.33%)"),
                                             (("revalidated",) * 3, "111 / 111 in-scope code B from source (100.00%)"),

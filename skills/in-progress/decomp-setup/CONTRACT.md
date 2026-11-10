@@ -34,6 +34,7 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 
 ## Matching
 - Diff adapter and the tool under it.
+- Link adapter and the linker flags under it, or the link marked unavailable: the reason (the format or linker cannot place raw blocks at fixed positions, or cannot reproduce the headers), the evidence for it, and that `decomp.json`'s `link_unavailable` holds the reason. There is no patched-original fallback.
 - Relocation policy: the default in `decomp-standards`' layout, or a named departure with its ADR.
 - Symbol map: what `inventory` seeds it with for this format, and the relocation types the `diff` adapter resolves.
 - Marker comment form: `// @decomp <id>`, or `/* @decomp <id> */` where the language has no line comment.
@@ -57,5 +58,6 @@ Copy into the project as `DECOMP.md` and fill every section. A section with noth
 - Full revalidation: after every how many integrations.
 
 ## Pipeline check
+- The link from raw blocks alone, with no source unit, reproduces the original's hash (or the link is marked unavailable above).
 - Each check, the command, its result, and the Unix time it passed.
 ```

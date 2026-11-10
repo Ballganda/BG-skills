@@ -42,9 +42,9 @@ Then run the probes `IDENTIFY.md` could only list, and settle every question the
 ## 5. Write the system
 
 - `DECOMP.md` from [CONTRACT.md](CONTRACT.md), every section filled.
-- `decomp.json`: `integration_branch`, the adapter commands (`inventory`, `build`, `diff`, `disasm`), `pragma_allow` and `attribute_allow` (regexes: a `#pragma` line, or an attribute as written from its keyword to its closing bracket, passes only when one matches), `banned`, `compiler` (the default compiler's tool name), `unit_compilers` (unit id to tool name, only with evidence), and `github` (`enabled`, `repo`).
+- `decomp.json`: `integration_branch`, the adapter commands (`inventory`, `build`, `diff`, `disasm`, `link`, or `link_unavailable` with its reason when the link cannot be made), `pragma_allow` and `attribute_allow` (regexes: a `#pragma` line, or an attribute as written from its keyword to its closing bracket, passes only when one matches), `banned`, `compiler` (the default compiler's tool name), `unit_compilers` (unit id to tool name, only with evidence), and `github` (`enabled`, `repo`).
 - `tools/decomp.py`: copy [scripts/decomp.py](scripts/decomp.py) unchanged.
-- The four adapters in `tools/`, built to the adapter contracts in `decomp-standards`' layout. They reach the target and the tools through `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>`, never an absolute path, run every tool through the wrapper, and start scripts with `"{python}" "{tools}/<script>"`. The `build` adapter compiles with the tool `{compiler}` names. The `diff` adapter applies the layout's default relocation policy, reading `{symbols}`, and nothing looser.
+- The five adapters in `tools/` (four when the link is unavailable), built to the adapter contracts in `decomp-standards`' layout. They reach the target and the tools through `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>`, never an absolute path, run every tool through the wrapper, and start scripts with `"{python}" "{tools}/<script>"`. The `build` adapter compiles with the tool `{compiler}` names. The `diff` adapter applies the layout's default relocation policy, reading `{symbols}`, and nothing looser. The `link` adapter links with the contract's linker and flags, placing raw blocks at their file offsets and reproducing the headers. When the format or linker cannot do that, write no `link` adapter: set `link_unavailable` in `decomp.json` to the reason, and record the reason and its evidence in the contract's Matching section. There is no patched-original fallback.
 - `symbols.json`: `{}` until `inventory` seeds it.
 - Empty `PATTERNS.md` (header only) and `OPEN.md`.
 
@@ -66,6 +66,7 @@ Prove the system works without reconstructing anything. Run every check in a thr
 - [ ] Each tool's banner prints through the wrapper, and a build through it leaves no process waiting.
 - [ ] `verify` refuses to run after a frozen path is edited on the integration branch.
 - [ ] `python tools/decomp.py inventory` runs on the target, and its byte total for in-scope functions is no larger than the target's executable sections, and no two functions share a key.
+- [ ] `python tools/decomp.py link` with every function left as a raw block (no source unit linked) prints `link: pass`, and the output's SHA-256 equals the target's. Run it after `inventory`, and before the tag. Where the link is unavailable, `link` exits 7 and prints the recorded reason instead, and the contract holds that reason and its evidence.
 
 Every box ticked, each with the command you ran and its output: that is the completion criterion. Record the results and the Unix time in `DECOMP.md`.
 
@@ -97,6 +98,7 @@ An existing project keeps the copy of the project tool it was set up with. The u
 - Every file steps 4 and 5 require, in the form they require it. Compare the project against those two steps line by line, and add or rewrite what falls short. On a project from older skills that is usually:
   - `toolchain.json` (the manifest) and this machine's `.decomp/local.json`, written by [PROVISION.md](PROVISION.md) from the tools the project already builds with, plus the wrapper.
   - The adapters, rewired to `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>` and the wrapper, holding no absolute path and no lookup of their own.
+  - The `link` adapter (step 5), with its `link` command in `decomp.json`, or `link_unavailable` with the reason and evidence in the contract. Setup before the link existed lacks both: write them here, and add the blocks-only link line to the contract's pipeline check.
   - `decomp.json` keys and `symbols.json`.
   - `DECOMP.md` sections [CONTRACT.md](CONTRACT.md) has gained.
 - The pipeline check (step 6) run again in full, in a throwaway clone of the candidate branch, with its results and the Unix time recorded in `DECOMP.md`. Where the `decomp-start` tag exists, the clone's inventory box runs `inventory --redo`. That needs no further go-ahead: the user started the upgrade, and the run writes only to the clone, which is discarded, so nothing in the project is overwritten. The clone's `inventory.json` and `expected/` must equal the frozen ones byte for byte. A difference is a fault in the rewired adapter to fix here, never an inventory redo slipped in with the upgrade.
