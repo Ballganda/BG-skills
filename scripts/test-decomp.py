@@ -1234,6 +1234,81 @@ def test_link_takes_a_fully_matched_unit_from_source_and_a_partly_matched_one_fr
     expect(link_output(r).read_bytes() == RETAIL, "the output is the target's bytes", r)
 
 
+def link_events(p):
+    path = p.root / "ledger" / "events.jsonl"
+    return [e for e in map(json.loads, p_.read_text().splitlines()) if e["event"] == "link"] if p_.exists() else []
+
+
+def ticket_texts(p):
+    return {f: f.read_text() for f in sorted((p.root / "tickets").glob("*/*.md"))}
+
+
+def test_link_takes_a_unit_holding_a_function_the_edition_differs_on_from_blocks(base):
+    manifest = {"target": {"editions": [{"name": "retail 1.0", "sha256": sha(RETAIL), "size": len(RETAIL),
+                                         "differs": ["0x00402000"]}]}, "tools": [tool_entry()]}
+    p = link_project(base, statuses=("integrated",) * 3, manifest=manifest, flip=TID2)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "u0002 comes from blocks, so its source is not linked", r)
+    expect([o["unit"] for o in received_plan(r)["objects"]] == [UNIT], "only u0001 is from source", r)
+
+
+def test_link_reports_the_share_of_in_scope_code_bytes_from_source(base):
+    for d, (statuses, share) in each(base, [(("integrated", "integrated", "open"), "37 / 111 in-scope code B from source (33.33%)"),
+                                            (("revalidated",) * 3, "111 / 111 in-scope code B from source (100.00%)"),
+                                            (("open", "revalidated", "integrated"), "74 / 111 in-scope code B from source (66.67%)")]):
+        r = link_project(d, statuses=statuses).run("link")
+        expect(r.returncode == 0 and share in r.stdout, f"the result line should say {share}", r)
+
+
+def test_link_mismatch_names_the_first_differing_offset_and_its_owner(base):
+    p = link_project(base, flip=TID)
+    before = ticket_texts(p)
+    r = p.run("link")
+    expect(r.returncode not in (0, ENV_EXIT) and "link: mismatch" in r.stdout, "a mismatch should exit nonzero", r)
+    expect(f"first difference at file offset 0x405: unit {UNIT} function {TID}" in r.stdout, "it names the owner", r)
+    expect(ticket_texts(p) == before, "no ticket status changes", r)
+    expect([e["result"] for e in link_events(p)] == ["mismatch"], "the event records the mismatch", r)
+
+
+def test_link_appends_exactly_one_event_per_run(base):
+    p = link_project(base)
+    for n in (1, 2):
+        r = p.run("link")
+        expect(r.returncode == 0 and len(link_events(p)) == n, f"run {n} should leave {n} link events", r)
+    e = link_events(p)[-1]
+    expect(e["result"] == "pass" and e["units"] == [UNIT] and e["source_bytes"] == 37 and e["in_scope_bytes"] == 111,
+           f"the event holds the result: {e}", r)
+
+
+def test_link_output_lands_in_the_uncommitted_machine_folder(base):
+    p = link_project(base)
+    r = p.run("link")
+    out = link_output(r)
+    expect(r.returncode == 0 and out.is_file() and (p.root / ".decomp") in out.parents, f"output at {out}", r)
+    expect(str(out.relative_to(p.root).as_posix()) not in p.git("status", "--porcelain", "--untracked-files=all"),
+           "git never sees the output", r)
+
+
+def test_link_stops_on_the_environment_before_the_adapter_runs(base):
+    p = link_project(base)
+    r = p.run("link", env={"DECOMP_TARGET": str(p.root / "DECOMP.md")})
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT" in r.stderr, "a wrong target exits 6", r)
+    expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
+def test_link_without_a_link_adapter_says_so(base):
+    r = link_project(base, config={"link": ""}).run("link")
+    expect(r.returncode not in (0, ENV_EXIT) and "no link adapter" in r.stderr, "the message names the gap", r)
+
+
+def test_link_marked_unavailable_exits_with_its_own_code_and_reason(base):
+    why = "the header checksum covers the whole file and the linker cannot reproduce it"
+    p = link_project(base, config={"link_unavailable": why})
+    r = p.run("link")
+    expect(r.returncode == 7 and why in r.stderr, "the contract's reason, with exit 7", r)
+    expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
 def test_verify_checks_the_environment_before_recording(base):
     p = Project(base, status="claimed")
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
