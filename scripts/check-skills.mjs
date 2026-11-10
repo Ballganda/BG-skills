@@ -86,6 +86,25 @@ function checkImplementFormats({ read, fail }) {
   }
 }
 
+// code-review hands the Standards reviewer its smell list by path, never pasted,
+// and both reviewers report in the one-line finding format, with no word limit.
+function checkReviewSmellPointer({ read, fail }) {
+  const file = "engineering/code-review/SKILL.md";
+  const text = read(file);
+  if (/past(e|ed|ing)\b[^.\n]*smell|smell[^.\n]*\bpast(e|ed|ing)\b/i.test(text))
+    fail(`${file}: instructs pasting the smell list instead of passing its path`);
+  if (!text.includes("SMELLS.md")) fail(`${file}: does not pass the smell list's path`);
+  if (/\*\*Feature Envy\*\*/.test(text)) fail(`${file}: carries the smell list itself instead of SMELLS.md`);
+  if (!text.includes("`hard or judgement | location | rule or spec line | finding`"))
+    fail(`${file}: missing the reviewer finding format`);
+  if (/under \d+ words/i.test(text)) fail(`${file}: sets a word limit instead of the finding format`);
+  try {
+    read("engineering/code-review/SMELLS.md");
+  } catch {
+    fail("engineering/code-review/SMELLS.md: smell list reference file is missing");
+  }
+}
+
 // Descriptions are loaded into every session: keep them short.
 const descriptionLimits = { user: 20, model: 40 };
 
@@ -114,7 +133,7 @@ function checkDescriptionLengths({ fail }) {
   }
 }
 
-const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc, checkAgentDefinitions, checkImplementFormats];
+const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc, checkAgentDefinitions, checkImplementFormats, checkReviewSmellPointer];
 
 for (const check of checks) check(ctx);
 

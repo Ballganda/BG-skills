@@ -116,6 +116,29 @@ const implementFormats = [
   ["merger format", "`merged or conflict | files`"],
 ];
 
+test("fails when code-review instructs pasting the smell list", () => {
+  const r = mutated(
+    "engineering/code-review/SKILL.md",
+    (t) => `${t}\nPaste the smell baseline in full into the Standards prompt.\n`,
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /code-review.*smell/);
+});
+
+test("fails when code-review drops the finding format", () => {
+  const r = mutated("engineering/code-review/SKILL.md", (t) =>
+    t.split("`hard or judgement | location | rule or spec line | finding`").join(""),
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /code-review.*format/);
+});
+
+test("fails when code-review brings back a word limit", () => {
+  const r = mutated("engineering/code-review/SKILL.md", (t) => `${t}\nReport in under 400 words.\n`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /code-review.*word limit/);
+});
+
 for (const [name, needle] of implementFormats) {
   test(`fails when implement loses the ${name}`, () => {
     const r = mutated("engineering/implement/SKILL.md", (t) => t.split(needle).join(""));
