@@ -133,7 +133,7 @@ class Project:
     def write(self, rel, text, root=None):
         p = (root or self.root) / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8", newline="\n")
+        p.write_text(text, encoding="utf-8")
 
     def git(self, *args, cwd=None):
         r = subprocess.run(["git", *args], cwd=cwd or self.root, capture_output=True, text=True)
@@ -614,11 +614,11 @@ def test_candidate_rebuilds_the_tickets_the_project_holds_matched(base):
     p = started_project(base)
     p.branch("c/diff", {"decomp.json": config_with(p, diff=NEVER_MATCHES)})
     ticket = p.root / f"tickets/{UNIT}/{TID}.md"  # matched after the candidate branched, and not committed
-    ticket.write_text(ticket.read_text().replace("status: integrated", "status: open"), newline="\n")
+    ticket.write_text(ticket.read_text().replace("status: integrated", "status: open"))
     p.git("commit", "-q", "-am", "an open ticket")
     r = p.run("revalidate", "--candidate", "c/diff")
     expect(r.returncode == 0 and "revalidated 0 on c/diff" in r.stdout, "an open ticket is not rebuilt", r)
-    ticket.write_text(ticket.read_text().replace("status: open", "status: matched"), newline="\n")
+    ticket.write_text(ticket.read_text().replace("status: open", "status: matched"))
     r = p.run("revalidate", "--candidate", "c/diff")
     expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout, "the project's matched ticket is rebuilt", r)
 
@@ -1139,6 +1139,244 @@ def test_check_trusts_the_last_pass_until_a_watched_file_changes(base):
     p.target.write_bytes(STORE)
     r = p.run("check", TID)
     expect(r.returncode == ENV_EXIT and "ENVIRONMENT: target" in r.stderr, "a changed target ends the trust", r)
+
+
+def state_of(p):
+    r = p.run("report")
+    lines = [l for l in r.stdout.splitlines() if l.startswith("state:")]
+    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one state line", r)
+    return lines[0]
+
+
+def test_report_states_more_when_a_ticket_is_ready(base):
+    p = started_project(base, status="integrated", files=second_ticket(status="open"))
+    expect(state_of(p).split()[1] == "more", "a ready ticket means more", p.run("report"))
+
+
+def test_report_states_stuck_when_the_rest_are_blocked_or_regressed(base):
+    p = started_project(base, status="regressed", files=second_ticket(status="blocked-reference"))
+    expect(state_of(p).split()[1] == "stuck", "nothing ready means stuck", p.run("report"))
+
+
+def test_report_states_finished_when_every_ticket_is_revalidated(base):
+    p = started_project(base, status="revalidated", files=second_ticket(status="revalidated"))
+    expect(state_of(p).split()[1] == "finished", "all revalidated means finished", p.run("report"))
+
+
+def test_report_does_not_state_finished_for_integrated_tickets(base):
+    p = started_project(base, status="revalidated", files=second_ticket(status="integrated"))
+    expect(state_of(p).split()[1] == "more", "integrated, not revalidated, is not finished", p.run("report"))
+
+
+# ---- whole-binary link ----
+
+# The fake linker concatenates the plan's raw blocks and each source function's bytes
+# in file offset order. A function's bytes are what its object holds: the fake compiler
+# copies the source, so a source line `/* bytes <id> <hex> */` is the compiled function.
+FAKE_LINK = ("import json, os, re, sys\n"
+             "plan = json.load(open(sys.argv[1]))\n"
+             "target = open(os.environ['DECOMP_TARGET'], 'rb').read()\n"
+             "pieces = [(b['offset'], target[b['offset']:b['offset'] + b['size']]) for b in plan['blocks']]\n"
+             "for o in plan['objects']:\n"
+             "    held = dict(re.findall(r'bytes (\\S+) ([0-9a-f]+)', open(o['obj']).read()))\n"
+             "    pieces += [(f['offset'], bytes.fromhex(held.get(f['id'], ''))) for f in o['functions']]\n"
+             "open(sys.argv[2], 'wb').write(b''.join(d for _, d in sorted(pieces)))\n"
+             "open(sys.argv[2] + '.plan.json', 'w').write(json.dumps(plan))\n")
+LINK_CMD = '"{python}" "{tools}/link.py" "{plan}" "{out}"'
+TID3 = "u0002-00402030"  # the second unit's second function, never matched
+LAYOUT = [(TID, ADDRESS, 0x400), (TID2, "0x00402000", 0x800), (TID3, "0x00402030", 0x830)]
+LIBRARY_AT = 0x430  # an out-of-scope function in the first unit
+
+
+def code_line(tid, offset, flip=False):
+    data = RETAIL[offset:offset + 37]
+    if flip:
+        data = patched(data, 5)
+    return f"/* bytes {tid} {data.hex()} */\n"
+
+
+def link_project(base, statuses=("integrated", "integrated", "open"), config=None, flip=None, **kw):
+    """Two units: u0001 holds one in-scope and one library function, u0002 two in-scope ones."""
+    functions = [{"address": a, "size": 37, "unit": t.split("-")[0], "scope": "in", "offset": o} for t, a, o in LAYOUT]
+    functions.insert(1, {"address": "0x00401030", "size": 16, "unit": UNIT, "scope": "library", "offset": LIBRARY_AT})
+    inv = {"units": [{"id": UNIT, "source": SOURCE, "start": "0", "end": "0"},
+                     {"id": "u0002", "source": "src/u0002.c", "start": "0", "end": "0"}], "functions": functions}
+    src2 = MATCHING2 + code_line(TID2, 0x800, flip == TID2) + f"// @decomp {TID3}\n" + code_line(TID3, 0x830)
+    files = dict(second_ticket(statuses[1], source=src2), **{
+        "inventory.json": json.dumps(inv), "tools/link.py": FAKE_LINK,
+        f"tickets/u0002/{TID3}.md": ticket_text(TID3, "0x00402030", "src/u0002.c", statuses[2])})
+    files.update(kw.pop("files", {}))
+    p = Project(base, source=CLEAN + code_line(TID, 0x400, flip == TID), status=statuses[0],
+                config=dict({"link": LINK_CMD}, **(config or {})), files=files, **kw)
+    p.git("tag", "decomp-start")
+    return p
+
+
+def link_output(r):
+    """The path the result line names."""
+    line = next(l for l in r.stdout.splitlines() if l.startswith("link:"))
+    return Path(line.split("output ", 1)[1].strip())
+
+
+def received_plan(r):
+    return json.loads(Path(str(link_output(r)) + ".plan.json").read_text())
+
+
+def test_link_takes_a_fully_matched_unit_from_source_and_a_partly_matched_one_from_blocks(base):
+    p = link_project(base)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "the link should reproduce the target", r)
+    plan = received_plan(r)
+    expect([o["unit"] for o in plan["objects"]] == [UNIT], f"only u0001 is from source: {plan['objects']}", r)
+    expect([f["id"] for f in plan["objects"][0]["functions"]] == [TID], "the library function is not from source", r)
+    covered = sorted([(b["offset"], b["size"]) for b in plan["blocks"]] + [(0x400, 37)])
+    expect(covered == [(0, 0x400), (0x400, 37), (0x425, len(RETAIL) - 0x425)], f"blocks cover the rest: {covered}", r)
+    expect(link_output(r).read_bytes() == RETAIL, "the output is the target's bytes", r)
+
+
+def link_events(p):
+    path = p.root / "ledger" / "events.jsonl"
+    return [e for e in map(json.loads, path.read_text().splitlines()) if e["event"] == "link"] if path.exists() else []
+
+
+def ticket_texts(p):
+    return {f: f.read_text() for f in sorted((p.root / "tickets").glob("*/*.md"))}
+
+
+def test_link_takes_a_unit_holding_a_function_the_edition_differs_on_from_blocks(base):
+    manifest = {"target": {"editions": [{"name": "retail 1.0", "sha256": sha(RETAIL), "size": len(RETAIL),
+                                         "differs": ["0x00402000"]}]}, "tools": [tool_entry()]}
+    p = link_project(base, statuses=("integrated",) * 3, manifest=manifest, flip=TID2)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "u0002 comes from blocks, so its source is not linked", r)
+    expect([o["unit"] for o in received_plan(r)["objects"]] == [UNIT], "only u0001 is from source", r)
+
+
+def test_link_from_raw_blocks_alone_reproduces_the_target_hash(base):
+    p = link_project(base, statuses=("open",) * 3)
+    r = p.run("link")
+    expect(r.returncode == 0 and "link: pass" in r.stdout, "a blocks-only link should pass", r)
+    expect(received_plan(r)["objects"] == [], "no unit comes from source", r)
+    expect(sha(link_output(r).read_bytes()) == sha(RETAIL), "the output hashes as the target", r)
+
+
+def test_link_reports_the_share_of_in_scope_code_bytes_from_source(base):
+    for d, (statuses, share) in each(base, [(("integrated", "integrated", "open"), "37 / 111 in-scope code B from source (33.33%)"),
+                                            (("revalidated",) * 3, "111 / 111 in-scope code B from source (100.00%)"),
+                                            (("open", "revalidated", "integrated"), "74 / 111 in-scope code B from source (66.67%)")]):
+        r = link_project(d, statuses=statuses).run("link")
+        expect(r.returncode == 0 and share in r.stdout, f"the result line should say {share}", r)
+
+
+def test_link_mismatch_names_the_first_differing_offset_and_its_owner(base):
+    p = link_project(base, flip=TID)
+    before = ticket_texts(p)
+    r = p.run("link")
+    expect(r.returncode not in (0, ENV_EXIT) and "link: mismatch" in r.stdout, "a mismatch should exit nonzero", r)
+    expect(f"first difference at file offset 0x405: unit {UNIT} function {TID}" in r.stdout, "it names the owner", r)
+    expect(ticket_texts(p) == before, "no ticket status changes", r)
+    expect([e["result"] for e in link_events(p)] == ["mismatch"], "the event records the mismatch", r)
+
+
+def test_link_appends_exactly_one_event_per_run(base):
+    p = link_project(base)
+    for n in (1, 2):
+        r = p.run("link")
+        expect(r.returncode == 0 and len(link_events(p)) == n, f"run {n} should leave {n} link events", r)
+    e = link_events(p)[-1]
+    expect(e["result"] == "pass" and e["units"] == [UNIT] and e["source_bytes"] == 37 and e["in_scope_bytes"] == 111,
+           f"the event holds the result: {e}", r)
+
+
+def test_link_output_lands_in_the_uncommitted_machine_folder(base):
+    p = link_project(base)
+    r = p.run("link")
+    out = link_output(r)
+    expect(r.returncode == 0 and out.is_file() and (p.root / ".decomp") in out.parents, f"output at {out}", r)
+    expect(str(out.relative_to(p.root).as_posix()) not in p.git("status", "--porcelain", "--untracked-files=all"),
+           "git never sees the output", r)
+
+
+def test_link_stops_on_the_environment_before_the_adapter_runs(base):
+    p = link_project(base)
+    r = p.run("link", env={"DECOMP_TARGET": str(p.root / "DECOMP.md")})
+    expect(r.returncode == ENV_EXIT and "ENVIRONMENT" in r.stderr, "a wrong target exits 6", r)
+    expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
+def test_link_without_a_link_adapter_says_so(base):
+    r = link_project(base, config={"link": ""}).run("link")
+    expect(r.returncode not in (0, ENV_EXIT) and "no link adapter" in r.stderr, "the message names the gap", r)
+
+
+def test_link_marked_unavailable_exits_with_its_own_code_and_reason(base):
+    why = "the header checksum covers the whole file and the linker cannot reproduce it"
+    p = link_project(base, config={"link_unavailable": why})
+    r = p.run("link")
+    expect(r.returncode == 7 and why in r.stderr, "the contract's reason, with exit 7", r)
+    expect(not (p.root / ".decomp" / "link").exists() and not link_events(p), "nothing ran or was recorded", r)
+
+
+# ---- link milestones ----
+
+def milestone_project(base, sizes, statuses=("integrated", "integrated", "open"), config=None):
+    """A link project whose three tickets have the given sizes (bytes, in ticket order)."""
+    p = link_project(base, statuses=statuses, config=config)
+    for tid, size in zip((TID, TID2, TID3), sizes):
+        t = next((p.root / "tickets").glob(f"*/{tid}.md"))
+        t.write_text(t.read_text().replace("size: 37", f"size: {size}"))
+    p.git("commit", "-aq", "--allow-empty", "-m", "sizes")
+    return p
+
+
+def milestone_of(p):
+    r = p.run("report")
+    lines = [l for l in r.stdout.splitlines() if l.startswith("milestone:")]
+    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one milestone line", r)
+    return lines[0].split(":", 1)[1].strip()
+
+
+def test_milestone_is_due_at_five_percent_of_in_scope_bytes(base):
+    for d, (sizes, due) in each(base, [((29999, 285001, 285000), False), ((30000, 285000, 285000), True)]):
+        got = milestone_of(milestone_project(d, sizes, statuses=("integrated", "open", "open")))
+        expect(got.startswith("due") == due and "of 30000 B" in got, f"{sizes}: want due={due} of 30000 B, got {got}")
+
+
+def test_milestone_floor_is_16_kb_on_a_small_project(base):
+    for d, (size, due) in each(base, [(16383, False), (16384, True)]):
+        got = milestone_of(milestone_project(d, (size, 37, 37), statuses=("integrated", "open", "open")))
+        expect(got.startswith("due") == due and "of 16384 B" in got, f"{size}: want due={due} of 16384 B, got {got}")
+
+
+def test_milestone_honours_a_percentage_override(base):
+    for d, (statuses, due) in each(base, [(("integrated", "open", "open"), False), (("open", "integrated", "integrated"), True)]):
+        got = milestone_of(milestone_project(d, (37, 37, 37), statuses, {"link_milestone": "50%"}))
+        expect(got.startswith("due") == due and "of 56 B" in got, f"{statuses}: want due={due} of 56 B, got {got}")
+
+
+def test_milestone_honours_a_byte_count_override(base):
+    for d, (size, due) in each(base, [(37, True), (36, False)]):
+        got = milestone_of(milestone_project(d, (size, 37, 37), statuses=("integrated", "open", "open"),
+                                             config={"link_milestone": 37}))
+        expect(got.startswith("due") == due and "of 37 B" in got, f"{size}: want due={due} of 37 B, got {got}")
+
+
+def test_milestone_is_not_due_after_a_link_until_new_units_complete(base):
+    p = milestone_project(base, (37, 37, 37), config={"link_milestone": 10})
+    expect(milestone_of(p).startswith("due"), "the finished unit is due before any link")
+    r = p.run("link")
+    expect(r.returncode == 0, "the link should pass", r)
+    expect(milestone_of(p).startswith("not due"), "a recorded link clears the milestone")
+    t = p.root / "tickets" / "u0002" / f"{TID3}.md"
+    t.write_text(t.read_text().replace("status: open", "status: integrated"))
+    p.git("commit", "-aq", "-m", "complete u0002")
+    expect(milestone_of(p).startswith("due"), "a newly completed unit makes it due again")
+
+
+def test_milestone_is_never_due_when_the_link_is_unavailable(base):
+    p = milestone_project(base, (37, 37, 37), config={"link_milestone": 10, "link_unavailable": "no linker can do it"})
+    got = milestone_of(p)
+    expect(got.startswith("not due") and "unavailable" in got, f"unavailable means never due, got {got}")
 
 
 def test_verify_checks_the_environment_before_recording(base):
