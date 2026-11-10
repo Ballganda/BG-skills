@@ -56,6 +56,12 @@ for DEST in "${DESTS[@]}"; do
       rm -rf "$target"
     fi
 
+    # Drop an existing link first: on Windows (Git Bash), `ln -sfn` cannot
+    # replace a directory symlink and instead fails, leaving a stray copy.
+    if [ -L "$target" ]; then
+      rm -f "$target"
+    fi
+
     ln -sfn "$src" "$target"
     echo "linked $name -> $src ($DEST)"
   done
