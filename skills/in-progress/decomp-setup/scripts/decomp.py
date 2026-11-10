@@ -7,6 +7,7 @@ Standard library only. Run from the project root: python tools/decomp.py <cmd>.
 """
 import argparse
 import codecs
+import contextlib
 import hashlib
 import json
 import os
@@ -470,13 +471,13 @@ def cmd_provision(a):
 
 # ---------- tickets ----------
 
-def ticket_path(tid):
+def ticket_path(tid, root=None):
     unit = tid.split("-")[0]
-    return ROOT / "tickets" / unit / f"{tid}.md"
+    return (root or ROOT) / "tickets" / unit / f"{tid}.md"
 
 
-def read_ticket(tid):
-    p = ticket_path(tid)
+def read_ticket(tid, root=None):
+    p = ticket_path(tid, root)
     if not p.exists():
         die(f"no ticket {tid}")
     text = p.read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -498,10 +499,10 @@ def write_ticket(fields, body):
     p.write_text(f"---\n{head}\n---\n{body}", encoding="utf-8", newline="\n")
 
 
-def all_tickets():
+def all_tickets(root=None):
     out = []
-    for p in sorted((ROOT / "tickets").glob("*/*.md")):
-        out.append(read_ticket(p.stem)[0])
+    for p in sorted(((root or ROOT) / "tickets").glob("*/*.md")):
+        out.append(read_ticket(p.stem, root)[0])
     return out
 
 
@@ -1041,22 +1042,56 @@ def included(tree, source):
     return sorted(found), bad
 
 
+CANDIDATE = re.compile(r"c/[0-9A-Za-z_.-]+")  # a candidate ref: a branch holding a change to frozen paths
+
+
+def judge_candidate(a):
+    """Hand a candidate ref to its own copy of this tool, run in a clean worktree of it. Records nothing.
+
+    The copy in that tree rebuilds every ticket this project holds matched, so the candidate's
+    tool, adapters, manifest, and contract are the ones that judge it.
+    """
+    ref = a.candidate
+    known = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{ref}"], cwd=ROOT).returncode == 0
+    if a.ref or not CANDIDATE.fullmatch(ref) or not known:
+        die(f"--candidate takes a branch named c/<slug>, alone; '{ref}' is not one. "
+            "A repair ref goes to `revalidate --ref`.", 2)
+    with Worktree(ref) as tree:
+        own = Path(tree) / "tools" / "decomp.py"
+        if not own.exists():
+            die(f"{ref} holds no tools/decomp.py to judge it", 2)
+        cmd = [sys.executable, str(own), "revalidate", "--candidate", ref, "--judged-for", str(ROOT)]
+        code = subprocess.run(cmd + (["--header", a.header] if a.header else []), cwd=tree).returncode
+    sys.exit(code)
+
+
 def cmd_revalidate(a):
-    frozen_check()
-    ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
+    judging = bool(a.judged_for)  # this copy sits in the candidate's worktree and judges it
+    if a.candidate and not judging:
+        judge_candidate(a)
+    gone = []
+    if judging:  # the one exception to the frozen check: the candidate exists to change frozen paths
+        held = [t["id"] for t in all_tickets(Path(a.judged_for)) if t["status"] in MATCHED | {"regressed"}]
+        gone = [i for i in held if not ticket_path(i).exists()]
+        ts = [read_ticket(i)[0] for i in held if i not in gone]
+    else:
+        frozen_check()
+        ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
     built_with = {t["unit"]: compiler_for(t["unit"]) for t in ts}  # stops here, before any status is written
     doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
     unusable = toolchain()["unusable"]
-    ref = a.ref or CFG["integration_branch"]
-    on_integ = ref == CFG["integration_branch"]
-    if not on_integ:
+    ref = a.candidate if judging else a.ref or CFG["integration_branch"]
+    on_integ = not judging and ref == CFG["integration_branch"]
+    if not on_integ and not judging:
         outside = [p for p in git("diff", "--name-only", f"{CFG['integration_branch']}...{ref}").split()
                    if not p.startswith("include/") and p != SYMBOLS]
         if outside:
             append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
             die(f"{ref} touches paths outside include/ and {SYMBOLS}: {outside}", 5)
-    bad = skipped = measured = 0
-    with Worktree(ref) as tree:
+    bad, skipped, measured = len(gone), 0, 0
+    for i in gone:
+        print(f"REGRESSED {i} on {ref}: the candidate holds no such ticket")
+    with (contextlib.nullcontext(str(ROOT)) if judging else Worktree(ref)) as tree:
         if a.header:
             name = Path(a.header).name.casefold()  # every ticket that reaches the header, through any chain
             ts = [t for t in ts if (Path(tree) / t["source"]).exists() and any(
@@ -1083,12 +1118,12 @@ def cmd_revalidate(a):
                 elif not ok:
                     set_status(t["id"], "regressed")
                     append("events.jsonl", {"unix": now(), "ticket": t["id"], "event": "regressed"})
-    if bad and not on_integ:
+    if bad and not on_integ and not judging:
         append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
     print(f"revalidated {measured} on {ref}: {bad} regressed, {skipped} skipped")
     if bad:
         sys.exit(5)
-    if skipped and not on_integ:  # a repair is accepted only where every match it could break was rebuilt
+    if skipped and not on_integ:  # a repair or candidate is proven only where every match it could break was rebuilt
         print(f"ENVIRONMENT: {skipped} matched tickets could not be measured on this machine", file=sys.stderr)
         die(f"{ref} is not proven here; revalidate it on a machine that can build every ticket above.", ENV_EXIT)
 
@@ -1308,7 +1343,9 @@ def main():
     x = s.add_parser("audit"); x.add_argument("id"); x.add_argument("verdict", choices=["pass", "fail"])
     x.add_argument("--auditor", required=True); x.add_argument("--note"); x.add_argument("--branch"); x.set_defaults(f=cmd_audit)
     x = s.add_parser("integrate"); x.add_argument("id"); x.add_argument("--branch"); x.set_defaults(f=cmd_integrate)
-    x = s.add_parser("revalidate"); x.add_argument("--ref"); x.add_argument("--header"); x.set_defaults(f=cmd_revalidate)
+    x = s.add_parser("revalidate"); x.add_argument("--ref"); x.add_argument("--header"); x.add_argument("--candidate")
+    x.add_argument("--judged-for", help=argparse.SUPPRESS)  # set only by this tool, on a candidate's own copy
+    x.set_defaults(f=cmd_revalidate)
     x = s.add_parser("note"); x.add_argument("id"); x.add_argument("text", nargs="+"); x.set_defaults(f=cmd_note)
     x = s.add_parser("similar"); x.add_argument("id"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_similar)
     x = s.add_parser("lock"); x.add_argument("name"); x.add_argument("--by", required=True); x.set_defaults(f=cmd_lock)

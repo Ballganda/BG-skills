@@ -112,7 +112,7 @@ Two editions of a product often carry the same code and differ only outside it (
 - **`differs`**: every function the edition holds differently, by address (or by key, where one address names more than one function), each proven by comparing the two editions. `check` and `verify` exit 6 on those tickets on that edition, so no match is measured against the wrong bytes.
 - **Known-wrong edition**: `name`, `sha256`, and a `message` telling the user what to do.
 
-Adding an edition is a contract change: an ADR, the user's go-ahead, a tag move, then `revalidate`.
+Adding an edition is a contract change: an ADR, then the [change flow](../decomp-standards/LAYOUT.md#change-flow), which measures the change before the tag moves.
 
 ## The wrong target
 
