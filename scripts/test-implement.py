@@ -289,6 +289,92 @@ def test_clean_removes_merged_and_failed_tickets_only(base):
     expect(p.ledger()["tickets"]["2"]["state"] == "claimed", "a cleaned failed ticket can start again")
 
 
+def ticket_file(p, num, blocked_by=(), status="ready-for-agent"):
+    """Commit a local-tracker ticket file: .scratch/feat/issues/NN-t.md with a Blocked by line."""
+    edges = ", ".join(f"{b:02d}" for b in blocked_by) or "None"
+    text = chr(10).join([f"# Ticket {num}", "", f"Status: {status}", f"Blocked by: {edges}", "", "Body.", ""])
+    p.commit(f".scratch/feat/issues/{num:02d}-t.md", text, f"ticket {num}")
+
+
+def set_state(p, ticket, state):
+    """Stand in for merge and fail, which later tickets add: write the state into the ledger."""
+    common = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir"))
+    path = common / "implement" / "runs" / f"{INTEGRATION}.json"
+    ledger = json.loads(path.read_text(encoding="utf-8"))
+    ledger["tickets"][ticket]["state"] = state
+    path.write_text(json.dumps(ledger), encoding="utf-8")
+
+
+def ready(p, *extra):
+    r = p.run("ready", *extra)
+    expect(r.returncode == OK, "ready should succeed", r)
+    return [line.split() for line in r.stdout.splitlines()]
+
+
+def test_ready_in_a_linear_chain_lists_only_the_head_until_it_is_merged(base):
+    p = begun(base, "1:mechanical", "2", "3:hard")
+    ticket_file(p, 1)
+    ticket_file(p, 2, [1])
+    ticket_file(p, 3, [2])
+    expect(ready(p) == [["ticket", "1", "Mechanical"]], "only the head is ready")
+    set_state(p, "1", "merged")
+    expect(ready(p) == [["ticket", "2", "Standard"]], "the next one after the head is merged")
+    set_state(p, "2", "merged")
+    expect(ready(p) == [["ticket", "3", "Hard"]], "then the tail")
+
+
+def test_ready_in_a_diamond_lists_the_join_only_after_both_blockers_merge(base):
+    p = begun(base, "1", "2", "3", "4")
+    ticket_file(p, 1)
+    ticket_file(p, 2, [1])
+    ticket_file(p, 3, [1])
+    ticket_file(p, 4, [2, 3])
+    set_state(p, "1", "merged")
+    set_state(p, "2", "merged")
+    expect([t[1] for t in ready(p)] == ["3"], "the join waits for its second blocker")
+    set_state(p, "3", "merged")
+    expect([t[1] for t in ready(p)] == ["4"], "the join is ready when both are merged")
+
+
+def test_ready_lists_at_most_the_free_slots_under_the_cap(base):
+    p = begun(base, "1", "2", "3", "4", "5")
+    for n in range(1, 6):
+        ticket_file(p, n)
+    start(p, "1")
+    start(p, "2")
+    expect([t[1] for t in ready(p)] == ["3"], "cap 3 with two claimed leaves one slot")
+    r = p.run("ready", "--cap", "2")
+    expect(r.returncode == NOTHING_READY, "no free slot under a cap of 2", r)
+    expect([t[1] for t in ready(p, "--cap", "5")] == ["3", "4", "5"], "the cap can be overridden")
+
+
+def test_ready_skips_a_ticket_blocked_outside_the_batch_and_status_shows_it(base):
+    p = begun(base, "1", "2")
+    ticket_file(p, 1)
+    ticket_file(p, 2, [9])
+    ticket_file(p, 9)
+    expect([t[1] for t in ready(p)] == ["1"], "the blocked ticket is never listed")
+    expect(status_lines(p)["2"].startswith("ticket 2 skipped "), "status shows skipped")
+    ticket_file(p, 9, status="resolved")
+    expect([t[1] for t in ready(p)] == ["1", "2"], "a resolved outside blocker no longer skips")
+
+
+def test_ready_with_nothing_ready_exits_with_the_nothing_ready_code(base):
+    p = begun(base, "1", "2")
+    ticket_file(p, 1)
+    ticket_file(p, 2, [1])
+    start(p, "1")
+    r = p.run("ready")
+    expect(r.returncode == NOTHING_READY and r.stdout.strip() == "ready: none", "nothing ready", r)
+
+
+def test_start_on_a_ticket_outside_the_batch_creates_no_worktree(base):
+    p = begun(base, "1")
+    r = p.run("start", "9")
+    expect(r.returncode == USAGE and "not in the batch" in r.stderr, "usage code", r)
+    expect(not p.has_branch("ticket-9") and not (p.base / "wts").exists(), "no branch or worktree")
+
+
 def test_outside_a_git_repository_every_command_is_an_environment_problem(base):
     p = Project(base)
     outside = p.base / "plain"
