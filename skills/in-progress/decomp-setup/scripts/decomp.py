@@ -908,6 +908,8 @@ def cmd_verify(a):
     doctor(need=tools_needed([t["unit"]]))
     if t["status"] != "claimed":
         die(f"{a.id} is {t['status']}; verify needs a claimed ticket")
+    if a.category == "none":  # a writer that matched reports no category
+        a.category = None
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
     stop_if_edition_differs(t)

@@ -29,7 +29,7 @@ Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user 
 
 ### 2. Repair first
 
-If any ticket is `blocked-reference` and no repair is running: `python tools/decomp.py lock reference --by coordinator`, then start one background subagent. Tell it to call the Skill tool with `decomp-reference`, and give it the blocked tickets' paths. A gap unblocks many tickets at once, so this goes ahead of new writers.
+If any ticket is `blocked-reference` and no repair is running, start one background subagent. Tell it to call the Skill tool with `decomp-reference`, and give it the blocked tickets' paths. It takes the `reference` lock itself, so do not take it for it: you only release it, below. A gap unblocks many tickets at once, so this goes ahead of new writers.
 
 When it reports, re-run `revalidate --ref <its branch>` yourself, because its own result does not count. On exit 0: merge the branch, `release <id> --to open` for each ticket it fixed, run `revalidate`, then `unlock reference`. On a regression (exit 5): discard the branch, `unlock reference`, and leave the tickets blocked with a note. On exit 6 with `SKIPPED` lines, this machine could not rebuild every match the repair could break: keep the branch, `unlock reference`, and tell the user it needs a machine that can.
 

@@ -494,6 +494,15 @@ def test_verify_accepts_clean_writer_branch(base):
     expect(ev.splitlines()[0].replace("\\", "/").endswith("/symbols.json"), f"evidence lacks the symbol map path: {ev}", r)
 
 
+def test_verify_accepts_the_category_none_a_matching_writer_reports(base):
+    p = Project(base, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
+    r = p.run("verify", TID, "--model", "m", "--category", "bogus")
+    expect(r.returncode != 0 and "unknown category" in r.stderr, "an unknown category should still stop", r)
+    r = p.run("verify", TID, "--model", "m", "--category", "none")
+    expect(r.returncode == 0 and '"result": "bytes-match"' in r.stdout, "verify should take category none", r)
+
+
 def test_verify_rejects_writer_branch_touching_symbol_map(base):
     p = Project(base, status="claimed")
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n", "symbols.json": '{"f": "0x00401000"}\n'})
