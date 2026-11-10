@@ -36,4 +36,4 @@ Call the Skill tool with `decomp-ticket-gen`.
 
 Commit `inventory.json`, `expected/`, the seeded `symbols.json`, `units/`, and `tickets/`, then tag `decomp-start` so the ground truth stays frozen. Report, from `python tools/decomp.py report`: in-scope bytes and functions per tier, and exclusions per scope. Tell the user to run `/decomp-run`.
 
-Redoing the inventory later (a better function finder, a scope change) needs the user's go-ahead: regenerate, re-run both generators (statuses and notes survive), move the tag, and run `revalidate`.
+Redoing the inventory later (a better function finder, a scope change) needs the user's go-ahead and follows the [change flow](../decomp-standards/LAYOUT.md#change-flow): on the `c/<slug>` branch, regenerate and re-run both generators (statuses and notes survive). The `decomp-start` tag moves only after the candidate revalidation.

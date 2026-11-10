@@ -520,6 +520,113 @@ def test_revalidate_rejects_repair_that_breaks_a_match(base):
     expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout, "a regression should reject the repair", r)
 
 
+# ---------- candidate ref ----------
+
+NEVER_MATCHES = PY + ' -c "import json;print(json.dumps(dict(match=False,differ_bytes=3)))"'
+TOOL_MARKER = "the candidate's own copy ran"
+
+
+def started_project(base, **kw):
+    """A project past decomp-start: both tags set, its one ticket integrated unless told otherwise."""
+    kw.setdefault("status", "integrated")
+    p = Project(base, files={"inventory.json": '{"units": [], "functions": []}\n', "expected/00401000.bin": "old\n"}, **kw)
+    p.git("tag", "decomp-start")
+    return p
+
+
+def config_with(p, **changes):
+    return json.dumps(dict(json.loads((p.root / "decomp.json").read_text()), **changes), indent=1)
+
+
+def expect_nothing_recorded(p, r, status="integrated"):
+    expect(not (p.root / "ledger").exists(), "a candidate run should write no ledger record", r)
+    expect(f"status: {status}" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
+    expect(p.git("status", "--porcelain").strip() == "", "the checkout should be left as it was", r)
+
+
+def test_candidate_may_change_paths_frozen_by_either_tag(base):
+    p = started_project(base)
+    p.branch("c/flags", {"DECOMP.md": "# contract, changed\n", "decomp.json": config_with(p, banned=["goto"]),
+                         "inventory.json": '{"units": [], "functions": [], "redo": 1}\n',
+                         "expected/00401000.bin": "new\n"})
+    r = p.run("revalidate", "--candidate", "c/flags")
+    expect(r.returncode == 0 and "revalidated 1 on c/flags: 0 regressed, 0 skipped" in r.stdout,
+           "a candidate that keeps every match should exit 0", r)
+    expect_nothing_recorded(p, r)
+
+
+def test_candidate_must_be_a_c_branch(base):
+    p = started_project(base)
+    p.branch("r/sym", {"include/keep.h": "/* shared, repaired */\n"})
+    p.branch("flags", {"DECOMP.md": "# contract, changed\n"})
+    for ref in ("r/sym", "flags", "c/", "c/no-such-branch", "decomp-setup"):
+        r = p.run("revalidate", "--candidate", ref)
+        expect(r.returncode not in (0, 5, ENV_EXIT) and "c/<slug>" in r.stderr, f"{ref} should be refused", r)
+        expect("revalidated" not in r.stdout, f"nothing should be rebuilt for {ref}", r)
+
+
+def test_candidate_is_judged_by_its_own_copy_of_the_tool(base):
+    p = started_project(base)
+    head = "def main():\n    global ROOT, CFG\n"
+    tool = TOOL.read_text(encoding="utf-8")
+    assert head in tool
+    p.branch("c/tool", {"tools/decomp.py": tool.replace(head, head + f'    print("{TOOL_MARKER}")\n')})
+    r = p.run("revalidate", "--candidate", "c/tool")
+    expect(r.returncode == 0 and TOOL_MARKER in r.stdout, "the candidate's copy of the tool should do the rebuild", r)
+    expect(TOOL_MARKER not in p.run("report").stdout, "the checkout's own copy should be untouched")
+
+
+def test_candidate_that_breaks_a_match_lists_it_and_records_nothing(base):
+    p = started_project(base)
+    p.branch("c/diff", {"decomp.json": config_with(p, diff=NEVER_MATCHES)})
+    r = p.run("revalidate", "--candidate", "c/diff")
+    expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout and "1 regressed" in r.stdout,
+           "a broken match should be listed, with a nonzero exit", r)
+    expect_nothing_recorded(p, r)
+
+
+def test_candidate_it_could_not_measure_exits_6(base):
+    p = started_project(base, manifest=editions_manifest(), target=STORE)
+    p.branch("c/flags", {"DECOMP.md": "# contract, changed\n"})
+    r = p.run("revalidate", "--candidate", "c/flags")
+    expect(r.returncode == ENV_EXIT and f"SKIPPED {TID}" in r.stdout, "an unmeasured candidate should exit 6", r)
+    expect("not proven here" in r.stderr, "it should say the candidate is unproven", r)
+    expect_nothing_recorded(p, r)
+
+
+def test_candidate_rebuilds_the_tickets_the_project_holds_matched(base):
+    p = started_project(base)
+    p.branch("c/diff", {"decomp.json": config_with(p, diff=NEVER_MATCHES)})
+    ticket = p.root / f"tickets/{UNIT}/{TID}.md"  # matched after the candidate branched, and not committed
+    ticket.write_text(ticket.read_text().replace("status: integrated", "status: open"), newline="\n")
+    p.git("commit", "-q", "-am", "an open ticket")
+    r = p.run("revalidate", "--candidate", "c/diff")
+    expect(r.returncode == 0 and "revalidated 0 on c/diff" in r.stdout, "an open ticket is not rebuilt", r)
+    ticket.write_text(ticket.read_text().replace("status: open", "status: matched"), newline="\n")
+    r = p.run("revalidate", "--candidate", "c/diff")
+    expect(r.returncode == 5 and f"REGRESSED {TID}" in r.stdout, "the project's matched ticket is rebuilt", r)
+
+
+def test_plain_revalidate_still_refuses_when_a_frozen_path_differs(base):
+    for d, (rel, tag) in each(base, [("DECOMP.md", "decomp-setup"), ("inventory.json", "decomp-start")]):
+        p = started_project(d)
+        p.write(rel, "changed\n")
+        p.git("commit", "-q", "-am", "edit a frozen path")
+        r = p.run("revalidate")
+        expect(r.returncode == 2 and "frozen" in r.stderr and tag in r.stderr, "a moved frozen path should refuse", r)
+        expect(not (p.root / "ledger").exists(), "nothing should be recorded", r)
+
+
+def test_repair_ref_is_still_held_to_headers_and_the_symbol_map(base):
+    p = started_project(base)
+    p.branch("r/contract", {"DECOMP.md": "# contract, changed\n"})
+    r = p.run("revalidate", "--ref", "r/contract")
+    expect(r.returncode == 5 and "DECOMP.md" in r.stderr, "a repair ref may not touch a frozen path", r)
+    p.branch("c/flags", {"DECOMP.md": "# contract, changed\n"})
+    r = p.run("revalidate", "--ref", "c/flags")
+    expect(r.returncode == 5 and "DECOMP.md" in r.stderr, "only --candidate lifts the limit", r)
+
+
 # ---------- provisioning ----------
 
 def with_prerequisites(*pre):

@@ -22,13 +22,13 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | `PATTERNS.md` | Proven lessons | `/decomp-run` |
 | `OPEN.md` | Recurring unsolved failures | `decomp.py report` |
 
-Two git tags freeze the ground truth: `decomp-setup` freezes `tools/`, `decomp.json`, `toolchain.json`, and `DECOMP.md`; `decomp-start` freezes `inventory.json` and `expected/`. `decomp.py` refuses to verify or revalidate when the integration branch differs from a tag in any path it froze. Only the skill that set a tag moves it, and only with the user's go-ahead.
+Two git tags freeze the ground truth: `decomp-setup` freezes `tools/`, `decomp.json`, `toolchain.json`, and `DECOMP.md`; `decomp-start` freezes `inventory.json` and `expected/`. `decomp.py` refuses to verify or revalidate when the integration branch differs from a tag in any path it froze. The one exception is `revalidate --candidate`, which skips that check for a candidate ref. Only the skill that set a tag moves it, and only with the user's go-ahead, through the [change flow](#change-flow).
 
 The symbol map is guarded from writers like the shared headers, but no tag freezes it, because it grows: a repair branch changes it, and `revalidate` judges the change.
 
 ## Units and ids
 
-A **unit** is a best-guess original source file: a run of functions in address order. Its id is `u` plus four digits (`u0001`). A ticket id is `<unit>-<key>` (`u0001-00401000`). A function's **key** names it in its ticket id and its expected file. By default it is the address in hex, zero-padded to at least 8 digits (a 64-bit address is longer). Where an address alone does not name one function (overlays or modules loaded at the same address, banked memory), `inventory` gives each function a `key` of letters, digits, `_`, and `.`, such as `ovl2_80101000`, and writes the address with its prefix (`ovl2:0x80101000`, `03:8000`). A writer's branch for a ticket is `w/<ticket id>`; a repair branch is `r/<slug>`.
+A **unit** is a best-guess original source file: a run of functions in address order. Its id is `u` plus four digits (`u0001`). A ticket id is `<unit>-<key>` (`u0001-00401000`). A function's **key** names it in its ticket id and its expected file. By default it is the address in hex, zero-padded to at least 8 digits (a 64-bit address is longer). Where an address alone does not name one function (overlays or modules loaded at the same address, banked memory), `inventory` gives each function a `key` of letters, digits, `_`, and `.`, such as `ovl2_80101000`, and writes the address with its prefix (`ovl2:0x80101000`, `03:8000`). A writer's branch for a ticket is `w/<ticket id>`. A **repair ref** is a branch named `r/<slug>`: it may touch only the shared headers and the symbol map. A **candidate ref** is a branch named `c/<slug>` that holds a proposed change to paths a tag freezes: it may change any path frozen by either tag.
 
 In the unit's source file, every function sits in the contract's function order (address order, unless the contract records that this compiler emits another) with a marker comment directly above its definition: `// @decomp <ticket id>`, or `/* @decomp <ticket id> */` where the contract's language has no line comment.
 
@@ -92,6 +92,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `audit <id> pass\|fail --auditor <m>` | Record the auditor's verdict; `pass` records the match |
 | `integrate <id>` | Mark a merged match integrated |
 | `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref (with `--header`, only those that include that header, directly or through another); nonzero exit on any regression. A repair ref may touch only `include/` and `symbols.json` |
+| `revalidate --candidate <c/slug>` | Rebuild every matched ticket on a candidate ref, in a clean worktree of it, with that tree's own copy of `decomp.py`. Accepts only a `c/<slug>` branch. Records nothing: no ledger line, no status change. Exit 0 when every match holds; nonzero, listing each `REGRESSED` ticket, when one does not |
 | `note <id> <text>` | Append an attempt note to a ticket |
 | `similar <id>` | Closest matched functions by byte pattern |
 | `lock <name> --by <n>` / `unlock <name>` | Exclusive lock, used for shared header and symbol map repair. Locks and claims are shared by every worktree of the repository |
@@ -102,7 +103,16 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 
 `check` and `verify` also exit 6 for a ticket no result could count for on this machine: the recognised edition's `differs` list names it, or its unit's compiler is missing from `toolchain.json`, listed only for another host, or not provisioned. A compiler that builds only other units does not stop this one.
 
-`revalidate` prints `SKIPPED` for each such ticket. On the integration branch it leaves that ticket's status alone and still exits 0. On a repair ref it exits 6: a repair is accepted only on a machine that rebuilt every match it could break.
+`revalidate` prints `SKIPPED` for each such ticket. On the integration branch it leaves that ticket's status alone and still exits 0. On a repair ref or a candidate ref it exits 6: a repair is accepted, and a candidate measured, only on a machine that rebuilt every match it could break.
+
+## Change flow
+
+Every change to a path a tag freezes (a contract change, a skill upgrade, an inventory redo, a new edition) takes these steps, in this order. The tag moves only after the change has been measured:
+
+1. Make the change on a `c/<slug>` branch from the integration branch tip.
+2. Run `python tools/decomp.py revalidate --candidate c/<slug>` and show the user the result. The candidate's own tool, adapters, manifest, and contract judge it, and nothing is recorded. Regressions inform the user's go-ahead and do not block it: a corrected flag breaks matches on purpose. On exit 6, run it again on a machine that can build every matched ticket.
+3. On the user's go-ahead, merge the candidate into the integration branch and move the tag that freezes the changed paths. Without it, delete the branch: nothing else changed.
+4. Run a plain `python tools/decomp.py revalidate` on the integration branch. It records `revalidated` and `regressed`.
 
 ## Target editions
 

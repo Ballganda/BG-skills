@@ -74,4 +74,4 @@ A new machine needs no contract change: write its `.decomp/local.json`, run `pro
 
 Accepting another edition, or marking one known-wrong, is a contract change like any other. Prove every `differs` entry by comparing the two editions first.
 
-Only on the user's request: grill the change, write a dated ADR, update the contract, move the `decomp-setup` tag with the user's go-ahead, then run `python tools/decomp.py revalidate` and report every regression.
+Only on the user's request: grill the change, write a dated ADR, then update the contract through the [change flow](../decomp-standards/LAYOUT.md#change-flow). The `decomp-setup` tag moves only after the candidate revalidation, on the user's go-ahead. Report every regression, from the candidate run and from the plain `revalidate` that ends the flow.
