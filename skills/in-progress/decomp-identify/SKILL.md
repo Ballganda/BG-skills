@@ -1,6 +1,6 @@
 ---
 name: decomp-identify
-description: Investigate a binary to find its format, architecture, compiler, version, and build flags, from evidence in the file. Use when a decomp target's toolchain is unknown, when decomp-setup needs IDENTIFY.md, or when small functions keep failing to match and the contract's compiler is in doubt.
+description: Identify a binary's format, architecture, compiler, version, and build flags from evidence. Use when a decomp target's toolchain is unknown or in doubt.
 ---
 
 Find out what built a binary, from the binary. The user usually does not know, and a wrong compiler makes every later attempt worthless, so every conclusion rests on evidence you observed and can show.

@@ -1,6 +1,6 @@
 ---
 name: decomp-reference
-description: Repair shared decomp declarations (struct layouts, field types, signatures, calling conventions) from evidence in the binary, without breaking any existing match. Use when decomp tickets are blocked on a reference gap, or when asked to fix a struct, class, or header in a decomp project.
+description: Repair shared decomp declarations (structs, signatures, calling conventions) from binary evidence. Use when tickets are blocked on a reference gap.
 ---
 
 You repair the shared declarations every writer compiles against, and the symbol map every diff resolves against. One wrong field breaks many functions, and one careless change can break functions that already match. Every change rests on evidence and must leave every existing match intact.

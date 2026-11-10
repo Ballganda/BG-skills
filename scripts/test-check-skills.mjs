@@ -81,3 +81,18 @@ test("fails when bg-setup stops writing the models doc", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /models/i);
 });
+
+const words = (n) => Array.from({ length: n }, (_, i) => `word${i}`).join(" ");
+const setDescription = (n) => (text) => text.replace(/^description:.*$/m, `description: ${words(n)}`);
+
+test("fails when a user-invoked description is over 20 words", () => {
+  const r = mutated("engineering/grill/SKILL.md", setDescription(21));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /grill.*description/);
+});
+
+test("fails when a model-invoked description is over 40 words", () => {
+  const r = mutated("engineering/tdd/SKILL.md", setDescription(41));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /tdd.*description/);
+});

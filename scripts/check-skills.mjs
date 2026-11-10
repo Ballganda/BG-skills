@@ -4,7 +4,7 @@
 // To add a check, push a function onto `checks`: it receives a `ctx` and calls
 // `ctx.fail(message)` for each problem.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51,7 +51,36 @@ function checkModelsDoc({ read, fail }) {
   }
 }
 
-const checks = [checkBoundaryLines, checkTicketTiers, checkModelsDoc];
+
+// Descriptions are loaded into every session: keep them short.
+const descriptionLimits = { user: 20, model: 40 };
+
+function checkDescriptionLengths({ fail }) {
+  const skillsDir = join(root, "skills");
+  for (const bucket of readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!bucket.isDirectory()) continue;
+    for (const skill of readdirSync(join(skillsDir, bucket.name), { withFileTypes: true })) {
+      if (!skill.isDirectory()) continue;
+      const rel = `${bucket.name}/${skill.name}/SKILL.md`;
+      let text;
+      try {
+        text = readFileSync(join(skillsDir, rel), "utf8");
+      } catch {
+        continue;
+      }
+      const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
+      const raw = front.match(/^description:[ \t]*(.*)$/m)?.[1] ?? "";
+      const description = raw.trim().replace(/^"(.*)"$/, "$1");
+      const kind = /^disable-model-invocation:\s*true\s*$/m.test(front) ? "user" : "model";
+      const count = description.split(/\s+/).filter(Boolean).length;
+      if (count > descriptionLimits[kind]) {
+        fail(`${rel}: description is ${count} words, over the ${kind}-invoked limit of ${descriptionLimits[kind]}`);
+      }
+    }
+  }
+}
+
+const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc];
 
 for (const check of checks) check(ctx);
 

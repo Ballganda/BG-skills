@@ -1,6 +1,6 @@
 ---
 name: decomp-setup
-description: Agree a byte-for-byte decomp contract with the user and set up the private project that enforces it, or upgrade an existing decomp project to the current skills. Does no decomp.
+description: Agree a byte-for-byte decomp contract and set up its private project, or upgrade an existing one. Does no decomp.
 disable-model-invocation: true
 argument-hint: "Path to the target binary, or to an existing decomp project"
 ---
