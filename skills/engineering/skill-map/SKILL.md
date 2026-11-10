@@ -29,7 +29,7 @@ The route most work travels. You have an idea and want it built. The creation fl
 
    When the work goes up as a pull request, **`/pr`** shapes the body: the smallest visual that shows the change, before/after evidence that it works, and a one-way or two-way door call. It's model-invoked, so the agent reaches for it whenever it writes a PR.
 
-4. **`/retro`** closes the loop. After a build, and especially one that went sideways, it looks back over the session and suggests changes to the agent's **environment**, not the code: navigation pointers, automated checks, the coding standards `/code-review` enforces, steering files, tooling. Mechanical mistakes become deterministic checks; judgement calls become coding standards. The next build then starts from a better environment.
+4. **`/retro`** closes the loop. It suggests changes to the agent's **environment**, not the code: navigation pointers, automated checks, the coding standards `/code-review` enforces, steering files, tooling. Mechanical mistakes become deterministic checks; judgement calls become coding standards. It runs **automatically**: `/implement` calls it at the end of a run when implementers reported **lessons**, and works from those lesson lines alone; a clean run skips it. Run that way, it only lists suggestions in the final report and changes nothing until you pick one. Type `/retro` yourself to look back on any session. The next build then starts from a better environment.
 
 ### Context hygiene
 
@@ -42,7 +42,7 @@ Each skill in the creation flow ends with one line about the next step:
 | `/ticket-gen` | `/implement` | Always start a new chat. |
 | `/implement` | `/code-review` | Always start a new chat. |
 
-The limit behind the 150k line is the **smart zone**: the window (~150k tokens on state-of-the-art models) within which the model still reasons sharply. The agent cannot read its own token count, so the line is conditional on what you see. If a session grows past it mid-phase, `/compact` at the nearest phase boundary (see Phase boundaries). `/implement` keeps its own window small by giving every ticket to a fresh-context subagent. Run `/retro` in the session it's looking back on, before you clear; after clearing, point it at that session's log instead.
+The limit behind the 150k line is the **smart zone**: the window (~150k tokens on state-of-the-art models) within which the model still reasons sharply. The agent cannot read its own token count, so the line is conditional on what you see. If a session grows past it mid-phase, `/compact` at the nearest phase boundary (see Phase boundaries). `/implement` keeps its own window small by giving every ticket to a fresh-context subagent. The automatic `/retro` needs no session history, since it works from lesson lines. When you type `/retro` yourself, run it in the session it's looking back on, before you clear; after clearing, point it at that session's log instead.
 
 ## On-ramps
 
@@ -52,7 +52,7 @@ A starting situation that generates work, then merges onto the main flow.
 
   Triage is only for issues **you didn't create**: bug reports, incoming feature requests, anything that arrives raw. Tickets that `/ticket-gen` produced are already agent-ready, so **don't triage them**.
 
-- **Something's broken** → **`/diagnosing-bugs`**. For the hard ones: the bug that resists a first glance, the intermittent flake, the regression that crept in between two known-good states. It refuses to theorise until it has a **tight feedback loop** (one command that already goes red on *this* bug), then fixes with a regression test. Once the fix is in, run **`/retro`** in the same session to ask what would have prevented the bug; where the real finding is that there's no good seam to lock it down, that's a job for **`/improve-codebase-architecture`**.
+- **Something's broken** → **`/diagnosing-bugs`**. For the hard ones: the bug that resists a first glance, the intermittent flake, the regression that crept in between two known-good states. It refuses to theorise until it has a **tight feedback loop** (one command that already goes red on *this* bug), then fixes with a regression test. Once the fix is in, it calls **`/retro`** in the same session to suggest what would have prevented the bug; where the real finding is that there's no good seam to lock it down, that's a job for **`/improve-codebase-architecture`**.
 
 - **A huge, foggy effort: a greenfield project or a huge feature build, too big for one session** → **`/wayfinder`**, the most cognitively demanding flow here. When the way from here to the destination isn't visible yet, it charts a **shared map** of **decision tickets** on the issue tracker and resolves them one at a time, producing **decisions, not deliverables**, until the fog is pushed back and the way is clear. Where **`/grill`** sharpens an idea you can hold in one session, wayfinder is for the idea you can't, and it's slower and denser, so save it for exactly that, never a well-scoped feature.
 

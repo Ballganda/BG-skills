@@ -70,5 +70,6 @@ If the user asks what a report means, explain it in plain language.
 6. Start implementers for any newly ready batch Tickets, within the cap.
 7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done). Report: integration branch, Tickets done, Tickets skipped or stopped and why, and the lesson lines.
 8. Remove the implementer worktrees.
+9. If at least one lesson line came back, call the Skill tool with `retro`, passing the collected lesson lines, and list its suggestions in the final report. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
 
 Don't review: review is a separate stage, so suggest `/code-review` when done. End the closing message with this line: Always start a new chat before `/code-review`.

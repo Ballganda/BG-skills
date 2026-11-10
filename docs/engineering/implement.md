@@ -65,6 +65,10 @@ A repo set up before the models doc existed runs on these defaults until you rer
 
 On Claude Code, each subagent runs as one of the plugin's **restricted agents** (implementer, explorer, merger, plus the reviewer [code-review](code-review.md) uses), each with only the tools its role needs, so it starts from a lower token floor. The orchestrator overrides the agent's model at dispatch. Other harnesses get the same roles and models through a general subagent.
 
+## Lessons and the automatic retro
+
+An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). When the run ends with at least one lesson, `implement` calls [retro](retro.md) on those lines alone, without reading session logs, and lists its suggestions in the final report. It changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
+
 ## Common questions
 
 **The subagent reports are one terse line. What do they mean?**
@@ -120,6 +124,7 @@ The agent resolved `#2` against another numbered list in context rather than the
 - Several implementers (up to 3) run at once whenever the graph allows, and a ticket starts as soon as its last blocker lands.
 - Every implementer's trace shows a `tdd` Skill tool call, repeated typechecks and single test files, and one full suite near the end.
 - The run ends on one branch with every batch ticket resolved or listed as skipped, and suggests `/code-review` instead of running it.
+- A run with lessons ends with retro's suggestions listed, and no file changed on their account; a clean run lists none.
 
 ## Where it fits
 

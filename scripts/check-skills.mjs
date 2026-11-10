@@ -114,7 +114,26 @@ function checkDescriptionLengths({ fail }) {
   }
 }
 
-const checks = [checkBoundaryLines, checkDescriptionLengths, checkTicketTiers, checkModelsDoc, checkAgentDefinitions, checkImplementFormats];
+// implement and diagnosing-bugs call retro, so it is model-invoked in both harnesses.
+function checkRetroInvocation({ read, fail }) {
+  const front = read("engineering/retro/SKILL.md").match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
+  const claudeUser = /^disable-model-invocation:\s*true\s*$/m.test(front);
+  const codexUser = /^\s*allow_implicit_invocation:\s*false\s*$/m.test(read("engineering/retro/agents/openai.yaml"));
+  if (claudeUser !== codexUser)
+    fail("engineering/retro: frontmatter and Codex metadata disagree on invocation");
+  if (claudeUser) fail("engineering/retro/SKILL.md: retro must be model-invoked");
+  if (codexUser) fail("engineering/retro/agents/openai.yaml: retro must be model-invoked");
+}
+
+const checks = [
+  checkBoundaryLines,
+  checkDescriptionLengths,
+  checkTicketTiers,
+  checkModelsDoc,
+  checkAgentDefinitions,
+  checkImplementFormats,
+  checkRetroInvocation,
+];
 
 for (const check of checks) check(ctx);
 

@@ -136,3 +136,7 @@ Required before declaring done:
 - [ ] All `[DEBUG-...]` instrumentation removed (`grep` the prefix)
 - [ ] Throwaway prototypes deleted (or moved to a clearly-marked debug location)
 - [ ] The hypothesis that turned out correct is stated in the commit / PR message, so the next debugger learns
+
+## Phase 7: Retrospective
+
+Once the fix has landed, call the Skill tool with `retro` in this live session, to ask what in the environment would have prevented the bug. List its suggestions in your final report; it only suggests, so change nothing on its findings.
