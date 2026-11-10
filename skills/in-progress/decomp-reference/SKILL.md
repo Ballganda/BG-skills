@@ -13,7 +13,7 @@ Run `python tools/decomp.py lock reference --by <your name>`. If it is already l
 
 ## 2. Gather evidence
 
-For each gap in the blocked tickets' notes, collect evidence from **every** function that touches the declaration, not just the one that reported the gap. Use the `disasm` adapter on the blocked tickets, and read the source of matched functions that use the declaration:
+For each gap in the blocked tickets' notes, collect evidence from **every** function that touches the declaration, not just the one that reported the gap. Run `python tools/decomp.py disasm <id>` on the blocked tickets, and read the source of matched functions that use the declaration:
 
 - **Field offsets and widths**: every `[reg+offset]` access, with its operand size.
 - **Signedness**: `movsx`/`movzx`, and the signed or unsigned branches that test the value.

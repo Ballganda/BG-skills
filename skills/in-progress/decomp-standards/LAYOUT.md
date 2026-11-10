@@ -84,6 +84,8 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | --- | --- |
 | `doctor` | Check this machine against `toolchain.json`: which edition the target is, each host prerequisite's version, each tool's required files and version banner. Prints the recognised edition. Exit 6 on any difference |
 | `provision [--tool <name>] [--force]` | Download each tool that has a source, compare size and SHA-256, then unpack it under `.decomp/toolchain/`. Checks the host prerequisites first. A file already in `.decomp/downloads/` is compared, and replaced only with `--force`. Never installs a host prerequisite |
+| `inventory [--redo]` | Run the `inventory` adapter, after the full `doctor` checks. Once the `decomp-start` tag exists it refuses, naming the redo flow, unless `--redo` is passed |
+| `disasm <id>` | Print the original function's disassembly: run the `disasm` adapter with the ticket's expected file and address |
 | `gen-specs`, `gen-tickets` | Write unit specs and tickets from `inventory.json`; existing status and notes survive |
 | `next [--n N]` | List open tickets in pick order |
 | `claim <id> --by <name>` / `release <id> [--to <status>]` | Take or give back a ticket |
@@ -99,7 +101,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `report` | Progress, attribution, learning metrics, early warning; regenerates `OPEN.md`, checks `PATTERNS.md` |
 | `sync` | Push unit checklists and the progress issue to GitHub, when enabled |
 
-`check`, `verify`, and `revalidate` run the `doctor` checks first and build nothing when they fail. `check` skips them while `toolchain.json`, the target, and the tools' files are unchanged since the last pass. Exit 6 always means the machine, not the source: no writer fixes it, and no attempt is recorded.
+`inventory`, `disasm`, `check`, `verify`, and `revalidate` run the `doctor` checks first and run no adapter when they fail. `check` and `disasm` skip them while `toolchain.json`, the target, and the tools' files are unchanged since the last pass. Exit 6 always means the machine, not the source: no writer fixes it, and no attempt is recorded.
 
 `check` and `verify` also exit 6 for a ticket no result could count for on this machine: the recognised edition's `differs` list names it, or its unit's compiler is missing from `toolchain.json`, listed only for another host, or not provisioned. A compiler that builds only other units does not stop this one.
 
@@ -127,12 +129,12 @@ An edition's `differs` lists the functions it holds differently from `expected/`
 
 ## Adapters
 
-`/decomp-setup` writes these for the project's format and toolchain. Each is a command in `decomp.json`, run from a worktree root, with `{placeholders}` filled from the ticket. Every command also gets `{tools}` (the `tools/` folder of the tree being built) and `{python}` (the interpreter running `decomp.py`), and a brace that is not a placeholder stays as written. `decomp.py` gives each one the target's path as `DECOMP_TARGET` and each tool's folder as `DECOMP_TOOL_<NAME>` (the tool's `name` in `toolchain.json`, upper-cased); an adapter holds no absolute path.
+`/decomp-setup` writes these for the project's format and toolchain. Each is a command in `decomp.json`, run from a worktree root, with `{placeholders}` filled from the ticket. Adapters are run only through `decomp.py` (`inventory`, `disasm`, and the commands that build and diff), never directly: that is what gives each one its environment. Every command also gets `{tools}` (the `tools/` folder of the tree being built) and `{python}` (the interpreter running `decomp.py`), and a brace that is not a placeholder stays as written. `decomp.py` gives each one the target's path as `DECOMP_TARGET` and each tool's folder as `DECOMP_TOOL_<NAME>` (the tool's `name` in `toolchain.json`, upper-cased); an adapter holds no absolute path and no lookup of `.decomp/local.json`.
 
 - **inventory**: reads the target, writes `inventory.json` and `expected/`, and seeds `symbols.json` with what the target itself proves (exports, imports, any symbols present). Shape: `{"units": [{"id", "source", "start", "end", "evidence"}], "functions": [{"address", "size", "unit", "scope", "evidence"}]}`; a function may add `key` (see Units and ids) and `expected` (its expected file, when not `expected/<key>.bin`); `scope` is `in`, `library`, `compiler`, `asm-origin`, or `excluded`; `size` follows the tier rule.
 - **build** (`{source}`, `{unit}`, `{obj}`, `{compiler}`): compiles one unit with the contract's compiler and flags. `{compiler}` is the tool name from `toolchain.json` that builds this unit: `decomp.json`'s `compiler`, or the unit's entry in `unit_compilers`. Exit nonzero on failure, errors on stderr.
 - **diff** (`{obj}`, `{expected}`, `{id}`, `{source}`, `{report}`, `{symbols}`): finds the function after the `@decomp {id}` marker in the object, compares it to the expected bytes under the contract's relocation policy, writes a readable instruction diff to `{report}`, and prints `{"match": true|false, "differ_bytes": N}` on stdout. `{symbols}` is the path of the symbol map in the tree being built.
-- **disasm** (`{expected}`, `{address}`): prints the original function's disassembly.
+- **disasm** (`{expected}`, `{address}`, `{id}`): prints the original function's disassembly. `decomp.py disasm <id>` fills the placeholders from the ticket.
 
 Every adapter and banner command invokes a tool through the one wrapper in `tools/`, which owns the environment, path conversion, and any compatibility layer. `decomp.py` reads a tool's output in whatever encoding the tool writes, so an adapter never depends on the host's.
 

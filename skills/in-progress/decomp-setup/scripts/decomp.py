@@ -836,6 +836,32 @@ def cmd_release(a):
     print(f"{a.id} -> {read_ticket(a.id)[0]['status']}")
 
 
+def run_adapter(name, **values):
+    """Run an adapter that reports to the caller, in the project root, and exit as it exits.
+
+    Its output goes straight through, in whatever encoding the tool writes.
+    """
+    if not CFG.get(name):
+        die(f"decomp.json has no `{name}` adapter command; run /decomp-setup")
+    code = subprocess.run(tool_command(CFG[name], **values), shell=True, cwd=ROOT, env=tool_env()).returncode
+    if code:
+        die(f"the {name} adapter failed (exit {code})")
+
+
+def cmd_inventory(a):
+    doctor(full=True)
+    if git("tag", "--list", "decomp-start").strip() and not a.redo:
+        die("the decomp-start tag exists, so inventory.json and expected/ are frozen; nothing was written. "
+            "Redoing the inventory is /decomp-start's redo flow: with the user's go-ahead, run `inventory --redo`.", 2)
+    run_adapter("inventory")
+
+
+def cmd_disasm(a):
+    t, _ = read_ticket(a.id)
+    doctor(full=False, need=tools_needed([t["unit"]]))
+    run_adapter("disasm", id=t["id"], expected=t["expected"], address=t["address"])
+
+
 def cmd_check(a):
     t, _ = read_ticket(a.id)
     doctor(full=False, need=tools_needed([t["unit"]]))
@@ -1280,6 +1306,8 @@ def main():
     x = s.add_parser("next"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_next)
     x = s.add_parser("claim"); x.add_argument("id"); x.add_argument("--by", required=True); x.set_defaults(f=cmd_claim)
     x = s.add_parser("release"); x.add_argument("id"); x.add_argument("--to", default="open"); x.set_defaults(f=cmd_release)
+    x = s.add_parser("inventory"); x.add_argument("--redo", action="store_true"); x.set_defaults(f=cmd_inventory)
+    x = s.add_parser("disasm"); x.add_argument("id"); x.set_defaults(f=cmd_disasm)
     x = s.add_parser("check"); x.add_argument("id"); x.set_defaults(f=cmd_check)
     x = s.add_parser("verify"); x.add_argument("id"); x.add_argument("--model", required=True)
     x.add_argument("--category"); x.add_argument("--branch"); x.set_defaults(f=cmd_verify)

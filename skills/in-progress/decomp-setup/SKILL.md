@@ -60,7 +60,7 @@ Prove the system works without reconstructing anything. Run every check in a thr
 - [ ] A build whose compiler prints a message outside ASCII (in the tool's own encoding) still reports its result.
 - [ ] Each tool's banner prints through the wrapper, and a build through it leaves no process waiting.
 - [ ] `verify` refuses to run after a frozen path is edited on the integration branch.
-- [ ] `inventory` runs on the target, and its byte total for in-scope functions is no larger than the target's executable sections, and no two functions share a key.
+- [ ] `python tools/decomp.py inventory` runs on the target, and its byte total for in-scope functions is no larger than the target's executable sections, and no two functions share a key.
 
 Every box ticked, each with the command you ran and its output: that is the completion criterion. Record the results and the Unix time in `DECOMP.md`.
 
