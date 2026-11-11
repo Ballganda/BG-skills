@@ -155,25 +155,25 @@ for (const [name, needle] of implementFormats) {
   });
 }
 
-const userInvokedFront = (t) =>
+const makeFrontUserInvoked = (t) =>
   t.replace(/^description:.*$/m, (line) => `${line}\ndisable-model-invocation: true`);
-const userInvokedCodex = (t) => `${t.trimEnd()}\npolicy:\n  allow_implicit_invocation: false\n`;
+const makeCodexUserInvoked = (t) => `${t.trimEnd()}\npolicy:\n  allow_implicit_invocation: false\n`;
 
 test("fails when a skill other than retro has harnesses that disagree on invocation", () => {
-  const r = mutated("engineering/tdd/SKILL.md", userInvokedFront);
+  const r = mutated("engineering/tdd/SKILL.md", makeFrontUserInvoked);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /engineering\/tdd: frontmatter and Codex metadata disagree on invocation/);
   assert.doesNotMatch(r.stderr, /retro must be model-invoked/);
 });
 
 test("fails when retro's frontmatter makes it user-invoked", () => {
-  const r = mutated("engineering/retro/SKILL.md", userInvokedFront);
+  const r = mutated("engineering/retro/SKILL.md", makeFrontUserInvoked);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /engineering\/retro\/SKILL\.md: retro must be model-invoked/);
 });
 
 test("fails when retro's Codex metadata makes it user-invoked", () => {
-  const r = mutated("engineering/retro/agents/openai.yaml", userInvokedCodex);
+  const r = mutated("engineering/retro/agents/openai.yaml", makeCodexUserInvoked);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /engineering\/retro\/agents\/openai\.yaml: retro must be model-invoked/);
 });
