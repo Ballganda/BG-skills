@@ -178,6 +178,20 @@ test("fails when retro's Codex metadata makes it user-invoked", () => {
   assert.match(r.stderr, /engineering\/retro\/agents\/openai\.yaml: retro must be model-invoked/);
 });
 
+test("fails when a skill other than retro has no Codex metadata", () => {
+  const r = withCopy((dir) => unlinkSync(join(dir, "skills", "engineering", "implement", "agents", "openai.yaml")));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /engineering\/implement: missing Codex metadata agents\/openai\.yaml/);
+  assert.doesNotMatch(r.stderr, /disagree/);
+});
+
+test("fails when retro has no Codex metadata", () => {
+  const r = withCopy((dir) => unlinkSync(join(dir, "skills", "engineering", "retro", "agents", "openai.yaml")));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /engineering\/retro: missing Codex metadata agents\/openai\.yaml/);
+  assert.doesNotMatch(r.stderr, /disagree/);
+});
+
 const iconRel = join(".claude-plugin", "icon.png");
 
 test("fails when the plugin icon is missing", () => {
