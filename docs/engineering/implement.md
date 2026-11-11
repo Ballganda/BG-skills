@@ -74,7 +74,7 @@ On Claude Code, each subagent runs as one of the plugin's **restricted agents** 
 
 ## Lessons and the automatic retro
 
-An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). When the run ends with at least one lesson, `implement` calls [retro](retro.md) on those lines alone, without reading session logs, and lists its suggestions in the final report. It changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
+An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). When the run ends with at least one lesson, `implement` resolves the tickets, then calls [retro](retro.md) on those lines alone, without reading session logs. It writes the final report with retro's suggestions listed, and only then cleans up the implementer worktrees. It changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
 
 ## Common questions
 
