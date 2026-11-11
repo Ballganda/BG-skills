@@ -88,7 +88,7 @@ Before the first command, run `python3 --version`. If Python 3 is missing, tell 
 6. Run `ready` again for newly ready batch Tickets, within the cap, and repeat from step 4 until it prints `ready: none` and no implementer is running.
 7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done). Report: integration branch, Tickets done, Tickets skipped or stopped and why, and the lesson lines.
 8. Run `clean`.
-9. If at least one lesson line came back, call the Skill tool with `retro`, passing the collected lesson lines, and list its suggestions in the final report. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
+9. If at least one lesson line came back, call the Skill tool with `retro`, passing the lesson-line mode and the collected lesson lines, and list its suggestions in the final report. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
 
 ## Resuming
 

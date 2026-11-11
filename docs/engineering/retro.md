@@ -1,10 +1,10 @@
 ## What it does
 
-`retro` looks back over a coding session and suggests improvements to the agent's **environment**, so the next run goes better. It finds the moments where the agent struggled, and gives you a list of candidate fixes, most severe first. What it reads depends on who started it:
+`retro` looks back over a coding session and suggests improvements to the agent's **environment**, so the next run goes better. It finds the moments where the agent struggled, and gives you a list of candidate fixes, most severe first. What it reads depends on the mode its caller passes. With no mode, including a plain "do a retro" in chat, it behaves as if you typed `/retro`:
 
-| Started by | It reads | You see |
+| Mode | It reads | You see |
 | --- | --- | --- |
-| You, typing `/retro` | The session's own record: the current one by default, or one you point it at in the session logs | The candidates, in the chat |
+| You, typing `/retro` (also the default when no mode is passed) | The session's own record: the current one by default, or one you point it at in the session logs | The candidates, in the chat |
 | `implement`, at the end of a run with **lessons** | Only the implementers' lesson lines (`type @ location`) and the files they point to, never the session logs | Suggestions in implement's final report |
 | `diagnosing-bugs`, once a fix lands | The live debugging session | Suggestions in its final report |
 

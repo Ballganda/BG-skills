@@ -7,13 +7,17 @@ A **retrospective** suggests improvements to the coding agent's **environment** 
 
 ## Modes
 
-| Invoked by | Evidence | Output |
-| --- | --- | --- |
-| The user typing it | The session they name, from the session logs; the current one by default | Candidates presented to the user |
-| `implement`, at the end of a run | Only the lesson lines it passes (`type @ location`) and the locations they point to. Do not read session logs. | Suggestions listed in the caller's final report |
-| `diagnosing-bugs`, after the fix lands | The live session | Suggestions listed in the caller's final report |
+Your caller passes your mode. If none is passed, including when the model invokes you for a plain "do a retro" in chat, use the user-typed mode.
 
-When another skill invokes you, **only suggest**: change no file, add no check, write no rule. The user decides later which suggestions to act on.
+| Mode passed | Evidence | Output |
+| --- | --- | --- |
+| User-typed (default) | The session the user names, from the session logs; the current one by default | Candidates presented to the user |
+| Lesson-line (`implement`, with the collected lesson lines) | Only the lesson lines (`type @ location`) and the locations they point to | Suggestions listed in the caller's final report |
+| Diagnosing-bugs (`diagnosing-bugs`) | The live session | Suggestions listed in the caller's final report |
+
+In lesson-line mode, do not read session logs.
+
+When another skill passes a mode, **only suggest**: change no file, add no check, write no rule. The user decides later which suggestions to act on.
 
 ## Steps
 
@@ -31,7 +35,7 @@ When another skill invokes you, **only suggest**: change no file, add no check, 
 - **No-ops**: look for instructions in steering files that don't modify the agent's behavior. _Use when_ the steering files are large and unwieldy.
 - **Information access**: look for opportunities to increase the agent's access to information. Teeing dev server logs, readonly access to third-party services. _Use when_ a crucial piece of information was not available to the agent.
 
-4. List the candidates in order of severity: to the user when typed, in the caller's final report when invoked by another skill.
+4. List the candidates in order of severity: to the user in the user-typed mode, in the caller's final report in the other modes.
 
 ## Reference
 
