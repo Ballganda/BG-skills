@@ -139,4 +139,4 @@ Required before declaring done:
 
 ## Phase 7: Retrospective
 
-Once the fix has landed, call the Skill tool with `retro` in this live session, to ask what in the environment would have prevented the bug. List its suggestions in your final report; it only suggests, so change nothing on its findings.
+Once the fix has landed, call the Skill tool with `retro`, passing the diagnosing-bugs mode, in this live session, to ask what in the environment would have prevented the bug. List its suggestions in your final report; it only suggests, so change nothing on its findings.
