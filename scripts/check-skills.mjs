@@ -64,7 +64,7 @@ function checkAgentDefinitions({ fail }) {
       fail(`${rel}: agent definition for ${role} is missing`);
       continue;
     }
-      const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
+    const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
     for (const field of ["model", "tools"]) {
       if (!new RegExp(`^${field}:[ \\t]*\\S`, "m").test(front)) fail(`${rel}: ${role} agent lacks a ${field}`);
     }

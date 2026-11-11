@@ -156,12 +156,8 @@ for (const [name, needle] of implementFormats) {
 }
 
 const userInvokedFront = (t) =>
-  t.replace(/^description:.*$/m, (line) => `${line}
-disable-model-invocation: true`);
-const userInvokedCodex = (t) => `${t.trimEnd()}
-policy:
-  allow_implicit_invocation: false
-`;
+  t.replace(/^description:.*$/m, (line) => `${line}\ndisable-model-invocation: true`);
+const userInvokedCodex = (t) => `${t.trimEnd()}\npolicy:\n  allow_implicit_invocation: false\n`;
 
 test("fails when a skill other than retro has harnesses that disagree on invocation", () => {
   const r = mutated("engineering/tdd/SKILL.md", userInvokedFront);
