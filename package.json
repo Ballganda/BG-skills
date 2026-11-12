@@ -18,6 +18,7 @@
     "check-skills": "node scripts/check-skills.mjs",
     "test:check-skills": "node scripts/test-check-skills.mjs",
     "test:replies-line": "node scripts/test-replies-line.mjs",
+    "test:eval-login": "node scripts/test-eval-login.mjs",
     "test:eval-replies": "node scripts/test-eval-replies.mjs"
   },
   "devDependencies": {
