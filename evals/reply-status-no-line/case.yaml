@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: reply-status-no-line
+description: Control for reply-status. The same prompt and workspace, but CLAUDE.md has no Replies line, so output tokens can be compared. Run it with --tag reply-control; it is not part of the default run.
+tags: [reply-control]
+runs: 3
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 15
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep]

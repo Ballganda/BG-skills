@@ -15,7 +15,8 @@
     "test:decomp": "python scripts/test-decomp.py",
     "test:implement": "python scripts/test-implement.py",
     "check-skills": "node scripts/check-skills.mjs",
-    "test:check-skills": "node scripts/test-check-skills.mjs"
+    "test:check-skills": "node scripts/test-check-skills.mjs",
+    "test:replies-line": "node scripts/test-replies-line.mjs"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",

@@ -1,0 +1,1 @@
+In utils.js, add and export a function titleCase(s) that capitalises the first letter of each word, and make slugify collapse repeated dashes into one. Do not run anything; just edit the files. Then tell me where things stand.
