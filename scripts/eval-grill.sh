@@ -42,6 +42,8 @@ claude plugin eval . "${tags[@]}" \
   --keep-temp --trust-plugin --no-publish -j 3 \
   --output-dir "$OUT" --report "$OUT/report.html" "$@" || status=$?
 
+# Also writes replies.md (each run's judged Reply and grader votes) before the
+# traces are removed below.
 node scripts/grill-eval-summary.mjs "$OUT/aggregate-result.json" "$OUT"
 
 # --keep-temp kept each run's workspace so the summary could read its trace.
