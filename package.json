@@ -12,6 +12,7 @@
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-plugin-version.mjs",
     "check-plugin-version": "node scripts/sync-plugin-version.mjs --check",
+    "check": "npm run check-skills && npm run test:check-skills && npm run test:implement && npm run test:replies-line",
     "test:decomp": "python scripts/test-decomp.py",
     "test:implement": "python scripts/test-implement.py",
     "check-skills": "node scripts/check-skills.mjs",
