@@ -12,11 +12,16 @@
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-plugin-version.mjs",
     "check-plugin-version": "node scripts/sync-plugin-version.mjs --check",
+    "check": "npm run check-skills && npm run test:check-skills && npm run test:implement && npm run test:replies-line",
     "test:decomp": "python scripts/test-decomp.py",
     "test:implement": "python scripts/test-implement.py",
     "check-skills": "node scripts/check-skills.mjs",
     "test:check-skills": "node scripts/test-check-skills.mjs",
-    "test:replies-line": "node scripts/test-replies-line.mjs"
+    "test:replies-line": "node scripts/test-replies-line.mjs",
+    "test:eval-login": "node scripts/test-eval-login.mjs",
+    "test:eval-replies": "node scripts/test-eval-replies.mjs",
+    "test:eval-regrade": "node scripts/test-eval-regrade.mjs",
+    "test:eval-context": "node scripts/test-eval-context.mjs"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.7.0",

@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: reply-three-decisions
+description: A reply that needs three decisions from the user, outside any skill, in a workspace whose CLAUDE.md holds the Replies line. Each decision must be numbered with a recommendation that "yes" accepts.
+tags: [reply]
+runs: 3
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 15
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep]
