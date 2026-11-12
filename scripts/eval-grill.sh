@@ -28,8 +28,11 @@ set -euo pipefail
 #   scripts/eval-grill.sh smoke --case reply-status --runs 1
 #
 # Context proof: the reply-context-proof case passes only when the seeded
-# CLAUDE.md is loaded (about $0.13, no LLM judge). Add --no-scaffold to see it
-# fail:
+# CLAUDE.md is in the agent's context: file tools are withheld, and a run that
+# calls one fails (about $0.13, no LLM judge). The eval child does not load a
+# workspace CLAUDE.md itself, so the runner stages the cases
+# (scripts/stage-evals.mjs) and appends each seeded CLAUDE.md to the agent's
+# system prompt. Add --no-scaffold, which also skips that, to see it fail:
 #
 #   scripts/eval-grill.sh smoke --case reply-context-proof --no-scaffold
 #
@@ -66,9 +69,16 @@ mkdir -p "$OUT"
 # sub-agent finds nothing and only adds a late follow-up message the graders
 # would have to read around: keep Task/Agent out. The judge is sonnet because
 # haiku failed correct replies in trial runs.
+#
+# The eval child runs with --setting-sources user, so it never loads the
+# CLAUDE.md a scaffold seeds. Stage the cases into a git-ignored directory
+# where each such case passes that file's text as its appended system prompt.
 cd "$REPO"
+stage=()
+for a in "$@"; do [ "$a" = "--no-scaffold" ] && stage=(--no-scaffold); done
+node scripts/stage-evals.mjs evals evals-staged "${stage[@]}"
 status=0
-claude plugin eval . "${tags[@]}" \
+claude plugin eval . "${tags[@]}" --eval-dir evals-staged \
   --scaffold --allow-tools Edit Write --disallow-tools Task Agent \
   --judge-model sonnet \
   --keep-temp --trust-plugin --no-publish -j 3 \
