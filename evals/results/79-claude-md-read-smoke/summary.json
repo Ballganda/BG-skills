@@ -1,0 +1,62 @@
+{
+  "startedAt": "2026-11-12T17:34:29.368Z",
+  "claudeVersion": "2.1.322",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 0,
+  "casesPassed": "0/1",
+  "costUsd": 0.24197080000000004,
+  "cases": [
+    {
+      "name": "reply-status",
+      "score": 0,
+      "graders": {
+        "detail-one-fact-per-line": "0/1",
+        "outcome-first": "0/1"
+      },
+      "meanTokens": {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 6761,
+        "cache_read_input_tokens": 36594,
+        "output_tokens": 895,
+        "total": 44260
+      },
+      "outputTokens": [
+        895
+      ],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [
+        0
+      ],
+      "adrWrites": [
+        0
+      ],
+      "meanTurns": 5,
+      "meanCostUsd": 0.24197080000000004,
+      "runs": [
+        {
+          "score": 0,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.24197080000000004,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": false
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 6761,
+            "cache_read_input_tokens": 36594,
+            "output_tokens": 895,
+            "total": 44260
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    }
+  ]
+}
