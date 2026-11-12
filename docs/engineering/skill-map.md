@@ -22,6 +22,8 @@ The router names skills; it does not install them. Everything it points at has t
 
 The tracker-dependent routes (triage, `spec-gen`, `ticket-gen`, `implement`) assume [bg-setup](bg-setup.md) has already configured an issue tracker in the repo. The router recommends them even before that has happened.
 
+[bg-setup](bg-setup.md) also writes the `- Replies:` line that shapes every chat reply, so the router's own answer follows it. Re-run setup to add the line to a set-up that predates it.
+
 ## Flows, not skills
 
 The skill's leading word is **flow**, a path *through* the skills rather than a single skill. When you name your situation, the router places you at a step on a flow. That is a different answer from "here is the skill that matches your keywords". There are five kinds of route, and the skill itself describes them in full:
