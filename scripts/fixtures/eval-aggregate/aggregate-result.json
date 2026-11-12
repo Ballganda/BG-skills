@@ -1,0 +1,32 @@
+{
+  "startedAt": "2026-01-01T00:00:00.000Z",
+  "claudeVersion": "0.0.0",
+  "suite": { "plugins": [{ "name": "bg-skills", "version": "0.0.0" }] },
+  "aggregates": { "overallScore": 0.5, "casesPassed": 0, "casesTotal": 1 },
+  "costUsd": 1,
+  "cases": [
+    {
+      "name": "reply-fixture",
+      "aggregates": { "score": 1, "scoreWithout": 0 },
+      "arms": {
+        "with": [
+          {
+            "score": 1, "passed": true, "turns": 2, "costUsd": 0.5, "tracePath": "with-trace.jsonl",
+            "graders": [
+              { "name": "outcome-first", "passed": true, "judgeVotes": [true, true, false], "explanation": "judge votes: PASS PASS FAIL" },
+              { "name": "detail", "passed": false, "judgeVotes": [false, false, false] }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0, "passed": false, "turns": 2, "costUsd": 0.5, "tracePath": "without-trace.jsonl",
+            "graders": [
+              { "name": "outcome-first", "passed": false, "judgeVotes": [false, true, false] }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

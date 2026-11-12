@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.322",
+  "startedAt": "2026-11-12T18:10:37.597Z",
+  "durationSeconds": 9,
+  "costUsd": 0.129188,
+  "partial": false,
+  "suite": {
+    "root": "C:\\Users\\user\\Projects\\bg-skills.worktrees\\ticket-83-load-seeded-claude-md",
+    "ablation": "with-without",
+    "judgeModel": "sonnet",
+    "caseFilter": "reply-context-proof",
+    "tagFilters": [
+      "grill",
+      "reply"
+    ],
+    "threshold": 1,
+    "concurrency": 3,
+    "plugins": [
+      {
+        "name": "bg-skills",
+        "version": "1.3.2",
+        "path": "C:\\Users\\user\\Projects\\bg-skills.worktrees\\ticket-83-load-seeded-claude-md"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "reply-context-proof",
+      "dir": "evals\\reply-context-proof",
+      "source": "mixed",
+      "promptMarkdown": "What is the project codeword? Answer with the codeword only.",
+      "runsPerCase": 1,
+      "timeoutSeconds": 300,
+      "maxTurns": 5,
+      "graders": [
+        {
+          "name": "canary-answered",
+          "type": "regex",
+          "weight": 1,
+          "config": {
+            "target": "trace",
+            "pattern": "ULUZNOREH",
+            "flags": "",
+            "match": "contains"
+          }
+        },
+        {
+          "name": "seeded-file-not-read",
+          "type": "regex",
+          "weight": 1,
+          "config": {
+            "target": "trace",
+            "pattern": "\"type\":\"tool_use\",[^{}]*\"name\":\"(Read|Glob|Grep|Bash|PowerShell|Task|Agent)\"",
+            "flags": "",
+            "match": "not_contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 0.5,
+            "passed": false,
+            "turns": 1,
+            "costUsd": 0.067288,
+            "judgeCostUsd": 0,
+            "durationSeconds": 8,
+            "startedAt": "2026-11-12T18:10:37.718Z",
+            "error": null,
+            "tracePath": "C:\\Users\\user\\AppData\\Local\\Temp\\claude-eval-Cf2Sfr\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "canary-answered",
+                "passed": false,
+                "weight": 1,
+                "explanation": "pattern not found in trace",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "seeded-file-not-read",
+                "passed": true,
+                "weight": 1,
+                "explanation": "pattern absent as expected",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0.5,
+            "passed": false,
+            "turns": 1,
+            "costUsd": 0.061900000000000004,
+            "judgeCostUsd": 0,
+            "durationSeconds": 9,
+            "startedAt": "2026-11-12T18:10:37.718Z",
+            "error": null,
+            "tracePath": "C:\\Users\\user\\AppData\\Local\\Temp\\claude-eval-HlJhBQ\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "canary-answered",
+                "passed": false,
+                "weight": 1,
+                "explanation": "pattern not found in trace",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "seeded-file-not-read",
+                "passed": true,
+                "weight": 1,
+                "explanation": "pattern absent as expected",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0.5,
+        "passRate": 0,
+        "scoreWithout": 0.5,
+        "passRateWithout": 0,
+        "delta": 0
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 1,
+    "casesPassed": 0,
+    "overallScore": 0.5,
+    "overallPassRate": 0,
+    "meanDelta": 0
+  }
+}

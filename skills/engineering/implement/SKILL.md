@@ -20,7 +20,7 @@ Arguments: a spec reference, plus optionally a label or milestone and/or a count
 - Both: the next N ready Tickets carrying the label.
 - Neither: the next 1 ready Ticket.
 
-A Ticket is ready when every blocker is merged into the integration branch (`ready` below computes it). N is a fixed total with no refill: Tickets unblocked mid-run join only in a label-only batch. Never work a Ticket outside the batch. A batch Ticket whose unfinished blocker is outside the batch is skipped and listed in the final report. State the resolved batch (numbers and titles) before starting.
+A Ticket is ready when every blocker is merged into the integration branch (`ready` below computes it). N is a fixed total with no refill: Tickets unblocked mid-run join only in a label-only batch. Never work a Ticket outside the batch. A batch Ticket whose unfinished blocker is outside the batch is skipped and listed in the final reply. State the resolved batch (numbers and titles) before starting.
 
 ## Roles and models
 
@@ -41,7 +41,7 @@ On Claude Code, start the role's plugin agent (`bg-skills:<agent>`) and override
 - Tickets form a **task graph**; the **frontier** is the batch Tickets that are ready. The script's ledger tracks merges, since the tracker's blocked-by count lags until issues close.
 - At most 3 implementer subagents at once (the user may override per run), run in the background, each with a fresh context window, its own worktree, and its own branch.
 - Talk to subagents through **context pointers** (spec, Ticket, notes path, commits), never pasted content.
-- **Retry once, then report.** When an implementer reports failing tests or a blocker, start one fresh implementer for that Ticket on the next tier's model (Mechanical to Standard, Standard to Hard). If the retry fails too, stop work on the Ticket and list it in the final report. A Hard Ticket that fails is not retried.
+- **Retry once, then report.** When an implementer reports failing tests or a blocker, start one fresh implementer for that Ticket on the next tier's model (Mechanical to Standard, Standard to Hard). If the retry fails too, stop work on the Ticket and list it in the final reply. A Hard Ticket that fails is not retried.
 
 ## Report formats
 
@@ -51,7 +51,7 @@ Each subagent reports in one fixed line, nothing else:
 - Explorer: `notes: path`
 - Merger: `merged or conflict | files`
 
-The implementer's `lesson` field is optional, filled only when something cost it time. Each lesson's type is one of navigation, automated check, coding standard, tool economy, information access; location is a file, with a line where one applies. Collect the lesson lines for the final report.
+The implementer's `lesson` field is optional, filled only when something cost it time. Each lesson's type is one of navigation, automated check, coding standard, tool economy, information access; location is a file, with a line where one applies. Collect the lesson lines for the final reply.
 
 If the user asks what a report means, explain it in plain language.
 
@@ -88,7 +88,7 @@ Before the first command, run `python3 --version`. If Python 3 is missing, tell 
 6. Run `ready` again for newly ready batch Tickets, within the cap, and repeat from step 4 until it prints `ready: none` and no implementer is running.
 7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done).
 8. If at least one lesson line came back, call the Skill tool with `retro`, passing the lesson-line mode and the collected lesson lines. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
-9. Write the final report: integration branch, Tickets done, Tickets skipped or stopped and why, the lesson lines, and retro's suggestions when it ran.
+9. Write the final reply: integration branch, Tickets done, Tickets skipped or stopped and why, the lesson lines, and retro's suggestions when it ran.
 10. Run `clean`.
 
 ## Resuming

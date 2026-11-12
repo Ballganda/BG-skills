@@ -68,7 +68,7 @@ Show a draft of the `## Agent skills` block (for the file picked in step 4) and 
 
 Never create `AGENTS.md` when `CLAUDE.md` exists (or vice versa). If an `## Agent skills` block already exists, update it in place rather than appending a duplicate, and leave the surrounding sections alone.
 
-The block points; each `docs/agents/*.md` file owns its topic, so restate nothing they define:
+The block points; each `docs/agents/*.md` file owns its topic, so restate nothing they define. The one exception is the Replies line: it carries its rule inline, so it holds on every turn without a read:
 
 ```markdown
 ## Agent skills
@@ -77,11 +77,12 @@ The block points; each `docs/agents/*.md` file owns its topic, so restate nothin
 - Triage labels: see `docs/agents/triage-labels.md`.
 - Domain docs: see `docs/agents/domain.md`.
 - Models: see `docs/agents/models.md`.
+- Replies: to the user in chat. First line, when the message gave an instruction, decision or correction beyond a bare "yes": "Understood: <your interpretation>". Next line: the outcome, in one sentence. Then bullets, each a short clause holding exactly one fact; a reason, example or consequence gets its own bullet. Number them when the user answers per item. Each offer of further work is its own numbered item with a recommendation that "yes" accepts, as is each of two or more decisions. Use a table to compare items across attributes, a code block for code. Write prose when the user asks for an explanation. A subagent's Report follows its caller's format.
 ```
 
 For local markdown or "other", the tracker line names where issues live instead of host and repo. Include the triage line, and write `docs/agents/triage-labels.md`, only when Section B ran.
 
-Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`; add no marker comments. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace each heading and setup's own sentence under it (the one pointing at its `docs/agents/` file) with the list. Anything else under those headings, including words added after setup's sentence on the same line, is the user's. The block runs from `## Agent skills` to the next `#` or `##` heading, or the end of the file; every other non-blank line inside it is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped.
+Setup's lines are the ones starting `- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`, `- Replies:`; add no marker comments. On a re-run, add the `- Replies:` line when it is missing. When the existing one differs from the template, show both and ask before rewriting it. An older block with `### Issue tracker` / `### Triage labels` / `### Domain docs` headings is setup's too: replace each heading and setup's own sentence under it (the one pointing at its `docs/agents/` file) with the list. Anything else under those headings, including words added after setup's sentence on the same line, is the user's. The block runs from `## Agent skills` to the next `#` or `##` heading, or the end of the file; every other non-blank line inside it is the user's. Rewrite only setup's lines. Kept user lines go unchanged, in their original order, in their own paragraph below the list; lines the user declined are dropped.
 
 When Section B ran on GitHub or GitLab, create each configured label the tracker lacks (`gh label create` / `glab label create`).
 

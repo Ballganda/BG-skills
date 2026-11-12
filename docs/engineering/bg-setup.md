@@ -64,7 +64,11 @@ The direct answer after v1.1 was yes. The skill's own closing message is softer.
 
 **Will a re-run overwrite lines I added to the `## Agent skills` block?**
 
-No. Setup knows its own lines by their prefixes (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`) and rewrites only those. Any other line in the block is yours: the draft lists them and asks "Keep these N lines you added?" Say yes and they stay unchanged, in their own paragraph below the list; say no and they are removed. It asks again on every re-run. A block in the older format, with a `###` heading per topic, is converted to the list, and your lines in it get the same question.
+No. Setup knows its own lines by their prefixes (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`, `- Replies:`) and rewrites only those. Any other line in the block is yours: the draft lists them and asks "Keep these N lines you added?" Say yes and they stay unchanged, in their own paragraph below the list; say no and they are removed. It asks again on every re-run. A block in the older format, with a `###` heading per topic, is converted to the list, and your lines in it get the same question.
+
+**What is the `- Replies:` line?**
+
+A one-line rule, written word for word into the `## Agent skills` block, that shapes every reply the agent writes to you in chat: an "Understood: ..." line when you gave an instruction beyond a bare "yes", the outcome in one sentence, then bullets that each hold one fact (numbered when you answer per item). Each offer of further work is its own numbered item with a recommendation that "yes" accepts, and so is each decision when it asks two or more. Explanations stay prose, and a subagent's Report keeps its caller's format. Unlike the other lines it carries its rule instead of pointing at a file, so it holds on every turn. A repo set up earlier gets it by re-running `/bg-setup`, which adds the line when missing. If you edited it, setup shows the template next to your version and asks before rewriting.
 
 **It wrote to `CLAUDE.md`, but I'm on Codex.**
 
@@ -91,7 +95,7 @@ One long-standing complaint says yes, in these words: *"having a skill to set up
 ## It's working if
 
 - `docs/agents/issue-tracker.md`, `docs/agents/domain.md` and `docs/agents/models.md` exist, plus `triage-labels.md` if `triage` is installed.
-- An `## Agent skills` section appears in the instruction file your harness reads, as a list of up to four pointers (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`). Only the tracker line says more than "see" the file: it names the host and repo. The triage line appears only if `triage` is installed, and the block has no marker comments.
+- An `## Agent skills` section appears in the instruction file your harness reads, as a list of up to four pointers (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`, `- Models:`) plus the `- Replies:` rule. Only the tracker line and the Replies line say more than "see" the file: the tracker line names the host and repo, the Replies line holds the reply format. The triage line appears only if `triage` is installed, and the block has no marker comments.
 - The tracker it proposed matches the remote you use, and the label strings match labels that exist in your tracker.
 - Afterwards, `/ticket-gen` publishes without asking you where issues live, and `/triage` applies labels rather than inventing them.
 - Nothing in the skill files themselves changed. If setup edited a `SKILL.md`, something went wrong.

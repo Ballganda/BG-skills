@@ -29,7 +29,7 @@ The route most work travels. You have an idea and want it built. The creation fl
 
    When the work goes up as a pull request, **`/pr`** shapes the body: the smallest visual that shows the change, before/after evidence that it works, and a one-way or two-way door call. It's model-invoked, so the agent reaches for it whenever it writes a PR.
 
-4. **`/retro`** closes the loop. It suggests changes to the agent's **environment**, not the code: navigation pointers, automated checks, the coding standards `/code-review` enforces, steering files, tooling. Mechanical mistakes become deterministic checks; judgement calls become coding standards. It runs **automatically** from two callers: `/implement` calls it at the end of a run when implementers reported **lessons**, and works from those lesson lines alone (a clean run skips it); `/diagnosing-bugs` calls it in the same session once its fix lands. Run that way, it only lists suggestions in the final report and changes nothing until you pick one. Type `/retro` yourself to look back on any session. The next build then starts from a better environment.
+4. **`/retro`** closes the loop. It suggests changes to the agent's **environment**, not the code: navigation pointers, automated checks, the coding standards `/code-review` enforces, steering files, tooling. Mechanical mistakes become deterministic checks; judgement calls become coding standards. It runs **automatically** from two callers: `/implement` calls it at the end of a run when implementers reported **lessons**, and works from those lesson lines alone (a clean run skips it); `/diagnosing-bugs` calls it in the same session once its fix lands. Run that way, it only lists suggestions in the final reply and changes nothing until you pick one. Type `/retro` yourself to look back on any session. The next build then starts from a better environment.
 
 ### Context hygiene
 
@@ -99,4 +99,4 @@ Off the main flow entirely.
 
 ## Precondition
 
-**`/bg-setup`**: run before your first engineering flow to configure the issue tracker, triage labels, doc layout, and the model for each ticket tier and subagent task that the other skills assume. Custom issue trackers also work.
+**`/bg-setup`**: run before your first engineering flow to configure the issue tracker, triage labels, doc layout, and the model for each ticket tier and subagent task that the other skills assume, and writes a `- Replies:` line that shapes every chat reply (re-run to add it to an earlier set-up). Custom issue trackers also work.

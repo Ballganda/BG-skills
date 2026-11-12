@@ -1,14 +1,18 @@
 #!/usr/bin/env node
-// Summarises a `claude plugin eval` run of the /grill suite: per-grader
-// pass/fail plus token usage, round count, questions asked and doc writes
+// Summarises a `claude plugin eval` run of the grill and reply suites:
+// per-grader pass/fail plus token usage (output tokens per run and mean), round count, questions asked and doc writes
 // per case. `claude plugin eval` reports cost and turns but not tokens, so
 // tokens come from each run's trace.jsonl (kept with --keep-temp).
 //
 // Usage: node scripts/grill-eval-summary.mjs <aggregate-result.json> <out-dir>
-// Writes <out-dir>/summary.json and <out-dir>/summary.md.
+// Writes <out-dir>/summary.json, <out-dir>/summary.md and <out-dir>/replies.md
+// (every run's judged Reply, the final assistant message, beside each grader's
+// votes, for both arms). `claude plugin eval` has no option to keep the judge's
+// reasoning: a grader result holds only its pass/fail and the votes.
+// A relative tracePath resolves against the aggregate file's directory.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 
 const [aggPath, outDir] = process.argv.slice(2);
 if (!aggPath || !outDir) {
@@ -21,11 +25,51 @@ const TOKEN_KEYS = ["input_tokens", "cache_creation_input_tokens", "cache_read_i
 const QUESTION = /\*\*Q\d+\*\*/g;
 const DOC_PATH = /GLOSSARY\.md|docs[\\/]+adr[\\/]/;
 
+const tracePathOf = (r) => (r.tracePath ? resolve(dirname(aggPath), r.tracePath) : null);
+
 function textOf(message) {
   const c = message?.content;
   if (typeof c === "string") return c;
   if (Array.isArray(c)) return c.filter((b) => b.type === "text").map((b) => b.text).join("\n");
   return "";
+}
+
+// The Reply a run's graders judged: the last top-level assistant message
+// that has text.
+function finalReply(tracePath) {
+  if (!tracePath || !existsSync(tracePath)) return null;
+  let reply = null;
+  for (const line of readFileSync(tracePath, "utf8").split(/\r?\n/).filter(Boolean)) {
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type !== "assistant" || ev.parent_tool_use_id) continue;
+    const text = textOf(ev.message);
+    if (text.trim()) reply = text;
+  }
+  return reply;
+}
+
+const voteWord = (v) => (v ? "PASS" : "FAIL");
+
+function repliesMarkdown(agg) {
+  const out = [`# Kept Replies and grader votes`, ``];
+  for (const c of agg.cases) {
+    out.push(`## ${c.name}`, ``);
+    for (const [arm, runs] of Object.entries(c.arms ?? {})) {
+      runs.forEach((r, i) => {
+        out.push(`### ${arm}, run ${i + 1}`, ``, `Reply:`, ``);
+        const reply = finalReply(tracePathOf(r));
+        out.push(reply === null ? "(no trace, Reply not available)" : reply.split(/\r?\n/).map((l) => `> ${l}`).join("\n"));
+        out.push(``, `Votes:`, ``);
+        for (const g of r.graders ?? []) {
+          const votes = g.judgeVotes?.length ? g.judgeVotes.map(voteWord).join(" ") : voteWord(g.passed);
+          out.push(`- ${g.name}: ${votes} (${g.passed ? "passed" : "failed"})`);
+        }
+        out.push(``);
+      });
+    }
+  }
+  return out.join("\n");
 }
 
 // Reads one run's trace: total usage from the final `result` event, rounds
@@ -73,7 +117,7 @@ const cases = agg.cases.map((c) => {
     turns: r.turns,
     costUsd: r.costUsd,
     graders: Object.fromEntries((r.graders ?? []).map((g) => [g.name, g.passed])),
-    ...(traceStats(r.tracePath) ?? { tokens: null }),
+    ...(traceStats(tracePathOf(r)) ?? { tokens: null }),
   }));
   const graderNames = [...new Set(runs.flatMap((r) => Object.keys(r.graders)))];
   const withTokens = runs.filter((r) => r.tokens);
@@ -88,6 +132,7 @@ const cases = agg.cases.map((c) => {
       ...Object.fromEntries(TOKEN_KEYS.map((k) => [k, Math.round(mean(withTokens.map((r) => r.tokens[k])))])),
       total: Math.round(mean(withTokens.map((r) => r.tokens.total))),
     },
+    outputTokens: withTokens.map((r) => r.tokens.output_tokens),
     meanRounds: mean(withTokens.map((r) => r.rounds)),
     meanQuestions: mean(withTokens.map((r) => r.questions)),
     glossaryWrites: withTokens.map((r) => r.glossaryWrites),
@@ -107,23 +152,24 @@ const summary = {
   costUsd: agg.costUsd,
   cases,
 };
+writeFileSync(join(outDir, "replies.md"), repliesMarkdown(agg));
 writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
 
 const md = [
-  `# /grill eval summary`,
+  `# Eval summary (grill and reply cases)`,
   ``,
   `Run ${summary.startedAt}, Claude Code ${summary.claudeVersion}, plugin ${summary.plugin}. ` +
     `Score ${summary.overallScore}, cases passed ${summary.casesPassed}, cost $${summary.costUsd?.toFixed(2)}.`,
   ``,
   `Token and round figures are means over the with-plugin runs. Total tokens = input + cache write + cache read + output.`,
   ``,
-  `| Case | Score (without) | Graders passed | Total tokens | Input | Cache write | Cache read | Output | Rounds | Questions | Glossary writes | ADR writes |`,
-  `|---|---|---|---|---|---|---|---|---|---|---|---|`,
+  `| Case | Score (without) | Graders passed | Total tokens | Input | Cache write | Cache read | Output (mean) | Output per run | Rounds | Questions | Glossary writes | ADR writes |`,
+  `|---|---|---|---|---|---|---|---|---|---|---|---|---|`,
   ...cases.map((c) =>
     `| ${c.name} | ${c.score} (${c.scoreWithout ?? "n/a"}) | ` +
       Object.entries(c.graders).map(([n, v]) => `${n} ${v}`).join("<br>") +
       ` | ${c.meanTokens.total} | ${c.meanTokens.input_tokens} | ${c.meanTokens.cache_creation_input_tokens}` +
-      ` | ${c.meanTokens.cache_read_input_tokens} | ${c.meanTokens.output_tokens} | ${c.meanRounds.toFixed(1)}` +
+      ` | ${c.meanTokens.cache_read_input_tokens} | ${c.meanTokens.output_tokens} | ${c.outputTokens.join(", ")} | ${c.meanRounds.toFixed(1)}` +
       ` | ${c.meanQuestions.toFixed(1)} | ${c.glossaryWrites.join(", ")} | ${c.adrWrites.join(", ")} |`,
   ),
   ``,

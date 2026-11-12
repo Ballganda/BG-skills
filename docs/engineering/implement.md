@@ -68,13 +68,13 @@ Each ticket carries a **tier** from [ticket-gen](ticket-gen.md), and the tier pi
 | Standard (also any ticket with no tier, and chat work) | Sonnet | One retry on the Hard model, then reported |
 | Hard | The top model | Reported, not retried |
 
-A repo set up before the models doc existed runs on these defaults until you rerun setup. A ticket that still fails after its retry is stopped and listed in the final report, so a bad ticket never climbs every tier.
+A repo set up before the models doc existed runs on these defaults until you rerun setup. A ticket that still fails after its retry is stopped and listed in the final reply, so a bad ticket never climbs every tier.
 
 On Claude Code, each subagent runs as one of the plugin's **restricted agents** (implementer, explorer, merger, plus the reviewer [code-review](code-review.md) uses), each with only the tools its role needs, so it starts from a lower token floor. The orchestrator overrides the agent's model at dispatch. Other harnesses get the same roles and models through a general subagent.
 
 ## Lessons and the automatic retro
 
-An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). `implement` resolves the tickets. If at least one lesson came back, it calls [retro](retro.md) on those lines alone, without reading session logs. It then writes the final report, with retro's suggestions listed when it ran, and cleans up the implementer worktrees last. Retro changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
+An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). `implement` resolves the tickets. If at least one lesson came back, it calls [retro](retro.md) on those lines alone, without reading session logs. It then writes the final reply, with retro's suggestions listed when it ran, and cleans up the implementer worktrees last. Retro changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
 
 ## Common questions
 
@@ -84,7 +84,7 @@ That is by design: each role reports in a fixed line (the implementer's is `bran
 
 **Why did a ticket run on a bigger model than its tier?**
 
-Its first implementer reported failing tests or a blocker, so the orchestrator retried it once on the next tier's model. The final report lists any ticket that failed the retry too, and any Hard ticket that failed.
+Its first implementer reported failing tests or a blocker, so the orchestrator retried it once on the next tier's model. The final reply lists any ticket that failed the retry too, and any Hard ticket that failed.
 
 
 **Where did `implement-spec` go?**
@@ -101,7 +101,7 @@ Give it a smaller batch. With no argument it builds only the next ready ticket. 
 
 **Blocked tickets never start, even after their blocker has merged.**
 
-The tracker's blocked-by count only drops when a blocker *closes*, and tickets typically close at the end of the run. The orchestrator tracks merges into the integration branch itself and computes the frontier from that. If you still see it, check whether the blocker is outside the batch: those are skipped by design, and the final report lists them.
+The tracker's blocked-by count only drops when a blocker *closes*, and tickets typically close at the end of the run. The orchestrator tracks merges into the integration branch itself and computes the frontier from that. If you still see it, check whether the blocker is outside the batch: those are skipped by design, and the final reply lists them.
 
 **Two implementers collided on the same file, or picked different names for the same thing.**
 
