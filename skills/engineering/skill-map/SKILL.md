@@ -99,4 +99,4 @@ Off the main flow entirely.
 
 ## Precondition
 
-**`/bg-setup`**: run before your first engineering flow to configure the issue tracker, triage labels, doc layout, and the model for each ticket tier and subagent task that the other skills assume, and writes a `- Replies:` line that shapes every chat reply (re-run to add it to an earlier set-up). Custom issue trackers also work.
+**`/bg-setup`**: run before your first engineering flow to configure the issue tracker, triage labels, doc layout, and the model for each ticket tier and subagent task that the other skills assume. It also writes a `- Replies:` line that shapes every chat reply (re-run to add it to an earlier set-up). Custom issue trackers also work.
