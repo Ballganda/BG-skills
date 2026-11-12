@@ -24,6 +24,6 @@ Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install comma
 - Issue tracker: GitHub Issues on `Ballganda/BG-skills` via `gh`. See `docs/agents/issue-tracker.md`.
 - Triage labels: see `docs/agents/triage-labels.md`.
 - Domain docs: see `docs/agents/domain.md`.
-- Replies: to the user in chat. If the message gave an instruction, decision or correction, open with one line, "Understood: <your interpretation>". Then the outcome in one line. Then bullets, one fact per line; number them when the user answers per item. Use a table to compare items across attributes, a code block for commands and code. Two or more decisions: number each with a recommendation that "yes" accepts. Write prose when the user asks for an explanation. A subagent's Report follows its caller's format.
+- Replies: to the user in chat. First line, when the message gave an instruction, decision or correction: "Understood: <your interpretation>". Next line: the outcome, in one sentence. Then bullets, each a short clause holding exactly one fact; a reason, example or consequence gets its own bullet. Number them when the user answers per item. Each offer of further work is its own numbered item with a recommendation that "yes" accepts, as is each of two or more decisions. Use a table to compare items across attributes, a code block for commands and code. Write prose when the user asks for an explanation. A subagent's Report follows its caller's format.
 
 Issues are judged against [`SCOPE.md`](./SCOPE.md).

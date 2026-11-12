@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,15 +37,14 @@ test("the CLI prints exactly the line bg-setup holds", () => {
   assert.ok(!out.stdout.includes("\n"));
 });
 
-test("REPLIES_TEMPLATE makes the seed take the line from another file", () => {
+test("the seed writes bg-setup's line into CLAUDE.md", () => {
   const dir = mkdtempSync(join(tmpdir(), "seed-"));
   try {
-    const tpl = join(dir, "candidate.md");
-    writeFileSync(tpl, "```markdown\n- Replies: a candidate line.\n```\n");
     const seed = fileURLToPath(new URL("./seed-agent-skills.sh", import.meta.url)).replace(/\\/g, "/");
-    const r = spawnSync("bash", [seed, "with-line"], { cwd: dir, encoding: "utf8", env: { ...process.env, REPLIES_TEMPLATE: tpl } });
+    const r = spawnSync("bash", [seed, "with-line"], { cwd: dir, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(readFileSync(join(dir, "CLAUDE.md"), "utf8"), /^- Replies: a candidate line\.$/m);
+    const line = extractRepliesLine(readFileSync(BG_SETUP, "utf8"));
+    assert.ok(readFileSync(join(dir, "CLAUDE.md"), "utf8").split("\n").includes(line));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

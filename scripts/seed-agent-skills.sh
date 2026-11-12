@@ -9,11 +9,7 @@ set -euo pipefail
 #   seed-agent-skills.sh without-line   # same block, no Replies line
 #   seed-agent-skills.sh with-line canary   # plus a canary line (context proof)
 #
-# The Replies line is taken from bg-setup's SKILL.md, never copied here. To
-# measure a candidate wording, set REPLIES_TEMPLATE to a file holding it in a
-# fenced block (the stager runs this script with the runner's environment):
-#
-#   REPLIES_TEMPLATE=evals/results/<label>/candidate.md scripts/eval-grill.sh <label> ...
+# The Replies line is taken from bg-setup's SKILL.md, never copied here.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
@@ -22,7 +18,7 @@ MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
 # not see a failing command substitution inside printf's arguments).
 line=""
 if [ "$MODE" = with-line ]; then
-  line="$(node "$HERE/replies-line.mjs" ${REPLIES_TEMPLATE:+"$REPLIES_TEMPLATE"})"
+  line="$(node "$HERE/replies-line.mjs")"
 fi
 
 {
