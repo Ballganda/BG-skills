@@ -9,10 +9,21 @@ set -euo pipefail
 #   seed-agent-skills.sh without-line   # same block, no Replies line
 #   seed-agent-skills.sh with-line canary   # plus a canary line (context proof)
 #
-# The Replies line is taken from bg-setup's SKILL.md, never copied here.
+# The Replies line is taken from bg-setup's SKILL.md, never copied here. To
+# measure a candidate wording, set REPLIES_TEMPLATE to a file holding it in a
+# fenced block (the stager runs this script with the runner's environment):
+#
+#   REPLIES_TEMPLATE=evals/results/<label>/candidate.md scripts/eval-grill.sh <label> ...
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
+
+# Taken before the block, so a failed extraction stops the seed (set -e does
+# not see a failing command substitution inside printf's arguments).
+line=""
+if [ "$MODE" = with-line ]; then
+  line="$(node "$HERE/replies-line.mjs" ${REPLIES_TEMPLATE:+"$REPLIES_TEMPLATE"})"
+fi
 
 {
   printf '# Project\n\n## Agent skills\n\n'
@@ -21,7 +32,7 @@ MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
   printf '%s\n' '- Domain docs: see `docs/agents/domain.md`.'
   printf '%s\n' '- Models: see `docs/agents/models.md`.'
   case "$MODE" in
-    with-line) printf '%s\n' "$(node "$HERE/replies-line.mjs")" ;;
+    with-line) printf '%s\n' "$line" ;;
     without-line) ;;
     *) echo "unknown mode: $MODE" >&2; exit 2 ;;
   esac

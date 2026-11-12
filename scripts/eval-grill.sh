@@ -76,6 +76,12 @@ mkdir -p "$OUT"
 cd "$REPO"
 stage=()
 for a in "$@"; do [ "$a" = "--no-scaffold" ] && stage=(--no-scaffold); done
+# Scaffolds run in a scratch directory, so a candidate template given by a
+# relative path (see scripts/seed-agent-skills.sh) is made absolute here.
+if [ -n "${REPLIES_TEMPLATE:-}" ]; then
+  REPLIES_TEMPLATE="$(cd "$(dirname "$REPLIES_TEMPLATE")" && pwd)/$(basename "$REPLIES_TEMPLATE")"
+  export REPLIES_TEMPLATE
+fi
 node scripts/stage-evals.mjs evals evals-staged "${stage[@]}"
 status=0
 claude plugin eval . "${tags[@]}" --eval-dir evals-staged \
