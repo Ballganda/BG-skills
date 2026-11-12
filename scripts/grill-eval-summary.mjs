@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Summarises a `claude plugin eval` run of the /grill suite: per-grader
-// pass/fail plus token usage, round count, questions asked and doc writes
+// Summarises a `claude plugin eval` run of the grill and reply suites:
+// per-grader pass/fail plus token usage (output tokens per run and mean), round count, questions asked and doc writes
 // per case. `claude plugin eval` reports cost and turns but not tokens, so
 // tokens come from each run's trace.jsonl (kept with --keep-temp).
 //
@@ -88,6 +88,7 @@ const cases = agg.cases.map((c) => {
       ...Object.fromEntries(TOKEN_KEYS.map((k) => [k, Math.round(mean(withTokens.map((r) => r.tokens[k])))])),
       total: Math.round(mean(withTokens.map((r) => r.tokens.total))),
     },
+    outputTokens: withTokens.map((r) => r.tokens.output_tokens),
     meanRounds: mean(withTokens.map((r) => r.rounds)),
     meanQuestions: mean(withTokens.map((r) => r.questions)),
     glossaryWrites: withTokens.map((r) => r.glossaryWrites),
@@ -110,20 +111,20 @@ const summary = {
 writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
 
 const md = [
-  `# /grill eval summary`,
+  `# Eval summary (grill and reply cases)`,
   ``,
   `Run ${summary.startedAt}, Claude Code ${summary.claudeVersion}, plugin ${summary.plugin}. ` +
     `Score ${summary.overallScore}, cases passed ${summary.casesPassed}, cost $${summary.costUsd?.toFixed(2)}.`,
   ``,
   `Token and round figures are means over the with-plugin runs. Total tokens = input + cache write + cache read + output.`,
   ``,
-  `| Case | Score (without) | Graders passed | Total tokens | Input | Cache write | Cache read | Output | Rounds | Questions | Glossary writes | ADR writes |`,
-  `|---|---|---|---|---|---|---|---|---|---|---|---|`,
+  `| Case | Score (without) | Graders passed | Total tokens | Input | Cache write | Cache read | Output (mean) | Output per run | Rounds | Questions | Glossary writes | ADR writes |`,
+  `|---|---|---|---|---|---|---|---|---|---|---|---|---|`,
   ...cases.map((c) =>
     `| ${c.name} | ${c.score} (${c.scoreWithout ?? "n/a"}) | ` +
       Object.entries(c.graders).map(([n, v]) => `${n} ${v}`).join("<br>") +
       ` | ${c.meanTokens.total} | ${c.meanTokens.input_tokens} | ${c.meanTokens.cache_creation_input_tokens}` +
-      ` | ${c.meanTokens.cache_read_input_tokens} | ${c.meanTokens.output_tokens} | ${c.meanRounds.toFixed(1)}` +
+      ` | ${c.meanTokens.cache_read_input_tokens} | ${c.meanTokens.output_tokens} | ${c.outputTokens.join(", ")} | ${c.meanRounds.toFixed(1)}` +
       ` | ${c.meanQuestions.toFixed(1)} | ${c.glossaryWrites.join(", ")} | ${c.adrWrites.join(", ")} |`,
   ),
   ``,
