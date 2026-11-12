@@ -14,6 +14,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
 
+# Taken before the block, so a failed extraction stops the seed (set -e does
+# not see a failing command substitution inside printf's arguments).
+line=""
+if [ "$MODE" = with-line ]; then
+  line="$(node "$HERE/replies-line.mjs")"
+fi
+
 {
   printf '# Project\n\n## Agent skills\n\n'
   printf '%s\n' '- Issue tracker: GitHub Issues on `acme/shop` via `gh`. See `docs/agents/issue-tracker.md`.'
@@ -21,7 +28,7 @@ MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
   printf '%s\n' '- Domain docs: see `docs/agents/domain.md`.'
   printf '%s\n' '- Models: see `docs/agents/models.md`.'
   case "$MODE" in
-    with-line) printf '%s\n' "$(node "$HERE/replies-line.mjs")" ;;
+    with-line) printf '%s\n' "$line" ;;
     without-line) ;;
     *) echo "unknown mode: $MODE" >&2; exit 2 ;;
   esac

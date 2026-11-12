@@ -1,0 +1,44 @@
+{
+  "startedAt": "2026-11-12T17:39:15.365Z",
+  "claudeVersion": "2.1.322",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 0,
+  "casesPassed": "0/1",
+  "costUsd": 0.0672604,
+  "cases": [
+    {
+      "name": "reply-context-proof",
+      "score": 0,
+      "graders": {
+        "canary-answered": "0/1"
+      },
+      "meanTokens": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "total": 0
+      },
+      "outputTokens": [],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [],
+      "adrWrites": [],
+      "meanTurns": 2,
+      "meanCostUsd": 0.0672604,
+      "runs": [
+        {
+          "score": 0,
+          "passed": false,
+          "error": null,
+          "turns": 2,
+          "costUsd": 0.0672604,
+          "graders": {
+            "canary-answered": false
+          },
+          "tokens": null
+        }
+      ]
+    }
+  ]
+}

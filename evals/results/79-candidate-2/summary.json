@@ -1,0 +1,162 @@
+{
+  "startedAt": "2026-11-12T19:03:04.746Z",
+  "claudeVersion": "2.1.322",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 0.5,
+  "casesPassed": "0/1",
+  "costUsd": 2.1683171999999997,
+  "cases": [
+    {
+      "name": "reply-status",
+      "score": 0.5,
+      "graders": {
+        "detail-one-fact-per-line": "0/5",
+        "outcome-first": "5/5"
+      },
+      "meanTokens": {
+        "input_tokens": 9,
+        "cache_creation_input_tokens": 6674,
+        "cache_read_input_tokens": 43829,
+        "output_tokens": 958,
+        "total": 51470
+      },
+      "outputTokens": [
+        833,
+        864,
+        1004,
+        1025,
+        1062
+      ],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "adrWrites": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "meanTurns": 4.6,
+      "meanCostUsd": 0.43366343999999996,
+      "runs": [
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.5431476000000001,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6454,
+            "cache_read_input_tokens": 37118,
+            "output_tokens": 833,
+            "total": 44413
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.44411199999999995,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6455,
+            "cache_read_input_tokens": 37120,
+            "output_tokens": 864,
+            "total": 44447
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.42804359999999997,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 6811,
+            "cache_read_input_tokens": 48308,
+            "output_tokens": 1004,
+            "total": 56133
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.4170583999999999,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 6838,
+            "cache_read_input_tokens": 48292,
+            "output_tokens": 1025,
+            "total": 56165
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.3359556,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 6811,
+            "cache_read_input_tokens": 48308,
+            "output_tokens": 1062,
+            "total": 56191
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    }
+  ]
+}

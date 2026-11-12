@@ -1,0 +1,162 @@
+{
+  "startedAt": "2026-11-12T19:01:56.298Z",
+  "claudeVersion": "2.1.322",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 0.5,
+  "casesPassed": "0/1",
+  "costUsd": 1.9760309999999999,
+  "cases": [
+    {
+      "name": "reply-status",
+      "score": 0.5,
+      "graders": {
+        "detail-one-fact-per-line": "0/5",
+        "outcome-first": "5/5"
+      },
+      "meanTokens": {
+        "input_tokens": 8,
+        "cache_creation_input_tokens": 6428,
+        "cache_read_input_tokens": 37039,
+        "output_tokens": 806,
+        "total": 44281
+      },
+      "outputTokens": [
+        881,
+        755,
+        792,
+        752,
+        849
+      ],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "adrWrites": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "meanTurns": 4,
+      "meanCostUsd": 0.39520619999999995,
+      "runs": [
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.41796380000000005,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6425,
+            "cache_read_input_tokens": 37039,
+            "output_tokens": 881,
+            "total": 44353
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.4147618,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6425,
+            "cache_read_input_tokens": 37039,
+            "output_tokens": 755,
+            "total": 44227
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.5129098000000001,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6425,
+            "cache_read_input_tokens": 37039,
+            "output_tokens": 792,
+            "total": 44264
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.2900417999999999,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6441,
+            "cache_read_input_tokens": 37039,
+            "output_tokens": 752,
+            "total": 44240
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.34035380000000004,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6425,
+            "cache_read_input_tokens": 37039,
+            "output_tokens": 849,
+            "total": 44321
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    }
+  ]
+}

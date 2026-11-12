@@ -68,7 +68,7 @@ No. Setup knows its own lines by their prefixes (`- Issue tracker:`, `- Triage l
 
 **What is the `- Replies:` line?**
 
-A one-line rule, written word for word into the `## Agent skills` block, that shapes every reply the agent writes to you in chat: an "Understood: ..." line when you gave an instruction, the outcome in one line, then bullets (numbered when you answer per item), and a numbered recommendation per decision when it asks two or more. Explanations stay prose, and a subagent's Report keeps its caller's format. Unlike the other lines it carries its rule instead of pointing at a file, so it holds on every turn. A repo set up earlier gets it by re-running `/bg-setup`, which adds the line when missing. If you edited it, setup shows the template next to your version and asks before rewriting.
+A one-line rule, written word for word into the `## Agent skills` block, that shapes every reply the agent writes to you in chat: an "Understood: ..." line when you gave an instruction, the outcome in one sentence, then bullets that each hold one fact (numbered when you answer per item). Each offer of further work is its own numbered item with a recommendation that "yes" accepts, and so is each decision when it asks two or more. Explanations stay prose, and a subagent's Report keeps its caller's format. Unlike the other lines it carries its rule instead of pointing at a file, so it holds on every turn. A repo set up earlier gets it by re-running `/bg-setup`, which adds the line when missing. If you edited it, setup shows the template next to your version and asks before rewriting.
 
 **It wrote to `CLAUDE.md`, but I'm on Codex.**
 
