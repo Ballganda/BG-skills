@@ -27,6 +27,12 @@ set -euo pipefail
 #
 #   scripts/eval-grill.sh smoke --case reply-status --runs 1
 #
+# Context proof: the reply-context-proof case passes only when the seeded
+# CLAUDE.md is loaded (about $0.13, no LLM judge). Add --no-scaffold to see it
+# fail:
+#
+#   scripts/eval-grill.sh smoke --case reply-context-proof --no-scaffold
+#
 # The runner needs a logged-in claude. When `claude auth status` reports
 # not logged in, it prints one line naming `claude auth login`, exits
 # non-zero, and writes no results.
