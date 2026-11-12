@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: grill-small-feature
+description: A small feature put through /grill. The first round must ask the whole frontier, numbered, with a recommendation on each question. The workspace's CLAUDE.md holds the Agent skills block with the Replies line.
+tags: [grill]
+runs: 3
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 20
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep, Skill]
