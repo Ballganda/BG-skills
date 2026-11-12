@@ -17,6 +17,9 @@ Reachable only when you type them (Claude Code: `disable-model-invocation: true`
 - **[ticket-gen](./ticket-gen/SKILL.md)**
 - **[implement](./implement/SKILL.md)**
 - **[wayfinder](./wayfinder/SKILL.md)**
+- **[decomp-setup](./decomp-setup/SKILL.md)**
+- **[decomp-start](./decomp-start/SKILL.md)**
+- **[decomp-run](./decomp-run/SKILL.md)**
 
 ## Model-invoked
 
@@ -32,3 +35,9 @@ Model- or user-reachable (rich trigger phrasing so the model can reach for them)
 - **[pr](./pr/SKILL.md)**
 - **[wizard](./wizard/SKILL.md)**
 - **[retro](./retro/SKILL.md)**
+- **[decomp-identify](./decomp-identify/SKILL.md)**
+- **[decomp-spec-gen](./decomp-spec-gen/SKILL.md)**
+- **[decomp-ticket-gen](./decomp-ticket-gen/SKILL.md)**
+- **[decomp-match](./decomp-match/SKILL.md)**
+- **[decomp-reference](./decomp-reference/SKILL.md)**
+- **[decomp-standards](./decomp-standards/SKILL.md)**

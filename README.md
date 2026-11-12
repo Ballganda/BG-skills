@@ -219,6 +219,9 @@ Skills for daily code work.
 - **[ticket-gen](./skills/engineering/ticket-gen/SKILL.md)**: Break any plan, spec, or conversation into a set of tracer-bullet tickets, each declaring its blocking edges, written as text in a local file, or as native blocking links on a real tracker.
 - **[implement](./skills/engineering/implement/SKILL.md)**: Orchestrate fresh-context implementer subagents to build one [Ticket batch](./docs/engineering/implement.md#the-ticket-batch) on one integration branch, each driving `/tdd` at pre-agreed seams. Work described in chat goes to a single implementer. Review stays its own step (`/code-review`).
 - **[wayfinder](./skills/engineering/wayfinder/SKILL.md)**: Plan a huge chunk of work, more than one agent session can hold, as a shared map of decision tickets on the issue tracker, and resolve them one at a time until the way to the destination is clear.
+- **[decomp-setup](./skills/engineering/decomp-setup/SKILL.md)**: Agree a byte-for-byte decompilation contract and set up the private project that enforces it: compiler identification, toolchain provisioning, guardrail tooling, and a pipeline check. Run on an existing project, it upgrades the project to the current skills. No decomp.
+- **[decomp-start](./skills/engineering/decomp-start/SKILL.md)**: Read a set-up target, list every function, and turn them into unit specs and function tickets, mostly by script.
+- **[decomp-run](./skills/engineering/decomp-run/SKILL.md)**: Work decomp tickets to verified byte matches with separate writer, auditor, and repair subagents, recording each proven lesson.
 
 **Model-invoked**
 
@@ -232,6 +235,12 @@ Skills for daily code work.
 - **[pr](./skills/engineering/pr/SKILL.md)**: The shape a pull request body should take: a summary as the smallest visual that makes the change clear, before/after evidence that it works, and a merge-danger call (one-way or two-way door, plus blast radius).
 - **[wizard](./skills/engineering/wizard/SKILL.md)**: Generate an interactive bash wizard that walks a human through steps only they can perform: provisioning infrastructure, setting up credentials or CI secrets, walking an unfamiliar third-party dashboard, or running a one-off migration or cutover.
 - **[retro](./skills/engineering/retro/SKILL.md)**: Suggest improvements to the coding agent's environment (navigation, automated checks, coding standards, steering files, tooling), most severe first. `/implement` runs it on its implementers' lessons and `/diagnosing-bugs` after a fix; either way it only suggests.
+- **[decomp-identify](./skills/engineering/decomp-identify/SKILL.md)**: Find a binary's format, architecture, compiler, and flags from evidence in the file, and list the toolchain it needs.
+- **[decomp-spec-gen](./skills/engineering/decomp-spec-gen/SKILL.md)**: Group a decomp inventory into units and write one spec per unit.
+- **[decomp-ticket-gen](./skills/engineering/decomp-ticket-gen/SKILL.md)**: Write one ticket per in-scope decomp function, mirrored to GitHub when enabled.
+- **[decomp-match](./skills/engineering/decomp-match/SKILL.md)**: Reconstruct one decomp function until the original compiler emits its bytes exactly.
+- **[decomp-reference](./skills/engineering/decomp-reference/SKILL.md)**: Repair shared decomp declarations from evidence without breaking any existing match.
+- **[decomp-standards](./skills/engineering/decomp-standards/SKILL.md)**: Shared decomp rules: acceptance criterion, guardrails, size tiers, mismatch categories, project layout.
 
 ### Productivity
 

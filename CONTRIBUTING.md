@@ -28,4 +28,4 @@ Agents are welcome to help, but you post the issue, so you own it:
 
 Run `npm run check` before a change is ready. It checks the skills and runs the skill-check, implement and Replies-line tests, and finishes in well under two minutes.
 
-Also run `python scripts/test-decomp.py` when a change touches the decomp skills (`skills/in-progress/decomp-*`) or `scripts/test-decomp.py`. Those tests are not in `npm run check`, so this is the one place the rule is stated.
+Also run `python scripts/test-decomp.py` when a change touches the decomp skills (`skills/engineering/decomp-*`) or `scripts/test-decomp.py`. Those tests are not in `npm run check`, so this is the one place the rule is stated.

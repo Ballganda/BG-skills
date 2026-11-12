@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-TOOL = REPO / "skills" / "in-progress" / "decomp-setup" / "scripts" / "decomp.py"
+TOOL = REPO / "skills" / "engineering" / "decomp-setup" / "scripts" / "decomp.py"
 PY = f'"{sys.executable}"'
 UNIT, TID, ADDRESS = "u0001", "u0001-00401000", "0x00401000"
 SOURCE = "src/u0001.c"
