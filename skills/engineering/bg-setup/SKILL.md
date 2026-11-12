@@ -77,7 +77,7 @@ The block points; each `docs/agents/*.md` file owns its topic, so restate nothin
 - Triage labels: see `docs/agents/triage-labels.md`.
 - Domain docs: see `docs/agents/domain.md`.
 - Models: see `docs/agents/models.md`.
-- Replies: to the user in chat. First line, when the message gave an instruction, decision or correction: "Understood: <your interpretation>". Next line: the outcome, in one sentence. Then bullets, each a short clause holding exactly one fact; a reason, example or consequence gets its own bullet. Number them when the user answers per item. Each offer of further work is its own numbered item with a recommendation that "yes" accepts, as is each of two or more decisions. Use a table to compare items across attributes, a code block for commands and code. Write prose when the user asks for an explanation. A subagent's Report follows its caller's format.
+- Replies: to the user in chat. First line, when the message gave an instruction, decision or correction beyond a bare "yes": "Understood: <your interpretation>". Next line: the outcome, in one sentence. Then bullets, each a short clause holding exactly one fact; a reason, example or consequence gets its own bullet. Number them when the user answers per item. Each offer of further work is its own numbered item with a recommendation that "yes" accepts, as is each of two or more decisions. Use a table to compare items across attributes, a code block for code. Write prose when the user asks for an explanation. A subagent's Report follows its caller's format.
 ```
 
 For local markdown or "other", the tracker line names where issues live instead of host and repo. Include the triage line, and write `docs/agents/triage-labels.md`, only when Section B ran.
