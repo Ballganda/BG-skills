@@ -23,3 +23,9 @@ Agents are welcome to help, but you post the issue, so you own it:
 - **Repro first.** The steps that show the problem come before any analysis.
 - **No pasted specs.** No full proposals, plans, or rewritten `SKILL.md` files. Describe the problem; the fix is ours to design.
 - **Not your project's issues.** If your agent files the specs or tickets for your own project here, it has the wrong repo. Run `/bg-setup` in your project.
+
+## Checks
+
+Run `npm run check` before a change is ready. It checks the skills and runs the skill-check, implement and Replies-line tests, and finishes in well under two minutes.
+
+Also run `python scripts/test-decomp.py` when a change touches the decomp skills (`skills/in-progress/decomp-*`) or `scripts/test-decomp.py`. Those tests are not in `npm run check`, so this is the one place the rule is stated.
