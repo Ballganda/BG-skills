@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.322",
+  "startedAt": "2026-11-12T18:13:08.288Z",
+  "durationSeconds": 5,
+  "costUsd": 0.129648,
+  "partial": false,
+  "suite": {
+    "root": "C:\\Users\\user\\Projects\\bg-skills.worktrees\\ticket-83-load-seeded-claude-md",
+    "ablation": "with-without",
+    "judgeModel": "sonnet",
+    "caseFilter": "reply-context-proof",
+    "tagFilters": [
+      "grill",
+      "reply"
+    ],
+    "threshold": 1,
+    "concurrency": 3,
+    "plugins": [
+      {
+        "name": "bg-skills",
+        "version": "1.3.2",
+        "path": "C:\\Users\\user\\Projects\\bg-skills.worktrees\\ticket-83-load-seeded-claude-md"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "reply-context-proof",
+      "dir": "evals-staged\\reply-context-proof",
+      "source": "mixed",
+      "promptMarkdown": "What is the project codeword? Answer with the codeword only.",
+      "runsPerCase": 1,
+      "timeoutSeconds": 300,
+      "maxTurns": 5,
+      "graders": [
+        {
+          "name": "canary-answered",
+          "type": "regex",
+          "weight": 1,
+          "config": {
+            "target": "trace",
+            "pattern": "ULUZNOREH",
+            "flags": "",
+            "match": "contains"
+          }
+        },
+        {
+          "name": "seeded-file-not-read",
+          "type": "regex",
+          "weight": 1,
+          "config": {
+            "target": "trace",
+            "pattern": "\"type\":\"tool_use\",[^{}]*\"name\":\"(Read|Glob|Grep|Bash|PowerShell|Task|Agent)\"",
+            "flags": "",
+            "match": "not_contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 1,
+            "costUsd": 0.067168,
+            "judgeCostUsd": 0,
+            "durationSeconds": 4,
+            "startedAt": "2026-11-12T18:13:08.377Z",
+            "error": null,
+            "tracePath": "C:\\Users\\user\\AppData\\Local\\Temp\\claude-eval-Vf3JPz\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "canary-answered",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched ULUZNOREH",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "seeded-file-not-read",
+                "passed": true,
+                "weight": 1,
+                "explanation": "pattern absent as expected",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 1,
+            "costUsd": 0.06248,
+            "judgeCostUsd": 0,
+            "durationSeconds": 5,
+            "startedAt": "2026-11-12T18:13:08.377Z",
+            "error": null,
+            "tracePath": "C:\\Users\\user\\AppData\\Local\\Temp\\claude-eval-xkDZSu\\out\\trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "canary-answered",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched ULUZNOREH",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "seeded-file-not-read",
+                "passed": true,
+                "weight": 1,
+                "explanation": "pattern absent as expected",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 1,
+    "casesPassed": 1,
+    "overallScore": 1,
+    "overallPassRate": 1,
+    "meanDelta": 0
+  }
+}
