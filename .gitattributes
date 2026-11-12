@@ -1,0 +1,17 @@
+# Text files are stored and checked out with LF line endings on every OS,
+# regardless of core.autocrlf.
+* text=auto eol=lf
+
+# Files that must stay LF, named explicitly.
+*.sh eol=lf
+*.py eol=lf
+*.mjs eol=lf
+*.cjs eol=lf
+*.md eol=lf
+*.json eol=lf
+*.jsonl eol=lf
+*.yml eol=lf
+*.yaml eol=lf
+
+# Binary assets.
+*.png binary
