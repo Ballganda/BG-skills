@@ -14,6 +14,7 @@ const failures = [];
 const ctx = {
   read: (rel) => readFileSync(join(root, "skills", rel), "utf8"),
   fail: (message) => failures.push(message),
+  skills: readSkills(), // read once per run, shared by every check that needs the skill tree
 };
 
 // Each creation-flow skill ends its closing message with one boundary line.
@@ -105,43 +106,66 @@ function checkReviewSmellPointer({ read, fail }) {
   }
 }
 
-// Descriptions are loaded into every session: keep them short.
-const descriptionLimits = { user: 20, model: 40 };
-
-function checkDescriptionLengths({ fail }) {
+// Every skill directory with a SKILL.md, with its frontmatter and invocation in
+// both harnesses: Claude (`disable-model-invocation`) and Codex
+// (`allow_implicit_invocation: false` in agents/openai.yaml).
+function readSkills() {
   const skillsDir = join(root, "skills");
+  const skills = [];
   for (const bucket of readdirSync(skillsDir, { withFileTypes: true })) {
     if (!bucket.isDirectory()) continue;
     for (const skill of readdirSync(join(skillsDir, bucket.name), { withFileTypes: true })) {
       if (!skill.isDirectory()) continue;
-      const rel = `${bucket.name}/${skill.name}/SKILL.md`;
+      const dir = `${bucket.name}/${skill.name}`;
       let text;
       try {
-        text = readFileSync(join(skillsDir, rel), "utf8");
+        text = readFileSync(join(skillsDir, dir, "SKILL.md"), "utf8");
       } catch {
         continue;
       }
       const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
-      const raw = front.match(/^description:[ \t]*(.*)$/m)?.[1] ?? "";
-      const description = raw.trim().replace(/^"(.*)"$/, "$1");
-      const kind = /^disable-model-invocation:\s*true\s*$/m.test(front) ? "user" : "model";
-      const count = description.split(/\s+/).filter(Boolean).length;
-      if (count > descriptionLimits[kind]) {
-        fail(`${rel}: description is ${count} words, over the ${kind}-invoked limit of ${descriptionLimits[kind]}`);
-      }
+      const claudeUser = /^disable-model-invocation:\s*true\s*$/m.test(front);
+      let codexUser = claudeUser; // no Codex metadata: nothing to disagree with
+      let hasCodex = false;
+      try {
+        const codex = readFileSync(join(skillsDir, dir, "agents", "openai.yaml"), "utf8");
+        codexUser = /^\s*allow_implicit_invocation:\s*false\s*$/m.test(codex);
+        hasCodex = true;
+      } catch {}
+      skills.push({ dir, name: skill.name, front, claudeUser, codexUser, hasCodex });
+    }
+  }
+  return skills;
+}
+
+// Descriptions are loaded into every session: keep them short.
+const descriptionLimits = { user: 20, model: 40 };
+
+function checkDescriptionLengths({ fail, skills }) {
+  for (const { dir, front, claudeUser } of skills) {
+    const raw = front.match(/^description:[ \t]*(.*)$/m)?.[1] ?? "";
+    const description = raw.trim().replace(/^"(.*)"$/, "$1");
+    const kind = claudeUser ? "user" : "model";
+    const count = description.split(/\s+/).filter(Boolean).length;
+    if (count > descriptionLimits[kind]) {
+      fail(`${dir}/SKILL.md: description is ${count} words, over the ${kind}-invoked limit of ${descriptionLimits[kind]}`);
     }
   }
 }
 
-// implement and diagnosing-bugs call retro, so it is model-invoked in both harnesses.
-function checkRetroInvocation({ read, fail }) {
-  const front = read("engineering/retro/SKILL.md").match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
-  const claudeUser = /^disable-model-invocation:\s*true\s*$/m.test(front);
-  const codexUser = /^\s*allow_implicit_invocation:\s*false\s*$/m.test(read("engineering/retro/agents/openai.yaml"));
-  if (claudeUser !== codexUser)
-    fail("engineering/retro: frontmatter and Codex metadata disagree on invocation");
-  if (claudeUser) fail("engineering/retro/SKILL.md: retro must be model-invoked");
-  if (codexUser) fail("engineering/retro/agents/openai.yaml: retro must be model-invoked");
+// Every skill carries Codex metadata. Each is user-invoked in both harnesses or neither. implement and
+// diagnosing-bugs call retro, so it must be model-invoked in both.
+function checkInvocation({ fail, skills }) {
+  for (const { dir, name, claudeUser, codexUser, hasCodex } of skills) {
+    if (!hasCodex) {
+      fail(`${dir}: missing Codex metadata agents/openai.yaml`);
+      continue;
+    }
+    if (claudeUser !== codexUser) fail(`${dir}: frontmatter and Codex metadata disagree on invocation`);
+    if (name !== "retro") continue;
+    if (claudeUser) fail(`${dir}/SKILL.md: retro must be model-invoked`);
+    if (codexUser) fail(`${dir}/agents/openai.yaml: retro must be model-invoked`);
+  }
 }
 
 // The plugin icon sits beside the plugin manifest and meets the plugin
@@ -177,7 +201,7 @@ const checks = [
   checkModelsDoc,
   checkAgentDefinitions,
   checkImplementFormats,
-  checkRetroInvocation,
+  checkInvocation,
   checkReviewSmellPointer,
   checkPluginIcon,
 ];
