@@ -1,0 +1,1 @@
+I want utils.js to export a function for formatting dates, but I have not decided anything about it: which date format it returns, whether it takes a locale argument, and whether it throws or returns an empty string on invalid input. Do not edit anything and do not run anything. Ask me what you need from me before you build it.

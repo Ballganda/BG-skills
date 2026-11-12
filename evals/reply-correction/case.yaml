@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: reply-correction
+description: A reply to a correction, outside any skill, in a workspace whose CLAUDE.md holds the Replies line. The Reply must open with "Understood:" and the agent's own interpretation.
+tags: [reply]
+runs: 3
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 15
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep]
