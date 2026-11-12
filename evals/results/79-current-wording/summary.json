@@ -1,0 +1,214 @@
+{
+  "startedAt": "2026-11-12T18:50:11.708Z",
+  "claudeVersion": "2.1.322",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 0.25,
+  "casesPassed": "0/2",
+  "costUsd": 2.2354768,
+  "cases": [
+    {
+      "name": "reply-status",
+      "score": 0.5,
+      "graders": {
+        "detail-one-fact-per-line": "0/5",
+        "outcome-first": "5/5"
+      },
+      "meanTokens": {
+        "input_tokens": 9,
+        "cache_creation_input_tokens": 9466,
+        "cache_read_input_tokens": 38596,
+        "output_tokens": 949,
+        "total": 49020
+      },
+      "outputTokens": [
+        766,
+        1136,
+        1113,
+        815,
+        913
+      ],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "adrWrites": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "meanTurns": 4.4,
+      "meanCostUsd": 0.43039247999999997,
+      "runs": [
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.43823680000000004,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 11172,
+            "cache_read_input_tokens": 32224,
+            "output_tokens": 766,
+            "total": 44170
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.613302,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 11577,
+            "cache_read_input_tokens": 43420,
+            "output_tokens": 1136,
+            "total": 56143
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.5816972,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 11555,
+            "cache_read_input_tokens": 43396,
+            "output_tokens": 1113,
+            "total": 56074
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.23537519999999984,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6432,
+            "cache_read_input_tokens": 36966,
+            "output_tokens": 815,
+            "total": 44221
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        },
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 4,
+          "costUsd": 0.28335119999999986,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": true
+          },
+          "tokens": {
+            "input_tokens": 8,
+            "cache_creation_input_tokens": 6596,
+            "cache_read_input_tokens": 36976,
+            "output_tokens": 913,
+            "total": 44493
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    },
+    {
+      "name": "reply-status-no-line",
+      "score": 0,
+      "graders": {
+        "detail-one-fact-per-line": "0/1",
+        "outcome-first": "0/1"
+      },
+      "meanTokens": {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 6602,
+        "cache_read_input_tokens": 47492,
+        "output_tokens": 1058,
+        "total": 55162
+      },
+      "outputTokens": [
+        1058
+      ],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [
+        0
+      ],
+      "adrWrites": [
+        0
+      ],
+      "meanTurns": 5,
+      "meanCostUsd": 0.0835144,
+      "runs": [
+        {
+          "score": 0,
+          "passed": false,
+          "error": null,
+          "turns": 5,
+          "costUsd": 0.0835144,
+          "graders": {
+            "detail-one-fact-per-line": false,
+            "outcome-first": false
+          },
+          "tokens": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 6602,
+            "cache_read_input_tokens": 47492,
+            "output_tokens": 1058,
+            "total": 55162
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    }
+  ]
+}
