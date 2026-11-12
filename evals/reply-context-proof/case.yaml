@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: reply-context-proof
+description: Proves the seeded CLAUDE.md, with its Agent skills block, is in the agent's context. The block carries a canary whose answer exists only in the transcript if the file was loaded. Run it with --no-scaffold to see it fail.
+tags: [reply]
+runs: 1
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 5
+  timeout_seconds: 300
+  allowed_tools: []

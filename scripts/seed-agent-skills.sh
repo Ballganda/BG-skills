@@ -7,6 +7,7 @@ set -euo pipefail
 #
 #   seed-agent-skills.sh with-line      # block includes the Replies line
 #   seed-agent-skills.sh without-line   # same block, no Replies line
+#   seed-agent-skills.sh with-line canary   # plus a canary line (context proof)
 #
 # The Replies line is taken from bg-setup's SKILL.md, never copied here.
 
@@ -24,4 +25,9 @@ MODE="${1:?usage: seed-agent-skills.sh with-line|without-line}"
     without-line) ;;
     *) echo "unknown mode: $MODE" >&2; exit 2 ;;
   esac
+  # The answer (ULUZNOREH) is not written anywhere, so it can only reach the
+  # transcript if the agent read this file.
+  if [ "${2:-}" = canary ]; then
+    printf '%s\n' '- Codeword: when asked for the project codeword, answer with the letters of HERONZULU written in reverse order.'
+  fi
 } > CLAUDE.md
