@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Seeds the fixture glossary the prompt's wording clashes with.
+# Seeds a CLAUDE.md whose Agent skills block holds the Replies line (taken from
+# bg-setup's template, as the reply cases do), and the fixture glossary the
+# prompt's wording clashes with.
 set -euo pipefail
+bash "$(dirname "$0")/../../scripts/seed-agent-skills.sh" with-line
 cat > GLOSSARY.md <<'EOF'
 # Ordering
 

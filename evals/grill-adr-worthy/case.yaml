@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: grill-adr-worthy
+description: A plan with three settled decisions, only one of which meets all three ADR conditions. /grill must offer an ADR for that one only. The workspace's CLAUDE.md holds the Agent skills block with the Replies line.
+tags: [grill]
+runs: 3
+context:
+  scaffold_script: scaffold.sh
+execution:
+  max_turns: 25
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep, Skill]
