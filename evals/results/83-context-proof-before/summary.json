@@ -1,0 +1,63 @@
+{
+  "startedAt": "2026-11-12T18:10:37.597Z",
+  "claudeVersion": "2.1.322",
+  "plugin": "bg-skills@1.3.2",
+  "overallScore": 0.5,
+  "casesPassed": "0/1",
+  "costUsd": 0.129188,
+  "cases": [
+    {
+      "name": "reply-context-proof",
+      "score": 0.5,
+      "scoreWithout": 0.5,
+      "graders": {
+        "canary-answered": "0/1",
+        "seeded-file-not-read": "1/1"
+      },
+      "meanTokens": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 8020,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 156,
+        "total": 8178
+      },
+      "outputTokens": [
+        156
+      ],
+      "meanRounds": 0,
+      "meanQuestions": 0,
+      "glossaryWrites": [
+        0
+      ],
+      "adrWrites": [
+        0
+      ],
+      "meanTurns": 1,
+      "meanCostUsd": 0.067288,
+      "runs": [
+        {
+          "score": 0.5,
+          "passed": false,
+          "error": null,
+          "turns": 1,
+          "costUsd": 0.067288,
+          "graders": {
+            "canary-answered": false,
+            "seeded-file-not-read": true
+          },
+          "tokens": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 8020,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 156,
+            "total": 8178
+          },
+          "rounds": 0,
+          "questions": 0,
+          "glossaryWrites": 0,
+          "adrWrites": 0
+        }
+      ]
+    }
+  ]
+}
