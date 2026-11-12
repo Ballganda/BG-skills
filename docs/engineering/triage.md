@@ -4,7 +4,7 @@
 
 It is only for issues **you didn't create**. That means raw bug reports, incoming feature requests, or an external pull request that arrived unannounced: work that came into the tracker from outside, in whatever shape the reporter left it. Tickets from [ticket-gen](ticket-gen.md) are already agent-ready, so if you run `triage` over them, you waste the work. The rule is simple: `/triage` is only for incoming issues, not for issues you created yourself.
 
-It also differs from labelling by hand because it recommends and then waits. It gives you its category and state call with reasoning, plus what it found in the codebase, and applies nothing until you tell it to.
+It also differs from labelling by hand because it recommends and then waits. It gives you its category and state call first, then numbered points you can answer one by one, each with its reasoning and what it found in the codebase, and applies nothing until you tell it to.
 
 ## When to reach for it
 
@@ -98,7 +98,7 @@ Yes. The tracker is config, not a hard-coded assumption. People run it against L
 ## It's working if
 
 - Every item it touches ends with exactly one category role and one state role, never zero, and never two conflicting states.
-- It gives you a recommendation with reasoning and stops. It does not relabel the issue and move on.
+- It gives you its call first, then numbered points with reasoning, and stops. It does not relabel the issue and move on.
 - It reproduced the bug, or checked out and ran the PR, before anything reached `ready-for-agent`.
 - The briefs it writes name types and behaviours, and contain no file paths and no line numbers.
 - When a request you rejected six months ago comes back, it tells you and quotes the old reason instead of triaging it again.
