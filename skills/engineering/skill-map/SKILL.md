@@ -64,6 +64,16 @@ Not feature work, just upkeep.
 
 - **`/improve-codebase-architecture`** runs whenever you have a spare moment to keep the codebase good for agents to operate in. It surfaces **deepening opportunities**; picking one _generates an idea_ you can take into the main flow at `/grill`. It's the survey that finds the candidates; **`/codebase-design`** (below) is the bench you design the chosen one on.
 
+## Decompilation: binary → matching source
+
+A flow of its own, off the main flow, for recreating a compiled program's source so the original compiler emits the original bytes exactly. The acceptance criterion is a **byte-for-byte match**, judged by the project's tool, never by the agent. It runs `decomp-setup → decomp-start → decomp-run`, and `/decomp-start` ends by telling you to start a new chat for `/decomp-run`.
+
+1. **`/decomp-setup`** agrees the **contract** (target, compiler, flags, scope) and builds the private project that enforces it: toolchain provisioning, guardrail tooling, and a pipeline check. It runs **`/decomp-identify`** when the compiler is unknown or in doubt. It does no decomp. Re-run it on an existing project to upgrade the project to the current skills.
+2. **`/decomp-start`** lists every function into an inventory, then runs **`/decomp-spec-gen`** (group functions into **units**, best-guess original source files) and **`/decomp-ticket-gen`** (one ticket per in-scope function), mostly by script, and freezes the result.
+3. **`/decomp-run`** coordinates and never writes source. It hands each ready ticket to a fresh **writer** running **`/decomp-match`**, has an **auditor** read the diff against the guardrails, and sends gaps in shared declarations or the symbol map to **`/decomp-reference`**. Each proven lesson is recorded for the next writer.
+
+**`/decomp-standards`** holds the shared rules every decomp skill loads: the acceptance criterion, guardrails, size tiers, mismatch categories, and the project layout.
+
 ## Vocabulary underneath
 
 Two model-invoked references that run *beneath* the other skills, each the single source of truth for its vocabulary. Reach for them directly when the **words**, not the process, are the problem; or let the skills above pull them in.

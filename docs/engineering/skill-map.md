@@ -26,11 +26,12 @@ The tracker-dependent routes (triage, `spec-gen`, `ticket-gen`, `implement`) ass
 
 ## Flows, not skills
 
-The skill's leading word is **flow**, a path *through* the skills rather than a single skill. When you name your situation, the router places you at a step on a flow. That is a different answer from "here is the skill that matches your keywords". There are five kinds of route, and the skill itself describes them in full:
+The skill's leading word is **flow**, a path *through* the skills rather than a single skill. When you name your situation, the router places you at a step on a flow. That is a different answer from "here is the skill that matches your keywords". There are six kinds of route, and the skill itself describes them in full:
 
 - **The main flow**, idea to ship. [grill](grill.md) is where the creation flow starts, then spec, tickets, [implement](implement.md) (a batch of tickets per run, built by parallel subagents across the task graph), review, then [retro](retro.md), which feeds what the build taught back into the agent's environment. Two skills run retro automatically: `implement` when its implementers reported lessons, and `diagnosing-bugs` once a fix lands. Either way it only suggests. It has two branches. One is a prototype detour, for when a question needs runnable code to settle it. The other is the spec-and-tickets split, which is only worth its cost when the build spans more than one session.
 - **On-ramps**, for a situation that generates work and then merges onto the main flow: incoming bug reports, something broken, or an effort too foggy and too large to hold in one session.
 - **Codebase health**, upkeep rather than feature work. [improve-codebase-architecture](improve-codebase-architecture.md) surveys the code for deepening opportunities, and each one it finds re-enters the main flow as an idea.
+- **Decompilation**, a flow of its own for recreating a compiled program's source to a byte-for-byte match: [decomp-setup](decomp-setup.md) agrees the contract and builds the project, [decomp-start](decomp-start.md) turns the binary into specs and tickets, and [decomp-run](decomp-run.md) works the tickets with separate writer, auditor and repair subagents.
 - **Standalones**, which sit off every flow and which you use on their own: the prototype, the questionnaire, the research run.
 - **A vocabulary layer underneath**, the two references the other skills pull in when the words rather than the process are the problem.
 
