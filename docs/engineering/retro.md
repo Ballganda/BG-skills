@@ -5,8 +5,8 @@
 | Mode | It reads | You see |
 | --- | --- | --- |
 | User-typed (default), passed by you typing `/retro`, or by no mode at all | The session's own record: the current one by default, or one you point it at in the session logs | The candidates, in the chat |
-| Lesson-line, passed by `implement` at the end of a run with **lessons** | Only the implementers' lesson lines (`type @ location`) and the files they point to, never the session logs | Suggestions in implement's final report |
-| Diagnosing-bugs, passed by `diagnosing-bugs` once a fix lands | The live debugging session | Suggestions in its final report |
+| Lesson-line, passed by `implement` at the end of a run with **lessons** | Only the implementers' lesson lines (`type @ location`) and the files they point to, never the session logs | Suggestions in implement's final reply |
+| Diagnosing-bugs, passed by `diagnosing-bugs` once a fix lands | The live debugging session | Suggestions in its final reply |
 
 It changes the environment, not the code. Take the bug the agent shipped, the file it needed twenty tool calls to find, or the rule the reviewer missed. `retro` does not fix any of them directly. It asks what in the repo let them happen, and proposes the check, pointer, or standard that prevents them next time. It also only proposes. Nothing changes until you pick a candidate.
 
@@ -38,7 +38,7 @@ Before `retro` writes any rule, it classifies the violation. A **mechanical** vi
 
 **Does it write the lint rule itself, or wait for a yes? Can I wire it to run after every session?**
 
-It waits. `retro` only proposes. Nothing changes until you pick a candidate, so it edits nothing by hand and installs no hook automatically. This is deliberate. One user asked for exactly this after being "burned by auto-hooks that blocked good changes." It takes judgement to decide what deserves a permanent check, so the skill stays human-in-the-loop. You do not need to wire it up: `implement` already runs it when its implementers reported lessons, and `diagnosing-bugs` runs it after a fix. Neither run changes anything; both list suggestions in the final report. A smooth run reports no lessons, so it skips the retro, because a smooth session has little to teach. There is no dry-run mode. A proposed check is code like any other, so try it against the repo before you let it block merges.
+It waits. `retro` only proposes. Nothing changes until you pick a candidate, so it edits nothing by hand and installs no hook automatically. This is deliberate. One user asked for exactly this after being "burned by auto-hooks that blocked good changes." It takes judgement to decide what deserves a permanent check, so the skill stays human-in-the-loop. You do not need to wire it up: `implement` already runs it when its implementers reported lessons, and `diagnosing-bugs` runs it after a fix. Neither run changes anything; both list suggestions in the final reply. A smooth run reports no lessons, so it skips the retro, because a smooth session has little to teach. There is no dry-run mode. A proposed check is code like any other, so try it against the repo before you let it block merges.
 
 **Won't this pile up lint rules forever? Does it ever suggest removing one?**
 

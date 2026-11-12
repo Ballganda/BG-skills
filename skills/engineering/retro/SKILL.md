@@ -12,8 +12,8 @@ Your caller passes your mode. If none is passed, including when the model invoke
 | Mode passed | Evidence | Output |
 | --- | --- | --- |
 | User-typed (default) | The session the user names, from the session logs; the current one by default | Candidates presented to the user |
-| Lesson-line (`implement`, with the collected lesson lines) | Only the lesson lines (`type @ location`) and the locations they point to | Suggestions listed in the caller's final report |
-| Diagnosing-bugs (`diagnosing-bugs`) | The live session | Suggestions listed in the caller's final report |
+| Lesson-line (`implement`, with the collected lesson lines) | Only the lesson lines (`type @ location`) and the locations they point to | Suggestions listed in the caller's final reply |
+| Diagnosing-bugs (`diagnosing-bugs`) | The live session | Suggestions listed in the caller's final reply |
 
 In lesson-line mode, do not read session logs.
 
@@ -35,7 +35,7 @@ When another skill passes a mode, **only suggest**: change no file, add no check
 - **No-ops**: look for instructions in steering files that don't modify the agent's behavior. _Use when_ the steering files are large and unwieldy.
 - **Information access**: look for opportunities to increase the agent's access to information. Teeing dev server logs, readonly access to third-party services. _Use when_ a crucial piece of information was not available to the agent.
 
-4. List the candidates in order of severity: to the user in the user-typed mode, in the caller's final report in the other modes.
+4. List the candidates in order of severity: to the user in the user-typed mode, in the caller's final reply in the other modes.
 
 ## Reference
 
