@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,13 +19,18 @@ const script = join(repo, "scripts", "check-skills.mjs");
 const run = (root) =>
   spawnSync(process.execPath, [script, ...(root ? [root] : [])], { encoding: "utf8" });
 
-// Copy the checked trees into a temp dir, let `change` edit the copy, run the
+const checkedTrees = ["skills", "agents", ".claude-plugin", "docs", ".agents", ".out-of-scope", ".github", ".changeset"];
+
+// Copy the checked trees and root files into a temp dir, let `change` edit the copy, run the
 // check, clean up.
 function withCopy(change) {
   const dir = mkdtempSync(join(tmpdir(), "check-skills-"));
   try {
-    for (const tree of ["skills", "agents", ".claude-plugin"]) {
-      cpSync(join(repo, tree), join(dir, tree), { recursive: true });
+    for (const tree of checkedTrees) {
+      if (existsSync(join(repo, tree))) cpSync(join(repo, tree), join(dir, tree), { recursive: true });
+    }
+    for (const file of readdirSync(repo)) {
+      if (file.endsWith(".md") || file === "LICENSE") cpSync(join(repo, file), join(dir, file));
     }
     change(dir);
     return run(dir);
@@ -275,4 +280,59 @@ test("fails when the plugin icon is over 2048 px", () => {
   const r = withIcon(fakePng(2049, 2049));
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /icon.*512 to 2048/);
+});
+
+// Upstream pointers: one added link fails in each kind of active file, and the
+// allowlisted attribution passes.
+const upstreamLink = "See https://github.com/mattpocock/skills for more.";
+const append = (...lines) => (text) => `${text.trimEnd()}\n\n${lines.join("\n")}\n`;
+
+const upstreamTargets = [
+  ["a skill", "skills/engineering/tdd/SKILL.md"],
+  ["a docs page", "docs/engineering/tdd.md"],
+  ["an ADR", ".agents/adr/0002-ship-as-a-claude-code-plugin.md"],
+  ["an out-of-scope note", ".out-of-scope/new-skills.md"],
+];
+
+for (const [kind, file] of upstreamTargets) {
+  test(`fails naming ${file} when ${kind} links to upstream`, () => {
+    const r = mutated(file, append(upstreamLink), true);
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes(`${file}:`) && r.stderr.includes("upstream pointer github.com/mattpocock"), r.stderr);
+  });
+}
+
+test("fails when an out-of-scope note lists a bare #N prior request", () => {
+  const file = ".out-of-scope/new-skills.md";
+  const r = mutated(file, append("## Prior requests", "", '- #14: "Potential typo"'), true);
+  assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes(`${file}:`) && r.stderr.includes("bare issue reference #14"), r.stderr);
+});
+
+test("passes when an out-of-scope note lists a full issue link", () => {
+  const link = '- [Ballganda/BG-skills#14](https://github.com/Ballganda/BG-skills/issues/14): "Example"';
+  const r = mutated(".out-of-scope/new-skills.md", append("## Prior requests", "", link), true);
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test("fails when the changelog is headed mattpocock-skills", () => {
+  const r = mutated("CHANGELOG.md", (t) => t.replace(/^# .*$/m, "# mattpocock-skills"), true);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /CHANGELOG\.md:1: upstream pointer mattpocock-skills/);
+});
+
+test("passes with the allowlisted LICENSE notice and README credit line", () => {
+  const r = withCopy((dir) => {
+    const license = join(dir, "LICENSE");
+    writeFileSync(license, append("Upstream: https://github.com/mattpocock/skills")(readFileSync(license, "utf8")));
+    const readme = readFileSync(join(dir, "README.md"), "utf8");
+    assert.match(readme, /^Forked from \[mattpocock\/skills\]\(https:\/\/github\.com\/mattpocock\/skills\)/m);
+  });
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test("fails when the README links upstream outside its credit line", () => {
+  const r = mutated("README.md", append(upstreamLink), true);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /README\.md:\d+: upstream pointer/);
 });
