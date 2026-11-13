@@ -81,7 +81,7 @@ Before the first command, run `python3 --version`. If Python 3 is missing, tell 
 3. Run `begin` with the integration branch name and the batch Tickets with their tiers. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
 4. Run `ready --cap 3` (or the user's cap). For each Ticket it lists, run `start`, then start an implementer on the printed worktree, on its tier's model. The implementer:
    - calls the Skill tool with `tdd` at pre-agreed seams where possible;
-   - typechecks and runs the single relevant test file as it goes, and the full suite once at the end;
+   - typechecks and runs the single relevant test file as it goes, and the full suite once at the end (a run that would outlast the tool timeout runs in the background);
    - commits;
    - merges the integration branch tip into its branch before reporting done.
 5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window. On a failing report or a failing `test`, run `fail` and apply the retry rule.
