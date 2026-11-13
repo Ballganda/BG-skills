@@ -1578,7 +1578,7 @@ def test_audit_pass_records_the_match_once_even_when_run_twice(base):
     p = Project(base)
     p.advance("matched")
     r = p.run("audit", TID, "pass", "--auditor", "a1")
-    expect(r.returncode != 0 and "audit needs bytes-match" in r.stderr, "a second pass on a matched ticket is refused", r)
+    expect(r.returncode != 0 and "audit-pass needs bytes-match" in r.stderr, "a second pass on a matched ticket is refused", r)
     expect(len(p.lines("matches.jsonl")) == 1, "one match record", r)
     expect(p.status() == "matched", "still matched", r)
 
@@ -1614,7 +1614,7 @@ def test_audit_is_refused_unless_the_ticket_is_bytes_match(base):
     p = Project(base)
     p.advance("claimed")
     r = p.run("audit", TID, "pass", "--auditor", "a1")
-    expect(r.returncode == 1 and f"{TID} is claimed; audit needs bytes-match" in r.stderr, "audit refuses", r)
+    expect(r.returncode == 1 and f"{TID} is claimed; audit-pass needs bytes-match" in r.stderr, "audit refuses", r)
 
 
 def test_integrate_is_refused_when_the_branch_is_not_merged(base):
@@ -1668,7 +1668,7 @@ def test_release_is_refused_from_any_other_status(base):
     for d, status in each(base, ["open", "bytes-match", "matched", "integrated", "regressed", "revalidated"]):
         p = Project(d, status=status)
         r = p.run("release", TID)
-        expect(r.returncode == 1 and f"{TID} is {status}; nothing to release" in r.stderr, f"{status}: release refuses", r)
+        expect(r.returncode == 1 and f"{TID} is {status}; release needs claimed" in r.stderr, f"{status}: release refuses", r)
         expect(p.status() == status, f"{status}: the ticket does not change", r)
 
 
@@ -1676,6 +1676,46 @@ def test_release_refuses_an_unknown_target(base):
     p = Project(base, status="claimed")
     r = p.run("release", TID, "--to", "matched")
     expect(r.returncode == 1 and "release --to open|blocked-reference" in r.stderr, "release names its targets", r)
+
+
+def test_each_command_refuses_an_illegal_move_with_the_shared_message(base):
+    cases = [("matched", ["claim", TID, "--by", "w2"], "claim needs open or regressed"),
+             ("open", ["verify", TID, "--model", "m"], "bytes-match needs claimed"),
+             ("claimed", ["audit", TID, "pass", "--auditor", "a1"], "audit-pass needs bytes-match"),
+             ("claimed", ["audit", TID, "fail", "--auditor", "a1"], "audit-fail needs bytes-match"),
+             ("bytes-match", ["integrate", TID], "integrate needs matched"),
+             ("open", ["release", TID], "release needs claimed"),
+             ("open", ["release", TID, "--to", "blocked-reference"], "block needs claimed")]
+    for d, (status, args, needs) in each(base, cases):
+        p = Project(d, status=status)
+        r = p.run(*args)
+        expect(r.returncode == 1 and f"{TID} is {status}; {needs}" in r.stderr, f"{args[0]} refuses {status}", r)
+        expect(p.status() == status, f"{args[0]}: the ticket does not change", r)
+
+
+def test_every_move_that_leaves_the_claim_frees_the_unit_for_another_ticket(base):
+    other = f"{UNIT}-00402000"
+    broken = {SOURCE: MARK + "int f(void) { return 2; }\n"}
+    for d, leave in each(base, ["release", "block", "integrate", "regress"]):
+        p = Project(d)
+        p.advance("matched" if leave in ("integrate", "regress") else "claimed")
+        p.write(f"tickets/{UNIT}/{other}.md", ticket_text(other, "0x00402000", SOURCE, "open"))
+        if leave == "release":
+            r = p.run("release", TID)
+        elif leave == "block":
+            r = p.run("release", TID, "--to", "blocked-reference")
+        elif leave == "integrate":
+            p.git("merge", "-q", "--no-edit", f"w/{TID}")
+            r = p.run("integrate", TID)
+        else:
+            for rel, text in broken.items():
+                p.write(rel, text)
+            p.git("commit", "-aq", "-m", "break the match")
+            r = p.run("revalidate")
+            expect(r.returncode == 5 and "REGRESSED" in r.stdout, "the match regresses", r)
+        expect(leave == "regress" or r.returncode == 0, f"{leave} passes", r)
+        r = p.run("claim", other, "--by", "w2")
+        expect(r.returncode == 0 and f"claimed {other}" in r.stdout, f"after {leave} the unit is free", r)
 
 
 def test_note_appends_a_line_under_notes(base):

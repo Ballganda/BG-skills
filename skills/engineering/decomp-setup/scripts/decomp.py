@@ -510,14 +510,6 @@ def all_tickets(root=None):
     return out
 
 
-def set_status(tid, status, **extra):
-    assert status in STATUSES
-    fields, body = read_ticket(tid)
-    fields["status"] = status
-    fields.update(extra)
-    write_ticket(fields, body)
-
-
 def append_note(tid, text):
     fields, body = read_ticket(tid)
     if "## Notes" not in body:
@@ -575,6 +567,81 @@ def records(name):
     if not p.exists():
         return []
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+# ---------- ticket lifecycle ----------
+
+UNCLAIMED = {"claimed_by": "", "claimed_at": ""}
+EVENTS = {  # event: (statuses it may leave, the status it reaches, fields it writes)
+    "claim": (READY, "claimed", {}),
+    "release": (("claimed",), "open", UNCLAIMED),
+    "block": (("claimed",), "blocked-reference", UNCLAIMED),
+    "unblock": (("blocked-reference",), "open", {}),
+    "bytes-match": (("claimed",), "bytes-match", {}),
+    "audit-pass": (("bytes-match",), "matched", {}),
+    "audit-fail": (("bytes-match",), "claimed", {}),
+    "integrate": (("matched",), "integrated", UNCLAIMED),
+    "revalidate-pass": (("integrated", "regressed"), "revalidated", {}),
+    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", {}),
+}
+MOVES = {(s, e): to for e, (froms, to, _) in EVENTS.items() for s in froms}  # (status, event): new status
+
+
+def may_move(t, event):
+    return (t["status"], event) in MOVES
+
+
+def refuse_unless(t, event):
+    """Stop, exit 1, unless the ticket `t` may take `event`: one message shape for every command."""
+    if not may_move(t, event):
+        froms = EVENTS[event][0]
+        allowed = " or ".join(froms) if len(froms) < 3 else ", ".join(froms[:-1]) + " or " + froms[-1]
+        die(f"{t['id']} is {t['status']}; {event} needs {allowed}")
+
+
+def record_audit_pass(t, last, auditor):
+    if not any(m["ticket"] == t["id"] for m in records("matches.jsonl")):  # a match is recorded once
+        append("matches.jsonl", {"ticket": t["id"], "unix": now(), "attempt": last["id"],
+                                 "model": last["model"], "size": t["size"], "auditor": auditor})
+
+
+def record_audit_fail(t, last, auditor):
+    append("attempts.jsonl", dict(last, id=next_attempt_id(t["id"]), unix=now(), result="audit-fail",
+                                  category="unknown", auditor=auditor))
+
+
+RECORDS = {  # event: what the move writes to the ledger
+    "audit-pass": record_audit_pass,
+    "audit-fail": record_audit_fail,
+    "integrate": lambda t: event_integrated(t["id"]),
+    "revalidate-pass": lambda t: event_revalidated(t["id"]),
+    "regress": lambda t: event_regressed(t["id"]),
+}
+
+
+def move(tid, event, by=None, **args):
+    """Move ticket `tid` by `event`, the one writer of a ticket's status.
+
+    Refuses an illegal move, takes the unit lock on a claim (`by` names the claimant), writes the new status
+    and fields, releases the unit lock when the move leaves the claim, and records the move's ledger event
+    (`args` go to that record). Returns the new status.
+    """
+    fields, body = read_ticket(tid)
+    refuse_unless(fields, event)
+    before, after = fields["status"], MOVES[(fields["status"], event)]
+    assert after in STATUSES
+    lock = f"unit-{fields['unit']}"
+    if after in BUSY and before not in BUSY:
+        take_lock(lock, by)
+        fields.update(claimed_by=by, claimed_at=str(now()))
+    fields["status"] = after
+    fields.update(EVENTS[event][2])
+    write_ticket(fields, body)
+    if before in BUSY and after not in BUSY:
+        lockfile(lock).unlink(missing_ok=True)
+    if event in RECORDS:
+        RECORDS[event](fields, **args)
+    return after
 
 
 # ---------- build and compare ----------
@@ -882,11 +949,7 @@ def take_lock(name, by):
 
 
 def cmd_claim(a):
-    t, _ = read_ticket(a.id)
-    if t["status"] not in READY:
-        die(f"{a.id} is {t['status']}, not open")
-    take_lock(f"unit-{t['unit']}", a.by)
-    set_status(a.id, "claimed", claimed_by=a.by, claimed_at=str(now()))
+    move(a.id, "claim", by=a.by)
     print(f"claimed {a.id}")
 
 
@@ -894,14 +957,9 @@ def cmd_release(a):
     t, _ = read_ticket(a.id)
     if a.to not in ("open", "blocked-reference"):
         die("release --to open|blocked-reference")
-    if t["status"] == "claimed":
-        set_status(a.id, a.to, claimed_by="", claimed_at="")
-        lockfile(f"unit-{t['unit']}").unlink(missing_ok=True)
-    elif a.to == "open" and t["status"] == "blocked-reference":
-        set_status(a.id, "open")
-    else:
-        die(f"{a.id} is {t['status']}; nothing to release")
-    print(f"{a.id} -> {read_ticket(a.id)[0]['status']}")
+    event = ("block" if a.to == "blocked-reference" else
+             "unblock" if t["status"] == "blocked-reference" else "release")
+    print(f"{a.id} -> {move(a.id, event)}")
 
 
 def run_adapter(name, **values):
@@ -945,8 +1003,7 @@ def cmd_verify(a):
     frozen_check()
     t, _ = read_ticket(a.id)
     doctor(need=tools_needed([t["unit"]]))
-    if t["status"] != "claimed":
-        die(f"{a.id} is {t['status']}; verify needs a claimed ticket")
+    refuse_unless(t, "bytes-match")
     if a.category == "none":  # a writer that matched reports no category
         a.category = None
     if a.category and a.category not in CATEGORIES:
@@ -983,44 +1040,35 @@ def cmd_verify(a):
             f.write(log + "\n")
     append("attempts.jsonl", rec)
     if result == "bytes-match":
-        set_status(a.id, "bytes-match")
+        move(a.id, "bytes-match")
     print(json.dumps({"attempt": aid, "result": result, "differ_bytes": n}))
     sys.exit(0 if result == "bytes-match" else 4)
 
 
 def cmd_audit(a):
     t, _ = read_ticket(a.id)
-    if t["status"] != "bytes-match":
-        die(f"{a.id} is {t['status']}; audit needs bytes-match")
+    refuse_unless(t, f"audit-{a.verdict}")
     last = [r for r in records("attempts.jsonl") if r["ticket"] == a.id][-1]
     branch = a.branch or f"w/{a.id}"
     if a.verdict == "pass" and sha(git_bytes("show", f"{branch}:{t['source']}")) != last["source_sha256"]:
         die("branch changed since verify; record a fail, then verify again", 2)
     if a.verdict == "pass":
-        if not any(m["ticket"] == a.id for m in records("matches.jsonl")):
-            append("matches.jsonl", {"ticket": a.id, "unix": now(), "attempt": last["id"],
-                                     "model": last["model"], "size": t["size"], "auditor": a.auditor})
-        set_status(a.id, "matched")
+        move(a.id, "audit-pass", last=last, auditor=a.auditor)
         print(f"matched {a.id} (attempt {last['id']})")
     else:
-        append("attempts.jsonl", dict(last, id=next_attempt_id(a.id), unix=now(), result="audit-fail",
-                                      category="unknown", auditor=a.auditor))
-        set_status(a.id, "claimed")
+        move(a.id, "audit-fail", last=last, auditor=a.auditor)
         append_note(a.id, f"audit-fail: {a.note or 'see auditor'}")
         print(f"audit failed {a.id}; ticket back to claimed")
 
 
 def cmd_integrate(a):
     t, _ = read_ticket(a.id)
-    if t["status"] != "matched":
-        die(f"{a.id} is {t['status']}; integrate needs matched")
+    refuse_unless(t, "integrate")
     branch = a.branch or f"w/{a.id}"
     r = subprocess.run(["git", "merge-base", "--is-ancestor", branch, CFG["integration_branch"]], cwd=ROOT)
     if r.returncode != 0:
         die(f"{branch} is not merged into {CFG['integration_branch']}")
-    set_status(a.id, "integrated", claimed_by="", claimed_at="")
-    lockfile(f"unit-{t['unit']}").unlink(missing_ok=True)
-    event_integrated(a.id)
+    move(a.id, "integrate")
     print(f"integrated {a.id}")
 
 
@@ -1167,12 +1215,10 @@ def cmd_revalidate(a):
                 bad += 1
                 print(f"REGRESSED {t['id']} on {ref}: {result} {n}")
             if on_integ:
-                if ok and t["status"] in ("integrated", "regressed"):
-                    set_status(t["id"], "revalidated")
-                    event_revalidated(t["id"])
+                if ok and may_move(t, "revalidate-pass"):
+                    move(t["id"], "revalidate-pass")
                 elif not ok:
-                    set_status(t["id"], "regressed")
-                    event_regressed(t["id"])
+                    move(t["id"], "regress")
     if bad and not on_integ and not judging:
         event_rejected_repair(ref)
     print(f"revalidated {measured} on {ref}: {bad} regressed, {skipped} skipped")
