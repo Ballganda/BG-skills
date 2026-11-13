@@ -56,7 +56,7 @@ Fill free writer slots (the contract's cap) from `python tools/decomp.py next --
 - **Audit pass**: merge `w/<id>` into the integration branch, `integrate <id>`, record the lesson (step 5), then remove the worktree and branch.
 - **Anything else**: `release <id>`, then remove the worktree and branch. The notes carry what was learned to the next writer.
 
-Commit the ledger, ticket, and `PATTERNS.md` changes after each judged report: `decomp: <id> <result>`.
+Commit the ledger, ticket, and `PATTERNS.md` changes after each judged report: `decomp: <id> <result>`. Every commit in this step ends with the harness's attribution lines: see the Commits rule in `decomp-standards`.
 
 ### 5. Record the lesson
 

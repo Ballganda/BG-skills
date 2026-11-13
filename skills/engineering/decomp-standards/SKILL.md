@@ -32,6 +32,10 @@ The contract maps each tier to a model and an attempt budget.
 
 Every record uses Unix time in seconds.
 
+## Commits
+
+Every commit a decomp skill makes ends with the harness's attribution lines. This covers the coordinator's ledger commits, a writer's source commits, and `decomp-reference`'s repair commits. A commit without them is wrong, whichever skill made it.
+
 ## Mismatch categories
 
 Tag every failed attempt with exactly one, the one that best explains the first differing instruction:

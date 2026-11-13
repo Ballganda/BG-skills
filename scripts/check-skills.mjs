@@ -44,6 +44,18 @@ const decompRequiredLines = [
     "engineering/decomp-run/SKILL.md",
     "Never skip a step because the contract, a ticket, or a memory says something about the machine: the tool's result is the evidence.",
   ],
+  [
+    "engineering/decomp-standards/SKILL.md",
+    "Every commit a decomp skill makes ends with the harness's attribution lines.",
+  ],
+  [
+    "engineering/decomp-run/SKILL.md",
+    "Every commit in this step ends with the harness's attribution lines: see the Commits rule in `decomp-standards`.",
+  ],
+  [
+    "engineering/decomp-setup/CONTRACT.md",
+    "The contract records nothing about the current state of this machine (what is installed, logged in, or missing).",
+  ],
 ];
 
 function checkDecompRequiredLines({ read, fail }) {
