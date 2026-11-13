@@ -50,6 +50,13 @@ export const decompRequiredLines = [
     "engineering/decomp-setup/CONTRACT.md",
     "The contract records nothing about the current state of this machine (what is installed, logged in, or missing).",
   ],
+  ["engineering/decomp-identify/SIGNALS.md", "| Debug `feat` record |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| Debug `coffgrp` and POGO records |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| FuncInfo EH flags |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| SafeSEH table |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| Padding and `mov edi, edi` |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| Vendor signature over Rich header |"],
+  ["engineering/decomp-identify/SIGNALS.md", "`/arch:SSE` (SSE1 scalar single with x87 doubles)"],
 ];
 
 function checkDecompRequiredLines({ read, fail }) {
