@@ -9,8 +9,9 @@ import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { decompRequiredLines } from "./check-skills.mjs";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(repo, "scripts", "check-skills.mjs");
@@ -52,6 +53,19 @@ test("passes on the real tree", () => {
   assert.equal(r.status, 0, r.stderr);
 });
 
+test("importing the check prints nothing and does not exit", () => {
+  const code = `await import(${JSON.stringify(pathToFileURL(script).href)}); console.log("after import");`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, "after import\n");
+  assert.equal(r.stderr, "");
+});
+
+test("passes with the repo root as an argument", () => {
+  const r = run(repo);
+  assert.equal(r.status, 0, r.stderr);
+});
+
 const boundaries = [
   ["engineering/grill/SKILL.md", "Stay in this session"],
   ["engineering/spec-gen/SKILL.md", "If your context is over 150k"],
@@ -67,31 +81,8 @@ for (const [file, needle] of boundaries) {
   });
 }
 
-// Required lines in decomp skills: [file, the exact line the check requires].
-const decompRequired = [
-  [
-    "engineering/decomp-run/SKILL.md",
-    "Compare the integration branch's `tools/decomp.py` with `../decomp-setup/scripts/decomp.py`, ignoring line endings.",
-  ],
-  [
-    "engineering/decomp-run/SKILL.md",
-    "Never skip a step because the contract, a ticket, or a memory says something about the machine: the tool's result is the evidence.",
-  ],
-  [
-    "engineering/decomp-standards/SKILL.md",
-    "Every commit a decomp skill makes ends with the harness's attribution lines.",
-  ],
-  [
-    "engineering/decomp-run/SKILL.md",
-    "Every commit in this step ends with the harness's attribution lines: see the Commits rule in `decomp-standards`.",
-  ],
-  [
-    "engineering/decomp-setup/CONTRACT.md",
-    "The contract records nothing about the current state of this machine (what is installed, logged in, or missing).",
-  ],
-];
-
-for (const [file, line] of decompRequired) {
+// Required lines in decomp skills come from the check's own table, so a new row is tested with no edit here.
+for (const [file, line] of decompRequiredLines) {
   test(`fails naming ${file} when it loses a required line: ${line.slice(0, 30)}`, () => {
     const r = mutated(file, (t) => t.replace(line, ""));
     assert.notEqual(r.status, 0);
