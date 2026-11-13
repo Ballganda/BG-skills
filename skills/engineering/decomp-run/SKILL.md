@@ -42,7 +42,7 @@ When it reports, re-run `revalidate --ref <its branch>` yourself, because its ow
 
 ### 3. Pick and dispatch
 
-Fill free writer slots (the contract's cap) from `python tools/decomp.py next --n <free slots>`. Per ticket:
+Fill free writer slots (the contract's cap) from `python tools/decomp.py next --n <free slots>`, which lists smallest first. Use `--first <id> --reason <text>` only for a requirement the user stated, with that requirement as the reason. Per ticket:
 
 - **Model**: the contract's model for the ticket's tier. Escalate to the next tier's model once the ticket's notes show the contract's number of attempts with no fall in differ bytes, or when its category is listed in `OPEN.md`. Never escalate a `reference-gap`: that is a repair.
 - `claim <id> --by <writer name>`, then `git worktree add <path> -b w/<id> <integration branch>`.
@@ -56,7 +56,7 @@ Fill free writer slots (the contract's cap) from `python tools/decomp.py next --
 - **Audit pass**: merge `w/<id>` into the integration branch, `integrate <id>`, record the lesson (step 5), then remove the worktree and branch.
 - **Anything else**: `release <id>`, then remove the worktree and branch. The notes carry what was learned to the next writer.
 
-Commit the ledger, ticket, and `PATTERNS.md` changes after each judged report: `decomp: <id> <result>`. Every commit in this step ends with the harness's attribution lines: see the Commits rule in `decomp-standards`.
+Commit the ledger, ticket, and `PATTERNS.md` changes after each judged report, staging those paths by name (never `git commit -a` or `git add -A`): `decomp: <id> <result>`. Every commit in this step ends with the harness's attribution lines: see the Commits rule in `decomp-standards`.
 
 ### 5. Record the lesson
 

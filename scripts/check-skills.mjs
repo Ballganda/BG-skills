@@ -82,6 +82,30 @@ export const decompRequiredLines = [
     "engineering/decomp-setup/SKILL.md",
     "Step 4 may start once the compiler and flags questions are settled",
   ],
+  ["engineering/decomp-setup/CONTRACT.md", "SDK and platform headers: exact version"],
+  [
+    "engineering/decomp-setup/PROVISION.md",
+    "Two routes when the installed Visual Studio generation lacks the toolset:",
+  ],
+  [
+    "engineering/decomp-setup/PROVISION.md",
+    "The installer's local catalog lists the components it offers",
+  ],
+  [
+    "engineering/decomp-setup/PROVISION.md",
+    "never run a downloaded binary",
+  ],
+  [
+    "engineering/decomp-setup/CONTRACT.md",
+    "First-party static libraries with public reference source: in scope, or excluded as `library`",
+  ],
+  ["engineering/decomp-identify/SIGNALS.md", "| Debug `feat` record |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| Debug `coffgrp` and POGO records |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| FuncInfo EH flags |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| SafeSEH table |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| Padding and `mov edi, edi` |"],
+  ["engineering/decomp-identify/SIGNALS.md", "| Vendor signature over Rich header |"],
+  ["engineering/decomp-identify/SIGNALS.md", "`/arch:SSE` (SSE1 scalar single with x87 doubles)"],
 ];
 
 function checkDecompRequiredLines({ read, fail }) {
