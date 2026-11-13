@@ -7,6 +7,11 @@ fake tools that only print a banner), runs decomp.py commands in it, and asserts
 on exit codes and output. No real compiler, no network. Standard library only.
 
 Run: python scripts/test-decomp.py [name-filter]
+
+A full run takes minutes, longer than the default 120-second tool timeout, so run
+it in the background. While iterating, pass a name filter (a substring of the test
+function names) to run only the matching cases, for example:
+python scripts/test-decomp.py verify
 """
 import hashlib
 import json
@@ -534,6 +539,63 @@ def test_keyed_functions_get_their_own_tickets_and_expected_files(base):
     expect(r.returncode == 0, "a bank:offset address should sort", r)
 
 
+# ---------- next: smallest first ----------
+
+def add_ticket(p, unit, key, tier, size, address, status="open"):
+    text = ticket_text(f"{unit}-{key}", address, SOURCE, status)
+    text = text.replace("tier: SMALL", f"tier: {tier}").replace("size: 37", f"size: {size}")
+    p.write(f"tickets/{unit}/{unit}-{key}.md", text)
+
+
+def listed(r):
+    return [line.split()[0] for line in r.stdout.splitlines()]
+
+
+def events(p):
+    f = p.root / "ledger" / "events.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def test_next_lists_tiny_in_unstarted_unit_before_small_in_started_unit(base):
+    p = Project(base, status="integrated")
+    p.write(f"tickets/{UNIT}/{UNIT}-00402000.md", ticket_text(f"{UNIT}-00402000", "0x00402000", SOURCE, "open"))
+    add_ticket(p, "u0002", "00500000", "TINY", 4, "0x00500000")
+    expect(listed(p.run("next", "--n", "5")) == ["u0002-00500000", f"{UNIT}-00402000"], "TINY should come first")
+
+
+def test_next_lists_smaller_before_lower_address_within_a_tier(base):
+    p = Project(base)
+    add_ticket(p, "u0002", "00300000", "SMALL", 50, "0x00300000")
+    add_ticket(p, "u0003", "00600000", "SMALL", 10, "0x00600000")
+    expect(listed(p.run("next", "--n", "5")) == ["u0003-00600000", TID, "u0002-00300000"], "size, then address")
+
+
+def test_next_injects_no_large_ticket_into_a_small_batch(base):
+    p = Project(base)
+    add_ticket(p, "u0002", "00500000", "TINY", 4, "0x00500000")
+    add_ticket(p, "u0003", "00600000", "LARGE", 900, "0x00600000")
+    expect(listed(p.run("next", "--n", "2")) == ["u0002-00500000", TID], "no LARGE in a batch of two")
+
+
+def test_next_first_lists_the_ticket_first_and_records_one_event(base):
+    p = Project(base)
+    add_ticket(p, "u0002", "00500000", "TINY", 4, "0x00500000")
+    r = p.run("next", "--n", "5", "--first", TID, "--reason", "user asked")
+    expect(r.returncode == 0 and listed(r) == [TID, "u0002-00500000"], "ticket first", r)
+    ev = [e for e in events(p) if e["event"] == "out-of-order"]
+    expect(len(ev) == 1 and ev[0]["ticket"] == TID and ev[0]["reason"] == "user asked", f"got {ev}", r)
+
+
+def test_next_first_refused_without_reason_or_on_a_ticket_not_ready(base):
+    p = Project(base)
+    r = p.run("next", "--first", TID)
+    expect(r.returncode != 0, "--first without --reason should fail", r)
+    q = Project(Path(base) / "claimed", status="claimed") if (Path(base) / "claimed").mkdir() is None else None
+    r2 = q.run("next", "--first", TID, "--reason", "x")
+    expect(r2.returncode != 0, "a claimed ticket is not ready", r2)
+    expect(not events(p) and not events(q), "no event should be appended")
+
+
 # ---------- symbol map ----------
 
 def test_diff_adapter_receives_symbol_map_path(base):
@@ -569,6 +631,15 @@ def test_verify_rejects_writer_branch_touching_symbol_map(base):
     expect(r.returncode == 4 and '"result": "guardrail"' in r.stdout, "verify should record guardrail", r)
     ev = (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text()
     expect("guarded" in ev and "symbols.json" in ev, f"evidence should name the guarded path: {ev}", r)
+
+
+def test_verify_names_status_files_swept_onto_a_writer_branch(base):
+    p = Project(base, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n", f"tickets/{TID}.md": "status: open\n"})
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 4 and '"result": "guardrail"' in r.stdout, "verify should record guardrail", r)
+    ev = (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text()
+    expect("status files" in ev and "too broadly" in ev, f"evidence should name status files and a broad commit: {ev}", r)
 
 
 def test_revalidate_accepts_repair_branch_touching_symbol_map(base):

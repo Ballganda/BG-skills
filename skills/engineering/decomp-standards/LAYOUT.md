@@ -74,7 +74,7 @@ All lines are JSON, one per line, with Unix times.
 
 - `attempts.jsonl`: `id`, `ticket`, `unix`, `model`, `tier`, `result` (`build-fail`, `differ`, `bytes-match`, `guardrail`, `audit-fail`), `category`, `differ_bytes`, `evidence`, `source_sha256`.
 - `matches.jsonl`: the **first** verified match per ticket, never rewritten: `ticket`, `unix`, `attempt`, `model`, `size`, `auditor`.
-- `events.jsonl`: `unix`, `ticket` or `ref`, `event` (`integrated`, `revalidated`, `regressed`, `rejected-repair`, `link`).
+- `events.jsonl`: `unix`, `ticket` or `ref`, `event` (`integrated`, `revalidated`, `regressed`, `rejected-repair`, `link`, `out-of-order` with a `reason`).
   A `link` event also holds `result` (`pass`, `mismatch`, or `fail` when a source unit did not build or the adapter failed), `edition`, `units` (the units linked from source), `source_bytes`, `in_scope_bytes`, and, once a file was linked, its `sha256` and `size`; a mismatch adds `first_differ`, the first differing file offset.
 
 ## Commands
@@ -88,7 +88,7 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `inventory [--redo]` | Run the `inventory` adapter, after the full `doctor` checks. Once the `decomp-start` tag exists it refuses, naming the redo flow, unless `--redo` is passed. Pass `--redo` only with the user's go-ahead for an inventory redo, or in a throwaway clone, where it writes nothing to the project |
 | `disasm <id>` | Print the original function's disassembly: run the `disasm` adapter with the ticket's expected file and address |
 | `gen-specs`, `gen-tickets` | Write unit specs and tickets from `inventory.json`; existing status and notes survive |
-| `next [--n N]` | List open tickets in pick order |
+| `next [--n N] [--first ID --reason TEXT]` | List ready tickets smallest first (tier, then size, then address). `--first` lists that ready ticket first and records an `out-of-order` event |
 | `claim <id> --by <name>` / `release <id> [--to <status>]` | Take or give back a ticket |
 | `check <id>` | Writer's loop: build and diff in the current worktree, record nothing |
 | `verify <id> --model <m> [--category <c>]` | Rebuild the writer's branch in a clean worktree, compare bytes, record the attempt |

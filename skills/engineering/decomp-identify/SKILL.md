@@ -9,17 +9,17 @@ Find out what built a binary, from the binary. The user usually does not know, a
 
 - **Fact or inference.** A fact is something you observed: the command and its output. An inference is a conclusion drawn from facts, naming them and carrying a confidence (`high`, `medium`, `low`). Never present an inference as a fact.
 - **Read only.** Copy nothing from the target into any public place. Download nothing: when a probe needs a toolchain that is not installed, list it as a probe for later.
-- **Primary sources.** When a conclusion depends on a vendor fact (which product shipped linker 14.38, which version introduced a runtime function), call the Skill tool with `research` and cite what it finds.
+- **Primary sources.** When a conclusion depends on a vendor fact (which product shipped linker 14.38, which version introduced a runtime function), research the fact yourself from primary sources and cite them inline in `IDENTIFY.md`, next to the claim they support. Do not start another agent for the research.
 
 ## Steps
 
 1. **Container.** Format, architecture, bitness, sections with sizes, entry point, timestamp, imports, exports, and every header field that carries a toolchain version. Use [SIGNALS.md](SIGNALS.md) for what each format carries.
 2. **Toolchain signatures.** Work through every signal in SIGNALS.md for this format. Note the ones that are absent, and why that matters (a stripped header is evidence too).
-3. **Runtime and libraries.** Is the runtime library linked dynamically (named in imports) or statically (recognisable functions inside)? Its version narrows the compiler. Statically linked runtime and third-party library code is the first candidate for exclusion.
-4. **Code idioms.** Sample functions across the code section and read their prologues, epilogues, calls, and stack checks for the flag signals in SIGNALS.md: optimisation level, frame pointer use, security checks, exception model, instruction set, inlining, whole-program optimisation.
+3. **Runtime and libraries.** Is the runtime library linked dynamically (named in imports) or statically (recognisable functions inside)? Its version narrows the compiler. Statically linked runtime and third-party library code is the first candidate for exclusion. Run the static-runtime probe: compare the target's runtime functions with the candidate toolset's static runtime libraries and the SDK's static universal runtime, and record the closest version with the functions compared.
+4. **Code idioms.** Sample functions across the code section and read their prologues, epilogues, calls, and stack checks for the flag signals in SIGNALS.md: optimisation level, frame pointer use, security checks, exception model, instruction set, inlining, whole-program optimisation. Function boundaries in a stripped binary: disassemble the code section, split it on alignment padding after a `ret` or unconditional `jmp`, and add call targets and relocated code pointers as further function starts. Sample from those whole functions, not from arbitrary addresses.
 5. **Rank candidates.** Each candidate is a compiler version plus a flag set, with the evidence for it and against it.
-6. **Probes.** For each candidate, the cheapest experiment that would confirm or kill it: compile a snippet with the candidate and compare an idiom (prologue shape, security check, exception handler) to the target. Run a probe only when the toolchain is already installed; otherwise list it with what to install.
-7. **Toolchain requirements.** For the top candidate (and the runner-up, when confidence is not `high`), name every tool a matching build needs: compiler, linker, the platform headers its sources include, and what a disassembler and object reader for this format need. For each, give the exact product and version, the version string it prints, and the vendor's official source (call the Skill tool with `research`; a tool the vendor no longer offers is recorded as such). Then look for each on this machine and run its version command: record `installed` with the string it printed, `wrong version` with the string, or `missing`. List the host prerequisites the same way: what unpacks the vendor's image (an archive tool) and what runs a tool built for another system (old Windows compilers run under Wine on Linux and macOS), each with its version command, the string it prints, and its status on this machine. When the signals of steps 2 to 4 differ between regions of the code (another prologue shape, another runtime helper version, another linker record), list a second compiler build with the address ranges it covers and the evidence: some units were built with it.
+6. **Probes.** For each candidate, the cheapest experiment that would confirm or kill it: compile a snippet with the candidate and compare an idiom (prologue shape, security check, exception handler) to the target. Run a probe only when the toolchain is already installed; otherwise list it with what to install. When only a neighbour version is installed (an earlier or later release of the same toolset), a probe on it is partial evidence, labelled `neighbour <version>`, and the probe for the exact candidate still goes in the list with what to install.
+7. **Toolchain requirements.** For the top candidate (and the runner-up, when confidence is not `high`), name every tool a matching build needs: compiler, linker, the platform headers its sources include, and what a disassembler and object reader for this format need. For each, give the exact product and version, the version string it prints, and the vendor's official source (research it yourself and cite it inline in `IDENTIFY.md`; a tool the vendor no longer offers is recorded as such). Then look for each on this machine and run its version command: record `installed` with the string it printed, `wrong version` with the string, or `missing`. List the host prerequisites the same way: what unpacks the vendor's image (an archive tool) and what runs a tool built for another system (old Windows compilers run under Wine on Linux and macOS), each with its version command, the string it prints, and its status on this machine. When the signals of steps 2 to 4 differ between regions of the code (another prologue shape, another runtime helper version, another linker record), list a second compiler build with the address ranges it covers and the evidence: some units were built with it.
 
 ## Output
 
@@ -27,7 +27,7 @@ Write `IDENTIFY.md` in the project folder:
 
 ```markdown
 # Identify: <target>
-Target: <path>, SHA-256 <hash>, <size> B. Investigated <Unix time>.
+Target: <path>, SHA-256 <hash>, <size> B. Investigated <Unix time> (<ISO 8601 date>).
 
 ## Facts
 - <fact>: `<command>` gave `<output, trimmed>`
@@ -35,11 +35,16 @@ Target: <path>, SHA-256 <hash>, <size> B. Investigated <Unix time>.
 ## Inferences
 - <inference> (<confidence>): from <facts>
 
+## Signals
+Every row of the format's table in SIGNALS.md, in order.
+- <signal>: present, `<value>` / absent, <why it matters>
+
 ## Candidates
 1. <compiler version> + <flags>: for <evidence>; against <evidence>
 
 ## Probes
 - <probe>: confirms <candidate> if <observation>; needs <tool, installed or not>
+- <probe on a neighbour version>: `neighbour <version>`, partial evidence for <candidate>
 
 ## Toolchain requirements
 Host: <what this machine's system needs to run the tools>
@@ -52,6 +57,11 @@ Host: <what this machine's system needs to run the tools>
 | <tool> | <version> | `<string>` | <URL, size, published hash or "none published"> | installed / wrong version `<string>` / missing |
 | <second compiler build, when regions differ> | <version> | `<string>` | <source> | <status>; covers <address ranges>, from <evidence> |
 
+## Toolset to install
+| Tool | Exact version | Installer component id | Source |
+| --- | --- | --- | --- |
+| <tool> | <version> | `<exact id the installer lists>` | <URL or installer name> |
+
 ## Exclusion signals
 - <runtime or library code found>, at <addresses>, from <evidence>
 
@@ -59,6 +69,6 @@ Host: <what this machine's system needs to run the tools>
 - <what is still unknown, and what would settle it>
 ```
 
-**Done when** every signal in SIGNALS.md for this format is recorded as present or absent, every candidate has a probe, every required tool and host prerequisite has a status on this machine, and every unknown names what would settle it. Reply to whoever started you with the top candidate, its confidence, and the path to `IDENTIFY.md`, in under 60 words.
+**Done when** every signal in SIGNALS.md for this format is recorded in the Signals section as present or absent, every candidate has a probe (a partial probe from step 6 counts, and a probe not yet run is listed with what to install), every required tool and host prerequisite has a status on this machine, every tool to install has its installer component id in the Toolset to install section, and every unknown names what would settle it. Reply to whoever started you with the top candidate, its confidence, and the path to `IDENTIFY.md`, in under 60 words.
 
 When any required tool is missing or the wrong version, add the recommended toolchain to the reply, one line per tool with its version and source, and the two ways forward: the user installs it themselves, or they ask the agent to install it and set it up for the project. You still download nothing here. The install is `decomp-setup`'s provisioning step, which gets the user's approval of each file and records the result.

@@ -25,13 +25,14 @@ It writes `IDENTIFY.md` into the decomp project folder, so it needs that folder 
 
 The skill reads the binary only. It works through every **signal** its format carries (for a Windows PE: the linker version, the Rich header, the debug directory, the runtime DLL in the imports, the security cookie, prologue shapes, the instruction set) and records each as present or absent. An absent signal is evidence too: a stripped Rich header is worth saying.
 
-From the signals it ranks **candidates**, each a compiler version plus a flag set with the evidence for it and against it. Each candidate gets a **probe**: the cheapest experiment that would confirm or kill it, such as compiling a snippet with the candidate and comparing its prologue to the target's.
+From the signals it ranks **candidates**, each a compiler version plus a flag set with the evidence for it and against it. Each candidate gets a **probe**: the cheapest experiment that would confirm or kill it, such as compiling a snippet with the candidate and comparing its prologue to the target's. A statically linked runtime is dated by a probe too: its functions are compared with the static runtime libraries of the candidate toolset and the SDK. When only a neighbour version is installed, a probe on it counts as partial evidence, labelled with that version.
 
 `IDENTIFY.md` then carries three things the rest of the decomp project depends on:
 
 | Section | What it feeds |
 | --- | --- |
-| Toolchain requirements | Each tool's exact version, its version string, its official source, and whether this machine has it. `decomp-setup`'s provisioning step works from this list |
+| Toolchain requirements | Each tool's exact version, its version string, its official source, and whether this machine has it |
+| Toolset to install | Each tool with its exact installer component id. `decomp-setup`'s provisioning step works from this list |
 | Exclusion signals | Statically linked runtime and third-party library code, with addresses. These are the first candidates to drop out of scope |
 | Unknowns | What is still open, each with what would settle it |
 

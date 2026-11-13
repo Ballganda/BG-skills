@@ -90,6 +90,22 @@ for (const [file, line] of decompRequiredLines) {
   });
 }
 
+// Each contract heading carries exactly one tag: the failure names the file and the heading's line.
+test("fails naming CONTRACT.md and the line when a heading loses its tag", () => {
+  const file = "engineering/decomp-setup/CONTRACT.md";
+  const r = mutated(file, (t) => t.replace(/^(## Scope) \[[^\]]*\]$/m, "$1"));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /decomp-setup\/CONTRACT\.md:\d+: heading must carry exactly one tag.*## Scope/, r.stderr);
+});
+
+test("fails naming CONTRACT.md and the line when a heading carries both tags", () => {
+  const r = mutated("engineering/decomp-setup/CONTRACT.md", (t) =>
+    t.replace(/^(## Models) \[independent\]$/m, "$1 [needs IDENTIFY] [independent]"),
+  );
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /decomp-setup\/CONTRACT\.md:\d+: heading must carry exactly one tag.*## Models/, r.stderr);
+});
+
 test("fails when one word of the 150k sentence changes", () => {
   const r = mutated("engineering/spec-gen/SKILL.md", (t) =>
     t.replace("it is suggested to clear", "it is advised to clear"),
