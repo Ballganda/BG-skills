@@ -18,12 +18,13 @@ You invoke this by typing `/decomp-run`, and the agent won't reach for it on its
 ## Prerequisites
 
 - **A started project**: the `decomp-start` tag. Without it, the skill stops and tells you to run `/decomp-start`.
+- **A project tool the skills still match.** Before `doctor`, the run compares the project's `tools/decomp.py` with `decomp-setup`'s copy. If they differ, it stops and tells you to run `/decomp-setup`, which upgrades the project. If `decomp-setup` is not installed beside `decomp-run`, it stops and says so. The run never skips a step because a note about the machine says to: the tool's result decides.
 - **A machine that passes `doctor`.** Each pass of the loop checks it first. On exit 6 the run stops: the target, a host prerequisite, or a tool no longer equals the contract.
 - **A harness that runs subagents**, each started with a fresh context window. Writers, auditors, and the repair agent are all subagents.
 
 ## The loop
 
-Each pass checks health, then does repairs first, then fills free writer slots:
+Each pass checks the tool is current and the machine healthy, then does repairs first, then fills free writer slots:
 
 1. **Repair.** A ticket blocked on a missing or wrong shared declaration (a `reference-gap`) goes to one [decomp-reference](./decomp-reference.md) subagent at a time. A repair unblocks many tickets at once, so it goes ahead of new writers. The coordinator revalidates every existing match on the repair's branch itself, and any regression discards the repair.
 2. **Dispatch.** Each ticket's writer runs on the contract's model for its size tier. A ticket that makes no progress in differing bytes over the contract's attempt budget moves up to the next tier's model. A reference gap never escalates: it is a repair, not a harder problem.

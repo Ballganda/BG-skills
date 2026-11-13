@@ -34,6 +34,24 @@ function checkBoundaryLines({ read, fail }) {
   }
 }
 
+// Decomp skills carry lines that guard against skipped steps. Add a row per required line.
+const decompRequiredLines = [
+  [
+    "engineering/decomp-run/SKILL.md",
+    "Compare the integration branch's `tools/decomp.py` with `../decomp-setup/scripts/decomp.py`, ignoring line endings.",
+  ],
+  [
+    "engineering/decomp-run/SKILL.md",
+    "Never skip a step because the contract, a ticket, or a memory says something about the machine: the tool's result is the evidence.",
+  ],
+];
+
+function checkDecompRequiredLines({ read, fail }) {
+  for (const [file, line] of decompRequiredLines) {
+    if (!read(file).includes(line)) fail(`${file}: missing required line: ${line}`);
+  }
+}
+
 // ticket-gen's two templates each carry a tier field.
 function checkTicketTiers({ read, fail }) {
   const text = read("engineering/ticket-gen/SKILL.md");
@@ -196,6 +214,7 @@ function checkPluginIcon({ fail }) {
 
 const checks = [
   checkBoundaryLines,
+  checkDecompRequiredLines,
   checkDescriptionLengths,
   checkTicketTiers,
   checkModelsDoc,

@@ -23,6 +23,13 @@ Repeat until the requested number of tickets have been attempted, or nothing is 
 
 ### 1. Check health
 
+First check the project tool is current, before `doctor`. Compare the integration branch's `tools/decomp.py` with `../decomp-setup/scripts/decomp.py`, ignoring line endings. The path is relative to this skill's folder. The tool carries no version constant: the diff is the whole test. This skill only detects; `decomp-setup` is the only skill that upgrades a project.
+
+- **Different**: stop. Tell the user the project was set up by another version of the skills, and that `/decomp-setup` upgrades it. Their next input is `/decomp-setup`, then a new `/decomp-run`.
+- **Sibling file missing**: stop. Tell the user `decomp-setup` is not installed beside `decomp-run`, so the check cannot run. Their next input is to install the `decomp-setup` skill beside this one, then run `/decomp-run` again.
+
+Never skip a step because the contract, a ticket, or a memory says something about the machine: the tool's result is the evidence.
+
 Run `python tools/decomp.py doctor`. On exit 6, stop and show the user what it printed: the target, a host prerequisite, or a tool on this machine no longer equals the contract, and `/decomp-setup`'s provisioning step restores it. Note the edition it prints: on an edition with a `differs` list, `check` and `verify` exit 6 for those tickets, so `release` them and leave them for a machine with an edition that holds them unchanged. A `not usable here` line names a compiler this machine lacks: the same goes for the units built with it.
 
 Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user the contract's compiler or flags are suspect: they rerun `/decomp-setup`, which can start `decomp-identify` again. Read `OPEN.md`.
@@ -63,7 +70,7 @@ Keep it under 200 characters, with no explanation. Writers read this file before
 
 ### 6. Revalidate and mirror
 
-After every N integrations (N is in the contract), run `revalidate`. On a regression, stop picking in that unit and tell the user which tickets regressed. Its tickets are claimable again as `regressed`. After each batch of integrations, run `sync` if GitHub is enabled.
+After every N integrations (N is in the contract), run `revalidate`. On a regression, stop picking in that unit and tell the user which tickets regressed. Its tickets are claimable again as `regressed`. After each batch of integrations, run `sync` whenever `decomp.json` enables GitHub, whatever a note says about `gh`. On exit 6, carry on with the loop and keep the line `sync` printed for the Finish report.
 
 ### 7. Link
 
@@ -76,5 +83,7 @@ Report only numbers that `python tools/decomp.py report` printed: bytes and func
 - **more**: run `/decomp-run` again. Say how many bytes and functions remain, from the report.
 - **stuck**: name the blocked and regressed tickets, and tell the user to resolve what blocks them (a reference gap, a regression, or a machine that can build them) before running again.
 - **finished**: nothing is left to run. State the link result (`pass`, or `mismatch` with its first differing offset and owner), or, when the link exited 7, that a whole-binary link is not available for this target.
+
+If any `sync` exited 6, repeat the line it printed.
 
 End by telling the user to start a new chat before the next `/decomp-run`.

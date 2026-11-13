@@ -70,7 +70,7 @@ A flow of its own, off the main flow, for recreating a compiled program's source
 
 1. **`/decomp-setup`** agrees the **contract** (target, compiler, flags, scope) and builds the private project that enforces it: toolchain provisioning, guardrail tooling, and a pipeline check. It runs **`/decomp-identify`** when the compiler is unknown or in doubt. It does no decomp. Re-run it on an existing project to upgrade the project to the current skills.
 2. **`/decomp-start`** lists every function into an inventory, then runs **`/decomp-spec-gen`** (group functions into **units**, best-guess original source files) and **`/decomp-ticket-gen`** (one ticket per in-scope function), mostly by script, and freezes the result.
-3. **`/decomp-run`** coordinates and never writes source. It hands each ready ticket to a fresh **writer** running **`/decomp-match`**, has an **auditor** read the diff against the guardrails, and sends gaps in shared declarations or the symbol map to **`/decomp-reference`**. Each proven lesson is recorded for the next writer.
+3. **`/decomp-run`** first stops if the project's tool differs from `decomp-setup`'s copy (run `/decomp-setup` to upgrade), then coordinates and never writes source. It hands each ready ticket to a fresh **writer** running **`/decomp-match`**, has an **auditor** read the diff against the guardrails, and sends gaps in shared declarations or the symbol map to **`/decomp-reference`**. Each proven lesson is recorded for the next writer.
 
 **`/decomp-standards`** holds the shared rules every decomp skill loads: the acceptance criterion, guardrails, size tiers, mismatch categories, and the project layout.
 
