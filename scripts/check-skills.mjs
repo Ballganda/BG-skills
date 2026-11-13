@@ -50,6 +50,23 @@ export const decompRequiredLines = [
     "engineering/decomp-setup/CONTRACT.md",
     "The contract records nothing about the current state of this machine (what is installed, logged in, or missing).",
   ],
+  ["engineering/decomp-setup/CONTRACT.md", "SDK and platform headers: exact version"],
+  [
+    "engineering/decomp-setup/PROVISION.md",
+    "Two routes when the installed Visual Studio generation lacks the toolset:",
+  ],
+  [
+    "engineering/decomp-setup/PROVISION.md",
+    "The installer's local catalog lists the components it offers",
+  ],
+  [
+    "engineering/decomp-setup/PROVISION.md",
+    "never run a downloaded binary",
+  ],
+  [
+    "engineering/decomp-setup/CONTRACT.md",
+    "First-party static libraries with public reference source: in scope, or excluded as `library`",
+  ],
 ];
 
 function checkDecompRequiredLines({ read, fail }) {

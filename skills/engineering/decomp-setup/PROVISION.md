@@ -118,9 +118,22 @@ Adding an edition is a contract change: an ADR, then the change flow in `decomp-
 
 `doctor` names a known-wrong edition and prints the contract's message for it. For a file it does not recognise, it prints how many probes matched: most of them means a near edition worth the user's attention, none means an unrelated file. Either way, stop and show the user what it printed. No match against an unaccepted file counts. Obtaining or converting the right file is the user's decision and the user's action.
 
+## Windows
+
+Windows runs the tools natively, and the Visual Studio toolset is usually the compiler route.
+
+- **Check.** `vswhere` lists the installed Visual Studio generations and where each lives. The installer's local catalog lists the components it offers, so it answers whether a component is offered here without opening the installer UI. Read the toolset's component id from the contract's Toolchain entry, then check both.
+- **Two routes when the installed Visual Studio generation lacks the toolset:**
+  1. Install an older generation's Build Tools side by side with the installed one, with the toolset the contract names.
+  2. Use an older-toolset component of the installed generation, if the local catalog offers it.
+
+  The user chooses the route. Record the chosen route and component id in the contract's provisioning entry.
+- **User-asked install.** When the user asks you to install a toolset, run only the vendor installer already on this machine, and only the exact command the user approved in step 3. Record that command in the contract's provisioning entry. An installer you downloaded for this step is not already on the machine: never run a downloaded binary.
+
 ## Never
 
 - Download anything the user has not approved in step 3, or from a URL that is not in `toolchain.json`.
+- Run an installer other than the vendor installer already on this machine, or run any installer without the user's approval of its exact command.
 - Install a host prerequisite. Name it, give its version, and leave the install to the user.
 - Edit `toolchain.json` to make `doctor` pass. The machine changes to fit the contract, or the contract changes through the user and an ADR.
 - Commit anything under `.decomp/`: tools, downloads, and the target stay on the machine.
