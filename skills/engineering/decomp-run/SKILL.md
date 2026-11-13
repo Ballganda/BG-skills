@@ -42,7 +42,7 @@ When it reports, re-run `revalidate --ref <its branch>` yourself, because its ow
 
 ### 3. Pick and dispatch
 
-Fill free writer slots (the contract's cap) from `python tools/decomp.py next --n <free slots>`. Per ticket:
+Fill free writer slots (the contract's cap) from `python tools/decomp.py next --n <free slots>`, which lists smallest first. Use `--first <id> --reason <text>` only for a requirement the user stated, with that requirement as the reason. Per ticket:
 
 - **Model**: the contract's model for the ticket's tier. Escalate to the next tier's model once the ticket's notes show the contract's number of attempts with no fall in differ bytes, or when its category is listed in `OPEN.md`. Never escalate a `reference-gap`: that is a repair.
 - `claim <id> --by <writer name>`, then `git worktree add <path> -b w/<id> <integration branch>`.
