@@ -18,11 +18,3 @@ The way through is namespaced invocation. The Claude Code plugin exposes every s
 If you installed with skills.sh, the files are yours: rename the folder and the `name:` field in your copy.
 
 If a harness gives you no way to reach a namespaced or renamed skill at all, report that to the harness.
-
-## Prior requests
-
-- #423: "/code-review shadows Claude Code own review skill"
-- #483: "/code-review name clash with Claude Code built-in"
-- #857: "Rename the research skill to avoid conflict with Copilot's built-in /research command"
-- #1019: "Shorthand `/prototype` conflicts with hidden new Claude Code built-in skill `/prototype`"
-- #1037: "Skill name overlap with devin cli inbuilt commands"
