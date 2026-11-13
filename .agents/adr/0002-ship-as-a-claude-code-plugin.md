@@ -1,65 +1,30 @@
-# Ship the skill set as a native Claude Code plugin; defer a native Codex plugin
+# Ship the skill set as a plugin from this repo's own marketplace
 
-These skills have always been installable via [skills.sh](https://skills.sh/mattpocock/skills) (`npx skills add mattpocock/skills`), which copies editable skill files into a user's project across Claude Code, Codex, and other Agent-Skills-standard harnesses. A recurring request is a **plug-and-play** distribution: subscribe to the set as a read-only, always-current bundle you don't edit, rather than a fork you own. That is exactly what native plugin systems provide.
+BG-skills ships its promoted skills as a **plugin** from this repo's own marketplace, `Ballganda/BG-skills`, as `bg-skills@bg-skills`. Claude Code, Codex, Copilot CLI and VS Code all install from it. A plugin is a read-only, always-current bundle the user subscribes to, rather than files they copy and own. The install wording lives in [.agents/install-block.md](../install-block.md), which is the single source for every command named here.
 
-We ship a native **Claude Code plugin** and, for now, **defer** a native **Codex plugin**. The split is forced by how each ecosystem's plugin manifest selects skills, against this repo's bucketed layout.
+## The constraint: bucketed skills
 
-## The constraint: bucketed skills vs. single-path selection
+Skills live in bucket folders under `skills/`, some **promoted** (shipped) and some not; [CLAUDE.md](../../CLAUDE.md#buckets) is the one place that lists them. The plugin must expose only the promoted set, which spans more than one bucket folder.
 
-Skills live in bucket folders under `skills/`, some **promoted** (shipped) and some not; [CLAUDE.md](../../CLAUDE.md#buckets) is the one place that lists them. A plugin must expose only the promoted set, which spans more than one bucket folder.
+- A single skills path can't express that. Pointing it at `./skills/` would also ship `misc/`, `in-progress/` and `deprecated/`.
+- A curated flat folder of **symlinks** into the buckets doesn't work either: Codex copies the plugin tree into its cache and **drops symlinks**, so the skills arrive empty.
 
-- **Claude Code**: `.claude-plugin/plugin.json` accepts `skills` as an **array of explicit skill-directory paths**. We list the promoted skills one by one, exclude everything else with zero ambiguity, and add `.claude-plugin/marketplace.json` so the repo is its own single-plugin marketplace. Verified end to end: `claude plugin validate . --strict` passes, and `marketplace add` → `install` resolves all promoted skills.
-
-- **Codex**: `.codex-plugin/plugin.json` accepts `skills` only as a **single path string** (arrays are rejected with `missing or invalid plugin.json`), and Codex discovers `SKILL.md` files recursively under it. There is no way to name two bucket folders, or to curate a subset, from one path. Two escape hatches were tested and rejected:
-  - Pointing at `./skills/` would also ship `deprecated/`, `in-progress/`, `personal/`, and `misc/`: retired, draft, and personal skills we deliberately don't promote.
-  - A curated flat directory of **symlinks** into the buckets does not survive install: Codex copies the plugin tree into its cache and **drops symlinks**, so the skills arrive empty.
-
-The only robust ways to give Codex a single promoted-only path are (a) **restructure** so `skills/` contains only promoted skills (moving the non-promoted buckets out, a large blast radius across `CLAUDE.md`, `scripts/link-skills.sh`, the bucket READMEs, and the local dev workflow that relies on `in-progress/` and `personal/`), or (b) **commit duplicate copies** of promoted skills into a flat directory (a sync burden and a second source of truth). Both are structural decisions, not something to bundle into shipping the Claude plugin. This is very likely the original, half-remembered reason a plugin wasn't shipped earlier: the manifest formats didn't cleanly express a curated subset of a bucketed repo.
+So `.claude-plugin/plugin.json` lists the promoted skills as an **explicit `skills` array** of skill-directory paths. It names each promoted skill and excludes everything else. Codex and Copilot read the same `.claude-plugin/` manifests, so one manifest serves every plugin route.
 
 ## Decision
 
-- Ship the **Claude Code plugin** now (`.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json`), curated to the promoted set, as the headline v1.2 deliverable.
-- Keep **skills.sh** as the universal installer: it already serves Codex and other harnesses today, so no Codex user is left without an install path.
-- **Defer** the native Codex plugin until we decide between restructuring `skills/` to promoted-only vs. committing a generated flat copy. Revisit when Codex either supports a `skills` array / include-list or preserves symlinks on install.
+- **Managed installs from this repo's marketplace.** `.claude-plugin/marketplace.json` makes the repo its own single-plugin marketplace. Claude Code, Codex, Copilot CLI and VS Code each add `Ballganda/BG-skills` and install `bg-skills@bg-skills` (VS Code installs from the repo URL). Claude Code and Copilot need a one-time auto-update opt-in; Codex and VS Code update by default.
+- **Gemini per bucket.** Gemini CLI doesn't read `.claude-plugin`, and its `--path` takes one folder, so it installs once per promoted bucket. These are copies and don't update themselves.
+- **skills.sh as the manual fallback.** Every other agent, and anyone who wants editable files, uses `npx skills@latest add Ballganda/BG-skills`. Updates are manual.
+- **The plugin and skills.sh are exclusive.** Installing both gives every skill twice, so the docs say "pick one".
 
 ## Invariants this creates
 
-- Every promoted skill has an entry in `.claude-plugin/plugin.json`'s `skills` array (this already stood as a `CLAUDE.md` rule; it now also gates the plugin's contents).
-- `.claude-plugin/plugin.json`'s `version` tracks `package.json`'s version: bump both together on release. Claude uses the plugin `version` to decide when installed users see an update.
+- Every promoted skill has an entry in `.claude-plugin/plugin.json`'s `skills` array, and no unpromoted skill does.
+- `plugin.json`'s `version` tracks `package.json`'s. Managed routes reinstall only when that field changes. `npm run version` keeps it in step by running `scripts/sync-plugin-version.mjs`, and the Release workflow runs `npm run version`. `marketplace.json` has no `version` field, so it can't drift.
 
-## Update, 2026-08-05
+## Root layout and the validation gate
 
-`mattpocock-skills` was accepted into **Claude Code's official marketplace** (configured name `claude-plugins-official`, source repo `anthropics/claude-plugins-official`), which every Claude Code install has by default. `claude plugins install mattpocock-skills` is now the documented route, and the `marketplace add` → `install` path above is superseded. The install wording lives in [.agents/install-block.md](../install-block.md).
+The plugin stays at the repo root. `claude plugin validate . --strict` fails on two warnings: `CLAUDE.md` at the plugin root (maintainer context, not loaded for users) and a missing icon. Moving the plugin into a `plugin/` subfolder would clear the first, but it would change every path and break installs by repo path, for a benefit that only a directory submission needs. This repo ships through `claude plugin marketplace add Ballganda/BG-skills`, which plain validation covers.
 
-The official listing points at this repo's git URL and reads `.claude-plugin/plugin.json` directly, so it does not depend on `.claude-plugin/marketplace.json`. That file is retained only as a fallback for installing the repo directly (an unreleased commit, or a fork).
-
-Verified 2026-08-05, on Claude Code 2.1.222, against the live listing:
-
-- `claude plugins install mattpocock-skills` resolves with no marketplace added first, and reports `mattpocock-skills@claude-plugins-official`.
-- `claude plugin details mattpocock-skills` then reports version 1.2.0 and loads the promoted skills.
-- The listing's `source` is `{"source": "url", "url": "https://github.com/mattpocock/skills.git", "sha": …}`: the **sha is pinned**, so a release reaches installed users when that pin moves, not the moment we tag. At the time of writing the pin sits two commits behind `main`, which is why it lists 22 skills rather than the 24 in `plugin.json`.
-- The in-session `/plugin install mattpocock-skills` was **not** exercised: `/plugin` is unavailable in headless (`claude -p`) sessions. It runs the same resolver as the CLI, and the documented example form is `/plugin install <name>@claude-plugins-official`.
-
-## Update, 2026-10-07
-
-The Codex constraint above no longer holds. Codex `main` accepts a `skills` string array and falls back to `.claude-plugin/` when there is no `.codex-plugin/` ([manifest.rs](https://github.com/openai/codex/blob/main/codex-rs/core-plugins/src/manifest.rs)). Codex still drops symlinks.
-
-On Codex 0.161.0, the `@mattpocock` marketplace install loads the promoted model-invoked skills and nothing from `misc/` or `in-progress/`. Copilot CLI reads the same manifests and reports "Installed 27 skills".
-
-## Update, 2026-10-08: managed installs first
-
-`@mattpocock` is now the lead route on Codex, Copilot and VS Code, at the cost of a one-time opt-in on Copilot. Claude Code stays on `claude-plugins-official`, as in the 2026-08-05 update, because it auto-updates by default and needs no `marketplace add`.
-
-The version invariant above now applies to every managed route. `npm run version` already keeps it by running `scripts/sync-plugin-version.mjs`. `marketplace.json` has no `version` field, so it can't drift.
-
-## Update, 2026-11-06: Claude Code installs from this repo's marketplace
-
-This repo is now a fork, renamed `bg-skills` and owned as `Ballganda/BG-skills`. The `claude-plugins-official` listing from the 2026-08-05 update belongs to the upstream project: it ships upstream's plugin from upstream's repo. Installing from it would give a fork user the upstream plugin, not this one.
-
-Claude Code therefore moves onto the same route as every other managed install: `claude plugin marketplace add Ballganda/BG-skills`, then `claude plugin install bg-skills@bg-skills`. `.claude-plugin/marketplace.json` is no longer just a fallback; it is the route for every agent. The cost is a one-time opt-in: Claude Code leaves auto-update off for marketplaces other than its official ones, so the user enables it once from `/plugin`. The install wording lives in [.agents/install-block.md](../install-block.md).
-
-## Update, 2026-11-10: root layout stays; strict validation is not a gate
-
-`claude plugin validate . --strict` now fails on two warnings: `CLAUDE.md` at the plugin root (it is maintainer context, not loaded for users) and a missing icon. We considered moving the plugin into a `plugin/` subfolder so the root `CLAUDE.md` falls outside it. Claude Code, Codex and Copilot all resolve a `./plugin` marketplace source, so the move was possible, but it would change every path and break installs by repo path for a benefit that only a directory submission needs. This fork ships only to its owner's machines through `claude plugin marketplace add Ballganda/BG-skills`, which plain validation covers.
-
-So the plugin stays at the root, the gate is `claude plugin validate .` without `--strict`, and the `CLAUDE.md` warning is expected. If a directory listing is ever wanted, split a publish repo from this maintainer repo rather than nesting the plugin.
+So the gate is `claude plugin validate .` without `--strict`, and the `CLAUDE.md` warning is expected. If a directory listing is ever wanted, split a publish repo from this maintainer repo rather than nesting the plugin.

@@ -48,10 +48,14 @@ interface ThemeConfig {
 
 ## Prior requests
 
-- #42: "Add dark mode support"
-- #87: "Night theme for accessibility"
-- #134: "Dark theme option"
+- [owner/repo#42](https://github.com/owner/repo/issues/42): "Add dark mode support"
+- [owner/repo#87](https://github.com/owner/repo/issues/87): "Night theme for accessibility"
+- [owner/repo#134](https://github.com/owner/repo/issues/134): "Dark theme option"
 ```
+
+### Listing prior requests
+
+Write each prior request as a full link to the issue in this repo's tracker, labelled `owner/repo#N`, followed by the issue title in quotes. Never a bare `#N`: in a fork, or in a note copied from another project, a bare number resolves to an unrelated issue in this repo.
 
 ### Naming the file
 
@@ -91,7 +95,7 @@ The flow:
 
 1. Maintainer decides a feature request is out of scope
 2. Check if a matching `.out-of-scope/` file already exists
-3. If yes: append the new issue to the "Prior requests" list
+3. If yes: append the new issue to the "Prior requests" list, as a full issue link
 4. If no: create a new file with the concept name, decision, reason, and first prior request
 5. Post a comment on the issue explaining the decision and mentioning the `.out-of-scope/` file
 6. Close the issue with the `wontfix` label

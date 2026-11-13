@@ -5,7 +5,3 @@
 ## Why this is out of scope
 
 `writing-for-agents` is more than a style guide. It defines what a no-op instruction is and what makes a good skill, and `retro` uses those definitions to judge the steering files it reads, before it writes anything. A retro that only reads and reports still needs it. Load it lazily and the No-ops and Skills candidates get judged with no yardstick.
-
-## Prior requests
-
-- #1238: "retro: load writing-for-agents only before writing" (closed)

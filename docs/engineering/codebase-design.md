@@ -49,11 +49,17 @@ Two supporting files go further, and the skill reads them on demand rather than 
 
 **How do I actually build a deep module in TypeScript?**
 
-This is the most-asked question about the skill and the skill does not answer it. It defines what a deep module *is*; it says nothing about how to stop a stray import from reaching past the interface. [Issue #458](https://github.com/mattpocock/skills/issues/458) put it plainly: "let's say we're happy with the interface, it hides the details, etc. But how do we enforce it? I think without linting or clear guardrails, humans and LLMs alike will start making it messy over time." The answer in that thread gave three options: wrap it in a class or IIFE and accept that the class gets enormous; make it a package in a monorepo and accept the monorepo tooling; or use a linter like [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) to forbid imports that bypass the interface. Of these mechanisms, Effect is the best and dependency-cruiser the second-best. There is a `setup-ts-deep-modules` skill in the repo's `in-progress/` bucket that lays down a `src/packages/<name>/index.ts` convention, but it is a beta-channel skill with no docs page, and it ships no lint rule.
+This skill does not answer it. It defines what a deep module *is*; it says nothing about how to stop a stray import from reaching past the interface. Without a guardrail, humans and agents alike erode the interface over time. There are three ways to enforce it:
+
+- Wrap the module in a class or IIFE, and accept that the class gets enormous.
+- Make it a package in a monorepo, and accept the monorepo tooling.
+- Use a linter like [dependency-cruiser](https://github.com/sverweij/dependency-cruiser) to forbid imports that bypass the interface.
+
+The `setup-ts-deep-modules` skill in the repo's `in-progress/` bucket takes the third route. It installs dependency-cruiser with rules that let outside code import only a package's root files under `src/packages/<name>/`, keep everything in its subfolders private, and forbid cycles. It is a beta-channel skill with no docs page.
 
 **I pointed a session at it and it burned 100k tokens redesigning things I never asked about.**
 
-This is a known problem, filed as [issue #449](https://github.com/mattpocock/skills/issues/449). The skill is model-invoked and describes itself as vocabulary, but nothing in it hard-stops an agent from treating it as a runnable process. Told to "resume in /codebase-design and drive the open decisions", an agent picked the part of the skill closest to a process: the parallel sub-agents in `DESIGN-IT-TWICE.md`. It re-explored code a previous session had already mapped, and worked for a long time before it asked anything. This skill has none of the guardrails a driver skill has (checkpoints, one question at a time, no auto-advance), because it is a reference. The workaround is to invoke a driver skill (`/grill`, `/improve-codebase-architecture` or `/tdd`) and use `codebase-design` as its vocabulary. The issue is open.
+That can happen. The skill is model-invoked and describes itself as vocabulary, but nothing in it hard-stops an agent from treating it as a runnable process. Told to "resume in /codebase-design and drive the open decisions", an agent picked the part of the skill closest to a process: the parallel sub-agents in `DESIGN-IT-TWICE.md`. It re-explored code a previous session had already mapped, and worked for a long time before it asked anything. This skill has none of the guardrails a driver skill has (checkpoints, one question at a time, no auto-advance), because it is a reference. The workaround is to invoke a driver skill (`/grill`, `/improve-codebase-architecture` or `/tdd`) and use `codebase-design` as its vocabulary.
 
 **Where did `design-an-interface` go? And is there an `/interface-design` skill?**
 
@@ -61,19 +67,15 @@ This skill replaced `design-an-interface` and took over its content. Nothing is 
 
 **Isn't this a file-structure convention, such as folders, barrel files, feature slices?**
 
-No. People have pushed back on this many times, and the skill has not changed. [Issue #95](https://github.com/mattpocock/skills/issues/95) proposed a formalised fractal-tree file structure as the concrete implementation of deep modules; the reply was that the two are independent: "deep modules are about the design of the interface and accessing through a strict interface, no matter what the file system looks like. It seems perfectly possible that you could have shallow modules with this approach." The same came up in #458: "I think you might be tying the concept of modules too closely to the file system. The file system can certainly be a useful hint to the shape of modules, but there's no need to use the file system in the construction of deep modules." The glossary defines **module** as scale-agnostic on purpose.
+No. Deep modules are about the design of the interface and reaching the module only through it, whatever the file system looks like. A tidy folder tree can still hold shallow modules. The file system can hint at a module's shape, but the skill never uses it to define one. The glossary defines **module** as scale-agnostic on purpose: a function, class, package, or tier-spanning slice.
 
 **Does `tdd` actually use this vocabulary?**
 
 It does now, but for a long time it did not. v1.0 removed the inline deep-module notes from `tdd` in favour of this shared skill, but nobody added a pointer to replace them, so `tdd` defined "seam" for itself and referenced nothing. The pointer is now in `tdd`, and the agent follows it when the open question is the shape of the interface, not the tests. `tdd` still owns "seam" as the boundary you *test* at; this skill owns the module shape behind it.
 
-**Does the design-it-twice pattern work outside Claude Code?**
-
-Not cleanly. `DESIGN-IT-TWICE.md` says "spawn 3+ sub-agents in parallel using the Agent tool", and "Agent" is the name of a Claude Code tool. The repo ships metadata for other harnesses, including Codex, and those may have no tool with that name. So the parallel-design phase is less portable than the skill's metadata suggests. [Issue #564](https://github.com/mattpocock/skills/issues/564) tracks this, and it is open.
-
 **Can I add my own concepts to the glossary, such as connascence, module secrets, progressive disclosure?**
 
-People have proposed those. [Issue #180](https://github.com/mattpocock/skills/issues/180) adds Parnas's module secrets and Page-Jones's connascence as a naming layer for *what* is leaking across a seam, with a working diff attached; [issue #303](https://github.com/mattpocock/skills/issues/303) proposes progressive disclosure inside the implementation, so a module that is deep at its public interface also has structure inside it. Both are open and unmerged. The shipped glossary is small on purpose, and the skill itself gives the reason: consistent language is the whole point, and a term nobody uses consistently is worse than no term.
+None of them is in the shipped glossary. Parnas's module secrets and Page-Jones's connascence would name *what* is leaking across a seam; progressive disclosure would add structure inside a module that is already deep at its public interface. The skill tells the agent to use its own terms exactly, so adding one means editing the skill. The shipped glossary is small on purpose, and the skill itself gives the reason: consistent language is the whole point, and a term nobody uses consistently is worse than no term.
 
 ## It's working if
 

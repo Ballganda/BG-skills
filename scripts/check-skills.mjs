@@ -296,6 +296,86 @@ function checkPluginIcon({ fail }) {
   if (png.length > 2 * 1024 * 1024) fail(`${iconRel}: plugin icon is ${png.length} bytes, over 2 MB`);
 }
 
+// Active files point at BG-skills, not the upstream project this repo was forked from.
+// An upstream sync can bring pointers back, so this check catches them.
+const upstreamPointers = [
+  "github.com/mattpocock",
+  "skills.sh/mattpocock",
+  "mattpocock/skills",
+  "mattpocock-skills",
+  "@mattpocock",
+  "claude-plugins-official",
+];
+
+// Scanned: these trees, every Markdown file at the root, and LICENSE.
+const upstreamScanTrees = ["skills", "docs", ".agents", ".out-of-scope", ".github", ".changeset"];
+
+// One entry per allowed spot. `line` limits it to matching lines, `fromLine` to lines at or
+// after that 1-based number; an entry with neither allows the whole file.
+export const upstreamAllowlist = [
+  { file: "LICENSE", reason: "MIT notice: the original copyright must stay" },
+  { file: "README.md", line: /^Forked from \[mattpocock\/skills\]/, reason: "MIT attribution: the fork credit" },
+  {
+    file: "README.md",
+    line: /github\.com\/mattpocock\/course-video-manager\//,
+    reason: "outside example: the original author's glossary, not a pointer to the project",
+  },
+  { file: "CHANGELOG.md", fromLine: 2, reason: "released entries stay as released; the heading is not allowed" },
+  { file: ".changeset/bg-skills-rename.md", reason: "records the fork's rename itself" },
+  {
+    file: ".agents/install-block.md",
+    line: /^Every managed route, Claude Code included, installs from this repo's own marketplace/,
+    reason: "says the official marketplace lists upstream and is not a route here",
+  },
+];
+
+// A bare `#N` in an out-of-scope note can't be told apart from an upstream issue number,
+// so prior requests are full issue links. `owner/repo#N` link labels are not bare.
+const bareIssueRef = /(?<![\w/#&])#\d+\b/;
+
+function upstreamScanFiles() {
+  const files = [];
+  const walk = (rel) => {
+    let entries;
+    try {
+      entries = readdirSync(join(root, rel), { withFileTypes: true });
+    } catch {
+      return; // a tree this checkout doesn't have holds no pointers
+    }
+    for (const entry of entries) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) walk(child);
+      else if (entry.isFile()) files.push(child);
+    }
+  };
+  upstreamScanTrees.forEach(walk);
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.isFile() && (entry.name.endsWith(".md") || entry.name === "LICENSE")) files.push(entry.name);
+  }
+  return files;
+}
+
+const upstreamAllowed = (file, line, number) =>
+  upstreamAllowlist.some(
+    (entry) =>
+      entry.file === file &&
+      (entry.line ? entry.line.test(line) : entry.fromLine ? number >= entry.fromLine : true),
+  );
+
+function checkUpstreamPointers({ fail }) {
+  for (const file of upstreamScanFiles()) {
+    const lines = readFileSync(join(root, file), "utf8").split("\n");
+    lines.forEach((line, i) => {
+      const pointer = upstreamPointers.find((p) => line.includes(p));
+      if (pointer && !upstreamAllowed(file, line, i + 1))
+        fail(`${file}:${i + 1}: upstream pointer ${pointer}; point at Ballganda/BG-skills instead`);
+      const bare = file.startsWith(".out-of-scope/") && line.match(bareIssueRef);
+      if (bare)
+        fail(`${file}:${i + 1}: bare issue reference ${bare[0]}; write a full Ballganda/BG-skills issue link`);
+    });
+  }
+}
+
 const checks = [
   checkBoundaryLines,
   checkDecompRequiredLines,
@@ -308,6 +388,7 @@ const checks = [
   checkInvocation,
   checkReviewSmellPointer,
   checkPluginIcon,
+  checkUpstreamPointers,
 ];
 
 function main() {

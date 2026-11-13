@@ -9,7 +9,3 @@ A second skill (or a `--verify` flag) for checking whether `docs/agents/*.md` ar
 The intended workflow is: **run `/bg-setup` and tell it to verify your current setup.** The skill is prompt-driven, so the maintainer can scope it to a verification pass ("don't rewrite anything, just check my existing files against the current seed templates and report drift") without needing a separate code path. Adding a flag or a sibling skill would split the surface area of a feature that's already expressible through the natural-language entry point.
 
 Keeping configuration management to a single skill also avoids the maintenance cost of two skills drifting from each other when seed templates evolve.
-
-## Prior requests
-
-- #106: Feature request: verify/check mode for bg-setup
