@@ -61,9 +61,9 @@ Worktrees don't remove collisions; they postpone them to merge time. A blocking 
 
 This is a known problem on GitHub. The tracker's blocked-by count only drops when a blocker *closes*, and tickets typically close when the PR merges, which is the end of the run. The tracker is the right source for the starting graph but a stale one mid-run. Tell the orchestrator to track which tickets have merged into the integration branch itself and compute the frontier from that.
 
-**Does this replace Sandcastle or an AFK script?**
+**Does this replace an AFK script?**
 
-No. People ask because the skills now reach into implementation: "is Sandcastle still relevant? Your skills now seem to be able to handle implementation as well." `implement-spec` puts an agent in charge of orchestration inside one harness session, which needs no infrastructure and lets you watch and steer. For work that is truly AFK, a deterministic loop ([Sandcastle](https://github.com/mattpocock/sandcastle), a shell script, a CI job) is faster, cheaper, and more reliable, because no agent makes the orchestration decisions.
+No. `implement-spec` puts an agent in charge of orchestration inside one harness session, which needs no infrastructure and lets you watch and steer. For work that is truly AFK, a deterministic loop (a shell script, a CI job) is faster, cheaper, and more reliable, because no agent makes the orchestration decisions.
 
 **A ticket's key test was skipped inside its worktree, and it reported green.**
 
