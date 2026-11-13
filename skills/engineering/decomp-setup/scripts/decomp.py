@@ -7,6 +7,7 @@ Standard library only. Run from the project root: python tools/decomp.py <cmd>.
 """
 import argparse
 import codecs
+import collections
 import contextlib
 import hashlib
 import json
@@ -22,6 +23,9 @@ from pathlib import Path
 
 TIERS = [("TINY", 25), ("SMALL", 256), ("MEDIUM", 511)]  # else LARGE
 MATCHED = {"matched", "integrated", "revalidated"}
+READY = ("open", "regressed")  # work a writer may claim
+BUSY = ("claimed", "bytes-match", "matched")  # a writer holds the unit
+FINISHED = ("integrated", "revalidated")  # merged into the integration branch
 STATUSES = {"open", "claimed", "blocked-reference", "bytes-match"} | MATCHED | {"regressed"}
 CATEGORIES = {
     "build-fail", "reference-gap", "signedness", "width", "operator", "control-flow",
@@ -131,6 +135,15 @@ def function_keys(functions):
         seen[key] = f
         keys.append(key)
     return keys
+
+
+def read_inventory():
+    """The one reader of inventory.json: its units and functions, each function with its `key` and ticket `id` set."""
+    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
+        f["key"] = key
+        f["id"] = f"{f['unit']}-{key}"
+    return inv
 
 
 # ---------- environment ----------
@@ -316,12 +329,18 @@ def environment_stamp(tc):
     return sha("\n".join(stamp).encode())
 
 
+# What doctor found on this machine. edition: the recognised accepted edition. unusable: tool
+# name to why it failed, for tools outside doctor's need. vars: the tool environment variables
+# for adapters and tool commands. lines: doctor's report lines (none when the cache was trusted).
+Environment = collections.namedtuple("Environment", "edition unusable vars lines")
+
+
 def doctor(full=True, need=None):
-    """Stop unless the target, host prerequisites, and tools equal toolchain.json. Returns the report lines.
+    """Stop unless the target, host prerequisites, and tools equal toolchain.json. Returns the Environment.
 
     need names the tools that must pass (None: all of them). A tool outside need that fails
-    is reported and left in toolchain()["unusable"], so only the units built with it stop.
-    Leaves the recognised edition in toolchain()["target"]["edition"].
+    is reported and returned in the Environment's unusable, so only the units built with it stop.
+    The cached toolchain is never changed.
 
     full=False trusts the last check that passed in full while toolchain.json, the target,
     and every required file keep the same size and modification time.
@@ -329,23 +348,22 @@ def doctor(full=True, need=None):
     tc = toolchain()
     loc = local_dir()
     tgt = tc["target"]
-    tc["unusable"] = {}
+    unusable = {}
     stamp = environment_stamp(tc)
     cache = loc / "doctor.json"
     if not full and cache.exists():
         last = json.loads(cache.read_text(encoding="utf-8"))
         edition = edition_named(last.get("edition"))
         if last.get("ok") == stamp and edition:
-            tgt["edition"] = edition
-            return []
-    bad, lines = [], []
+            return Environment(edition, {}, tool_env(), [])
+    bad, lines, edition = [], [], None
     if not tgt["path"]:
         bad.append('target: no path; set "target" in .decomp/local.json or DECOMP_TARGET')
     elif not Path(tgt["path"]).is_file():
         bad.append(f"target: {tgt['path']} not found")
     else:
-        tgt["edition"], line = recognise(tgt)
-        (lines if tgt["edition"] else bad).append(line)
+        edition, line = recognise(tgt)
+        (lines if edition else bad).append(line)
     env = tool_env()
     behind = prerequisite_failure(tc, env, lines)
     if behind:
@@ -358,7 +376,7 @@ def doctor(full=True, need=None):
             elif need is None or t["name"] in need:
                 bad.append(why)
             else:
-                tc["unusable"][t["name"]] = why
+                unusable[t["name"]] = why
                 lines.append(f"not usable here: {why}")
     if bad:
         cache.unlink(missing_ok=True)
@@ -366,17 +384,17 @@ def doctor(full=True, need=None):
             print(f"ENVIRONMENT: {b}", file=sys.stderr)
         die("this machine does not match toolchain.json; nothing was built or recorded. "
             "Fix it with `decomp.py provision` or the user's own install, never by editing toolchain.json.", ENV_EXIT)
-    if tc["unusable"]:
+    if unusable:
         cache.unlink(missing_ok=True)
     else:
         loc.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": tgt["edition"]["name"]}), encoding="utf-8")
-    return lines
+        cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": edition["name"]}), encoding="utf-8")
+    return Environment(edition, unusable, env, lines)
 
 
-def edition_differs(t):
-    """True when the recognised edition holds ticket t's function differently. Needs doctor first."""
-    held = toolchain()["target"]["edition"].get("differs", [])
+def edition_differs(environment, t):
+    """True when doctor's recognised edition holds ticket t's function differently."""
+    held = environment.edition.get("differs", [])
     return (t["id"] in held or t["id"].split("-", 1)[1] in held
             or same_address(t["address"]) in {same_address(a) for a in held if ":" in a or HEX.fullmatch(a)})
 
@@ -395,16 +413,16 @@ def compiler_for(unit):
     return name
 
 
-def tools_needed(units):
-    """Every tool but the compilers that build none of these units."""
+def tools_needed(compilers):
+    """Every tool but the compilers outside these ones (each from compiler_for)."""
     every = {CFG.get("compiler", "")} | set(CFG.get("unit_compilers", {}).values())
-    return {t["name"] for t in toolchain()["tools"]} - (every - {compiler_for(u) for u in units})
+    return {t["name"] for t in toolchain()["tools"]} - (every - set(compilers))
 
 
-def stop_if_edition_differs(t):
-    """After doctor: stop with the environment exit when this machine's edition cannot judge ticket t."""
-    if edition_differs(t):
-        e = toolchain()["target"]["edition"]
+def stop_if_edition_differs(environment, t):
+    """Stop with the environment exit when doctor's edition cannot judge ticket t."""
+    if edition_differs(environment, t):
+        e = environment.edition
         print(f"ENVIRONMENT: edition '{e['name']}' holds {t['id']} ({t['address']}) differently from the "
               "contract's expected bytes", file=sys.stderr)
         die("nothing was built or recorded; this function is matched only on an edition that holds it unchanged.",
@@ -412,7 +430,7 @@ def stop_if_edition_differs(t):
 
 
 def cmd_doctor(a):
-    for line in doctor(full=True):
+    for line in doctor(full=True).lines:
         print(line)
     print("doctor: ok")
 
@@ -507,14 +525,6 @@ def all_tickets(root=None):
     return out
 
 
-def set_status(tid, status, **extra):
-    assert status in STATUSES
-    fields, body = read_ticket(tid)
-    fields["status"] = status
-    fields.update(extra)
-    write_ticket(fields, body)
-
-
 def append_note(tid, text):
     fields, body = read_ticket(tid)
     if "## Notes" not in body:
@@ -536,11 +546,117 @@ def append(name, rec):
         f.write(json.dumps(rec, sort_keys=True) + "\n")
 
 
+def next_attempt_id(tid):
+    """The id of the ticket's next attempt: one numbering for verify and a failed audit."""
+    return f"{tid}-a{1 + sum(r['ticket'] == tid for r in records('attempts.jsonl')):03d}"
+
+
+def event_out_of_order(tid, reason):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "out-of-order", "reason": reason})
+
+
+def event_integrated(tid):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "integrated"})
+
+
+def event_revalidated(tid):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "revalidated"})
+
+
+def event_regressed(tid):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "regressed"})
+
+
+def event_rejected_repair(ref):
+    append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
+
+
+def event_link(result, edition, units, source_bytes, in_scope_bytes, **more):
+    append("events.jsonl", dict({"unix": now(), "ref": CFG["integration_branch"], "event": "link", "edition": edition,
+                                 "units": units, "source_bytes": source_bytes, "in_scope_bytes": in_scope_bytes,
+                                 "result": result}, **more))
+
+
 def records(name):
     p = ROOT / "ledger" / name
     if not p.exists():
         return []
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+# ---------- ticket lifecycle ----------
+
+UNCLAIMED = {"claimed_by": "", "claimed_at": ""}
+EVENTS = {  # event: (statuses it may leave, the status it reaches, fields it writes)
+    "claim": (READY, "claimed", {}),
+    "release": (("claimed",), "open", UNCLAIMED),
+    "block": (("claimed",), "blocked-reference", UNCLAIMED),
+    "unblock": (("blocked-reference",), "open", {}),
+    "bytes-match": (("claimed",), "bytes-match", {}),
+    "audit-pass": (("bytes-match",), "matched", {}),
+    "audit-fail": (("bytes-match",), "claimed", {}),
+    "integrate": (("matched",), "integrated", UNCLAIMED),
+    "revalidate-pass": (("integrated", "regressed"), "revalidated", {}),
+    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", {}),
+}
+MOVES = {(s, e): to for e, (froms, to, _) in EVENTS.items() for s in froms}  # (status, event): new status
+
+
+def may_move(t, event):
+    return (t["status"], event) in MOVES
+
+
+def refuse_unless(t, event):
+    """Stop, exit 1, unless the ticket `t` may take `event`: one message shape for every command."""
+    if not may_move(t, event):
+        froms = EVENTS[event][0]
+        allowed = " or ".join(froms) if len(froms) < 3 else ", ".join(froms[:-1]) + " or " + froms[-1]
+        die(f"{t['id']} is {t['status']}; {event} needs {allowed}")
+
+
+def record_audit_pass(t, last, auditor):
+    if not any(m["ticket"] == t["id"] for m in records("matches.jsonl")):  # a match is recorded once
+        append("matches.jsonl", {"ticket": t["id"], "unix": now(), "attempt": last["id"],
+                                 "model": last["model"], "size": t["size"], "auditor": auditor})
+
+
+def record_audit_fail(t, last, auditor):
+    append("attempts.jsonl", dict(last, id=next_attempt_id(t["id"]), unix=now(), result="audit-fail",
+                                  category="unknown", auditor=auditor))
+
+
+RECORDS = {  # event: what the move writes to the ledger
+    "audit-pass": record_audit_pass,
+    "audit-fail": record_audit_fail,
+    "integrate": lambda t: event_integrated(t["id"]),
+    "revalidate-pass": lambda t: event_revalidated(t["id"]),
+    "regress": lambda t: event_regressed(t["id"]),
+}
+
+
+def move(tid, event, by=None, **args):
+    """Move ticket `tid` by `event`, the one writer of a ticket's status.
+
+    Refuses an illegal move, takes the unit lock on a claim (`by` names the claimant), writes the new status
+    and fields, releases the unit lock when the move leaves the claim, and records the move's ledger event
+    (`args` go to that record). Returns the new status.
+    """
+    fields, body = read_ticket(tid)
+    refuse_unless(fields, event)
+    before, after = fields["status"], MOVES[(fields["status"], event)]
+    assert after in STATUSES
+    lock = f"unit-{fields['unit']}"
+    if after in BUSY and before not in BUSY:
+        take_lock(lock, by)
+        fields.update(claimed_by=by, claimed_at=str(now()))
+    fields["status"] = after
+    fields.update(EVENTS[event][2])
+    write_ticket(fields, body)
+    if before in BUSY and after not in BUSY:
+        lockfile(lock).unlink(missing_ok=True)
+    if event in RECORDS:
+        RECORDS[event](fields, **args)
+    return after
 
 
 # ---------- build and compare ----------
@@ -672,18 +788,18 @@ def scan(text):
     return bad
 
 
-def fill(template, t, obj, report, tree):
+def fill(template, t, compiler, obj, report, tree):
     return expand(
         template, id=t["id"], unit=t["unit"], source=t["source"], expected=t["expected"],
         address=t["address"], obj=obj, report=report,
-        symbols=Path(tree) / SYMBOLS, compiler=compiler_for(t["unit"]),
+        symbols=Path(tree) / SYMBOLS, compiler=compiler,
         tools=Path(tree) / "tools", python=sys.executable,
     )
 
 
-def adapter(template, t, obj, report, tree, env):
+def adapter(template, t, compiler, obj, report, tree, env):
     """Run one adapter command. A tool's output is in the tool's encoding, never assumed to be this system's."""
-    return subprocess.run(fill(template, t, obj, report, tree), shell=True, cwd=tree, env=env,
+    return subprocess.run(fill(template, t, compiler, obj, report, tree), shell=True, cwd=tree, env=env,
                           capture_output=True, text=True, errors="replace")
 
 
@@ -692,8 +808,8 @@ def marker_count(text, tid):
     return len(re.findall(r"(?://|/\*)[ \t]*@decomp " + re.escape(tid) + r"(?![\w.-])", text))
 
 
-def build_and_diff(t, tree, report):
-    """Build t's unit in tree and compare. Returns (result, differ_bytes, log)."""
+def build_and_diff(environment, t, compiler, tree, report):
+    """Build t's unit in tree with compiler (from compiler_for) and compare. Returns (result, differ_bytes, log)."""
     src = Path(tree) / t["source"]
     if not src.exists():
         return "build-fail", None, f"missing {t['source']}"
@@ -709,11 +825,10 @@ def build_and_diff(t, tree, report):
     if bad:
         return "guardrail", None, "\n".join(bad)
     obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
-    env = tool_env()
-    b = adapter(CFG["build"], t, obj, report, tree, env)
+    b = adapter(CFG["build"], t, compiler, obj, report, tree, environment.vars)
     if b.returncode != 0:
         return "build-fail", None, (b.stderr or b.stdout)[-4000:]
-    d = adapter(CFG["diff"], t, obj, report, tree, env)
+    d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment.vars)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -752,9 +867,7 @@ class Worktree:
 # ---------- commands ----------
 
 def cmd_gen_specs(a):
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
-    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
-        f["key"] = key
+    inv = read_inventory()
     funcs = sorted(inv["functions"], key=lambda f: address_order(f["address"]))
     for u in inv["units"]:
         mine = [f for f in funcs if f["unit"] == u["id"]]
@@ -782,10 +895,11 @@ def cmd_gen_specs(a):
 
 
 def cmd_gen_tickets(a):
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    inv = read_inventory()
     units = {u["id"]: u for u in inv["units"]}
     made = kept = 0
-    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
+    for f in inv["functions"]:
+        key = f["key"]
         if f["scope"] != "in":
             continue
         tid = f"{f['unit']}-{key}"
@@ -811,9 +925,9 @@ def cmd_next(a):
     if bool(a.first) != bool(a.reason):
         die("next: --first and --reason go together")
     ts = [t for t in all_tickets()]
-    busy = {t["unit"] for t in ts if t["status"] in ("claimed", "bytes-match", "matched")}
-    ready = [t for t in ts if t["status"] in ("open", "regressed") and t["unit"] not in busy]
-    order = {"TINY": 0, "SMALL": 1, "MEDIUM": 2, "LARGE": 3}
+    busy = {t["unit"] for t in ts if t["status"] in BUSY}
+    ready = [t for t in ts if t["status"] in READY and t["unit"] not in busy]
+    order = {name: i for i, name in enumerate([n for n, _ in TIERS] + ["LARGE"])}
     ready.sort(key=lambda t: (order[t["tier"]], int(t["size"]), address_order(t["address"])))
     if a.first:
         head = next((t for t in ready if t["id"] == a.first), None)
@@ -827,7 +941,7 @@ def cmd_next(a):
             picked.append(t)
             units.add(t["unit"])
     if a.first:
-        append("events.jsonl", {"unix": now(), "ticket": a.first, "event": "out-of-order", "reason": a.reason})
+        event_out_of_order(a.first, a.reason)
     for t in picked[: a.n]:
         print(f"{t['id']} {t['tier']} {t['size']}B {ticket_path(t['id']).relative_to(ROOT).as_posix()}")
 
@@ -848,11 +962,7 @@ def take_lock(name, by):
 
 
 def cmd_claim(a):
-    t, _ = read_ticket(a.id)
-    if t["status"] not in ("open", "regressed"):
-        die(f"{a.id} is {t['status']}, not open")
-    take_lock(f"unit-{t['unit']}", a.by)
-    set_status(a.id, "claimed", claimed_by=a.by, claimed_at=str(now()))
+    move(a.id, "claim", by=a.by)
     print(f"claimed {a.id}")
 
 
@@ -860,48 +970,44 @@ def cmd_release(a):
     t, _ = read_ticket(a.id)
     if a.to not in ("open", "blocked-reference"):
         die("release --to open|blocked-reference")
-    if t["status"] == "claimed":
-        set_status(a.id, a.to, claimed_by="", claimed_at="")
-        lockfile(f"unit-{t['unit']}").unlink(missing_ok=True)
-    elif a.to == "open" and t["status"] == "blocked-reference":
-        set_status(a.id, "open")
-    else:
-        die(f"{a.id} is {t['status']}; nothing to release")
-    print(f"{a.id} -> {read_ticket(a.id)[0]['status']}")
+    event = ("block" if a.to == "blocked-reference" else
+             "unblock" if t["status"] == "blocked-reference" else "release")
+    print(f"{a.id} -> {move(a.id, event)}")
 
 
-def run_adapter(name, **values):
+def run_adapter(name, environment, **values):
     """Run an adapter that reports to the caller, in the project root. Exit 1, naming its exit code, when it fails.
 
     Its output goes straight through, in whatever encoding the tool writes.
     """
     if not CFG.get(name):
         die(f"decomp.json has no `{name}` adapter command; run /decomp-setup")
-    code = subprocess.run(tool_command(CFG[name], **values), shell=True, cwd=ROOT, env=tool_env()).returncode
+    code = subprocess.run(tool_command(CFG[name], **values), shell=True, cwd=ROOT, env=environment.vars).returncode
     if code:
         die(f"the {name} adapter failed (exit {code})")
 
 
 def cmd_inventory(a):
-    doctor(full=True)
+    environment = doctor(full=True)
     if git("tag", "--list", "decomp-start").strip() and not a.redo:
         die("the decomp-start tag exists, so inventory.json and expected/ are frozen; nothing was written. "
             "Redoing the inventory is /decomp-start's redo flow: with the user's go-ahead, run `inventory --redo`.", 2)
-    run_adapter("inventory")
+    run_adapter("inventory", environment)
 
 
 def cmd_disasm(a):
     t, _ = read_ticket(a.id)
-    doctor(full=False, need=tools_needed([t["unit"]]))
-    run_adapter("disasm", expected=t["expected"], address=t["address"])
+    environment = doctor(full=False, need=tools_needed([compiler_for(t["unit"])]))
+    run_adapter("disasm", environment, expected=t["expected"], address=t["address"])
 
 
 def cmd_check(a):
     t, _ = read_ticket(a.id)
-    doctor(full=False, need=tools_needed([t["unit"]]))
-    stop_if_edition_differs(t)
+    compiler = compiler_for(t["unit"])
+    environment = doctor(full=False, need=tools_needed([compiler]))
+    stop_if_edition_differs(environment, t)
     report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
-    result, n, log = build_and_diff(t, os.getcwd(), report)
+    result, n, log = build_and_diff(environment, t, compiler, os.getcwd(), report)
     print(json.dumps({"result": result, "differ_bytes": n, "report": report}))
     if log:
         print(log)
@@ -910,18 +1016,18 @@ def cmd_check(a):
 def cmd_verify(a):
     frozen_check()
     t, _ = read_ticket(a.id)
-    doctor(need=tools_needed([t["unit"]]))
-    if t["status"] != "claimed":
-        die(f"{a.id} is {t['status']}; verify needs a claimed ticket")
+    compiler = compiler_for(t["unit"])
+    environment = doctor(need=tools_needed([compiler]))
+    refuse_unless(t, "bytes-match")
     if a.category == "none":  # a writer that matched reports no category
         a.category = None
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
-    stop_if_edition_differs(t)
+    stop_if_edition_differs(environment, t)
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
     stamp = now()
-    aid = f"{a.id}-a{1 + sum(r['ticket'] == a.id for r in records('attempts.jsonl')):03d}"
+    aid = next_attempt_id(a.id)
     evidence = ledger(f"evidence/{aid}.txt")
     rec = {"id": aid, "ticket": a.id, "unix": stamp, "model": a.model, "tier": t["tier"],
            "category": a.category or "", "differ_bytes": None, "evidence": evidence.relative_to(ROOT).as_posix()}
@@ -938,7 +1044,7 @@ def cmd_verify(a):
             dest = Path(tree) / t["source"]
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(src)
-            result, n, log = build_and_diff(t, tree, str(evidence))
+            result, n, log = build_and_diff(environment, t, compiler, tree, str(evidence))
     rec.update(result=result, differ_bytes=n, source_sha256=sha(src))
     if result == "bytes-match":
         rec["category"] = ""
@@ -949,45 +1055,35 @@ def cmd_verify(a):
             f.write(log + "\n")
     append("attempts.jsonl", rec)
     if result == "bytes-match":
-        set_status(a.id, "bytes-match")
+        move(a.id, "bytes-match")
     print(json.dumps({"attempt": aid, "result": result, "differ_bytes": n}))
     sys.exit(0 if result == "bytes-match" else 4)
 
 
 def cmd_audit(a):
     t, _ = read_ticket(a.id)
-    if t["status"] != "bytes-match":
-        die(f"{a.id} is {t['status']}; audit needs bytes-match")
+    refuse_unless(t, f"audit-{a.verdict}")
     last = [r for r in records("attempts.jsonl") if r["ticket"] == a.id][-1]
     branch = a.branch or f"w/{a.id}"
     if a.verdict == "pass" and sha(git_bytes("show", f"{branch}:{t['source']}")) != last["source_sha256"]:
         die("branch changed since verify; record a fail, then verify again", 2)
     if a.verdict == "pass":
-        if not any(m["ticket"] == a.id for m in records("matches.jsonl")):
-            append("matches.jsonl", {"ticket": a.id, "unix": now(), "attempt": last["id"],
-                                     "model": last["model"], "size": t["size"], "auditor": a.auditor})
-        set_status(a.id, "matched")
+        move(a.id, "audit-pass", last=last, auditor=a.auditor)
         print(f"matched {a.id} (attempt {last['id']})")
     else:
-        n = 1 + sum(r["ticket"] == a.id for r in records("attempts.jsonl"))
-        append("attempts.jsonl", dict(last, id=f"{a.id}-a{n:03d}", unix=now(), result="audit-fail",
-                                      category="unknown", auditor=a.auditor))
-        set_status(a.id, "claimed")
+        move(a.id, "audit-fail", last=last, auditor=a.auditor)
         append_note(a.id, f"audit-fail: {a.note or 'see auditor'}")
         print(f"audit failed {a.id}; ticket back to claimed")
 
 
 def cmd_integrate(a):
     t, _ = read_ticket(a.id)
-    if t["status"] != "matched":
-        die(f"{a.id} is {t['status']}; integrate needs matched")
+    refuse_unless(t, "integrate")
     branch = a.branch or f"w/{a.id}"
     r = subprocess.run(["git", "merge-base", "--is-ancestor", branch, CFG["integration_branch"]], cwd=ROOT)
     if r.returncode != 0:
         die(f"{branch} is not merged into {CFG['integration_branch']}")
-    set_status(a.id, "integrated", claimed_by="", claimed_at="")
-    lockfile(f"unit-{t['unit']}").unlink(missing_ok=True)
-    append("events.jsonl", {"unix": now(), "ticket": a.id, "event": "integrated"})
+    move(a.id, "integrate")
     print(f"integrated {a.id}")
 
 
@@ -1100,15 +1196,15 @@ def cmd_revalidate(a):
         frozen_check()
         ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
     built_with = {t["unit"]: compiler_for(t["unit"]) for t in ts}  # stops here, before any status is written
-    doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
-    unusable = toolchain()["unusable"]
+    environment = doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
+    unusable = environment.unusable
     ref = candidate if judging else a.ref or CFG["integration_branch"]
     on_integ = not judging and ref == CFG["integration_branch"]
     if not on_integ and not judging:
         outside = [p for p in git("diff", "--name-only", f"{CFG['integration_branch']}...{ref}").split()
                    if not p.startswith("include/") and p != SYMBOLS]
         if outside:
-            append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
+            event_rejected_repair(ref)
             die(f"{ref} touches paths outside include/ and {SYMBOLS}: {outside}", 5)
     bad, skipped, measured = len(gone), 0, 0
     for i in gone:
@@ -1119,7 +1215,7 @@ def cmd_revalidate(a):
             ts = [t for t in ts if (Path(tree) / t["source"]).exists() and any(
                 Path(h).name.casefold() == name for h in included(tree, t["source"])[0])]
         for t in ts:
-            why = ("this machine's edition holds it differently" if edition_differs(t) else
+            why = ("this machine's edition holds it differently" if edition_differs(environment, t) else
                    f"its compiler '{built_with[t['unit']]}' is not usable here" if built_with[t["unit"]] in unusable
                    else "")
             if why:  # its bytes cannot be measured on this machine, either way
@@ -1128,20 +1224,18 @@ def cmd_revalidate(a):
                 continue
             measured += 1
             report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
-            result, n, _ = build_and_diff(t, tree, report)
+            result, n, _ = build_and_diff(environment, t, built_with[t["unit"]], tree, report)
             ok = result == "bytes-match"
             if not ok:
                 bad += 1
                 print(f"REGRESSED {t['id']} on {ref}: {result} {n}")
             if on_integ:
-                if ok and t["status"] in ("integrated", "regressed"):
-                    set_status(t["id"], "revalidated")
-                    append("events.jsonl", {"unix": now(), "ticket": t["id"], "event": "revalidated"})
+                if ok and may_move(t, "revalidate-pass"):
+                    move(t["id"], "revalidate-pass")
                 elif not ok:
-                    set_status(t["id"], "regressed")
-                    append("events.jsonl", {"unix": now(), "ticket": t["id"], "event": "regressed"})
+                    move(t["id"], "regress")
     if bad and not on_integ and not judging:
-        append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
+        event_rejected_repair(ref)
     print(f"revalidated {measured} on {ref}: {bad} regressed, {skipped} skipped")
     if bad and not (judging and skipped):  # a candidate that was not fully measured is exit 6, whatever it broke
         sys.exit(5)
@@ -1186,15 +1280,15 @@ def cmd_unlock(a):
 LINK_MISMATCH_EXIT = 4  # the linked file is not the edition on this machine
 
 
-def link_plan(ts, inv):
-    """Which units link from source, and the raw blocks of the target around them. Needs doctor first.
+def link_plan(environment, ts, inv):
+    """Which units link from source, and the raw blocks of the target around them, on doctor's environment.
 
     Returns (source units: unit id to its in-scope functions in offset order, blocks, in-scope bytes).
     A unit links from source only when every in-scope function in it is integrated or revalidated
     and none is on this edition's differs list. Every other byte is a raw block.
     """
     status = {t["id"]: t for t in ts}
-    funcs = [dict(f, id=f"{f['unit']}-{key}") for f, key in zip(inv["functions"], function_keys(inv["functions"]))]
+    funcs = inv["functions"]
     inn = [f for f in funcs if f["scope"] == "in"]
     by_unit = {}
     for f in inn:
@@ -1202,7 +1296,7 @@ def link_plan(ts, inv):
     source = {}
     for unit, mine in by_unit.items():
         held = [status.get(f["id"]) for f in mine]
-        if all(t and t["status"] in ("integrated", "revalidated") and not edition_differs(t) for t in held):
+        if all(t and t["status"] in FINISHED and not edition_differs(environment, t) for t in held):
             missing = [f["id"] for f in mine if not isinstance(f.get("offset"), int)]
             if missing:
                 die(f"inventory.json gives no file `offset` for {missing}; the link places a function by it. "
@@ -1240,27 +1334,27 @@ def cmd_link(a):
         die("this project has no link adapter: decomp.json has no `link` command. It reaches a project past "
             "setup through the skill-upgrade section of /decomp-setup, as a change on a candidate branch.")
     ts = all_tickets()
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
-    whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in ("integrated", "revalidated")}
-    doctor(need=tools_needed(sorted(whole)))
-    edition = toolchain()["target"]["edition"]
+    inv = read_inventory()
+    whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in FINISHED}
+    built_with = {u: compiler_for(u) for u in sorted(whole)}
+    environment = doctor(need=tools_needed(built_with.values()))
+    edition = environment.edition
     target = Path(toolchain()["target"]["path"])
-    source, blocks, in_scope = link_plan(ts, inv)
+    source, blocks, in_scope = link_plan(environment, ts, inv)
     out = local_dir() / "link" / target.name
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     from_source = sum(f["size"] for mine in source.values() for f in mine)
-    rec = {"unix": now(), "ref": CFG["integration_branch"], "event": "link", "edition": edition["name"],
-           "units": sorted(source), "source_bytes": from_source, "in_scope_bytes": in_scope}
+    linked = (edition["name"], sorted(source), from_source, in_scope)
     first, why = None, ""
     with Worktree(CFG["integration_branch"]) as tree:
         objdir = Path(tempfile.mkdtemp(prefix="decomp-link-"))
-        env = tool_env()
+        env = environment.vars
         objects = []
         for unit, mine in sorted(source.items()):
             t = next(t for t in ts if t["unit"] == unit)
             obj = objdir / f"{unit}.obj"
-            b = adapter(CFG["build"], t, str(obj), "", tree, env)
+            b = adapter(CFG["build"], t, built_with.get(unit) or compiler_for(unit), str(obj), "", tree, env)
             if b.returncode != 0:
                 why = f"unit {unit} did not build: {(b.stderr or b.stdout)[-2000:]}"
                 break
@@ -1277,20 +1371,18 @@ def cmd_link(a):
     share = f"{from_source} / {in_scope} in-scope code B from source ({100 * from_source / in_scope:.2f}%)" \
         if in_scope else "no in-scope code"
     if why:
-        rec["result"] = "fail"
-        append("events.jsonl", rec)
+        event_link("fail", *linked)
         print(f"link: fail; {share}; output {out}")
         die(why)
     got, want = out.read_bytes(), target.read_bytes()
-    rec.update(sha256=sha(got), size=len(got))
-    if got == want:
-        rec["result"] = "pass"
-    else:
-        rec["result"] = "mismatch"
+    more = {"sha256": sha(got), "size": len(got)}
+    result = "pass"
+    if got != want:
+        result = "mismatch"
         first = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
-        rec["first_differ"] = first
-    append("events.jsonl", rec)
-    print(f"link: {rec['result']}; {share}; output {out}")
+        more["first_differ"] = first
+    event_link(result, *linked, **more)
+    print(f"link: {result}; {share}; output {out}")
     if first is not None:
         print(f"first difference at file offset 0x{first:X}: {link_owner(first, source, blocks, inv)}; "
               f"output {len(got)} B sha256 {sha(got)[:16]}, edition '{edition['name']}' {len(want)} B sha256 "
@@ -1324,7 +1416,7 @@ def milestone_line(ts):
     for e in records("events.jsonl"):
         if e.get("event") == "link":
             linked = set(e.get("units", []))
-    open_units = {t["unit"] for t in ts if t["status"] not in ("integrated", "revalidated")}
+    open_units = {t["unit"] for t in ts if t["status"] not in FINISHED}
     fresh = sum(t["size"] for t in ts if t["unit"] not in open_units and t["unit"] not in linked)
     size = link_milestone(sum(t["size"] for t in ts))
     return f"{'due' if fresh >= size else 'not due'} ({fresh} B newly matched of {size} B)"
@@ -1343,7 +1435,7 @@ def cmd_report(a):
     ts = all_tickets()
     atts = records("attempts.jsonl")
     matches = records("matches.jsonl")
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    inv = read_inventory()
     total_b = sum(t["size"] for t in ts)
     done = [t for t in ts if t["status"] in MATCHED]
     done_b = sum(t["size"] for t in done)
