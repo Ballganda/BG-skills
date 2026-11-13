@@ -379,9 +379,26 @@ def test_doctor_refuses_too_few_probes_with_the_count(base):
     expect(r.returncode == ENV_EXIT and "1 of 3" in r.stderr, "unrecognised file should print the probe count", r)
 
 
-def path_with_git(first):
-    """A PATH of `first` plus the folder holding git, so the tool can run git but finds no other gh."""
-    return os.pathsep.join([str(first), str(Path(shutil.which("git")).parent)])
+def hermetic_path(base, own=None):
+    """A PATH holding only git and the test's own folder, where looking up gh finds nothing but the test's fake.
+
+    `own` is the folder holding the fake gh; when omitted, an empty one is created. On Windows a link to git's
+    launcher does not work, so git's own folder stands in for the link folder."""
+    own = Path(own) if own else Path(base) / "empty-path"
+    own.mkdir(exist_ok=True)
+    git = Path(shutil.which("git"))
+    if os.name == "nt":
+        git_dir = git.parent
+    else:
+        git_dir = Path(base) / "git-only"
+        git_dir.mkdir(exist_ok=True)
+        if not (git_dir / "git").exists():
+            (git_dir / "git").symlink_to(git)
+    path = os.pathsep.join([str(own), str(git_dir)])
+    found = shutil.which("gh", path=path)
+    if found and Path(found).parent.resolve() != own.resolve():
+        raise AssertionError(f"the test PATH finds a gh other than the fake: {found}")
+    return path
 
 
 def gh_project(base):
@@ -393,9 +410,7 @@ def one_line(r):
 
 
 def test_sync_without_gh_on_path_exits_6_with_one_line(base):
-    empty = Path(base) / "empty-path"
-    empty.mkdir()
-    r = gh_project(base).run("sync", env={"PATH": path_with_git(empty)})
+    r = gh_project(base).run("sync", env={"PATH": hermetic_path(base)})
     expect(r.returncode == ENV_EXIT, "sync without gh should exit 6", r)
     expect("gh" in r.all and "not found on PATH" in r.all and one_line(r), "one line saying gh was not found", r)
 
@@ -408,22 +423,18 @@ def test_sync_with_gh_not_logged_in_exits_6_with_one_line(base):
     else:
         (bin_dir / "gh").write_text("#!/bin/sh\nexit 1\n")
         (bin_dir / "gh").chmod(0o755)
-    r = gh_project(base).run("sync", env={"PATH": path_with_git(bin_dir)})
+    r = gh_project(base).run("sync", env={"PATH": hermetic_path(base, bin_dir)})
     expect(r.returncode == ENV_EXIT, "sync with gh logged out should exit 6", r)
     expect("gh" in r.all and "not logged in" in r.all and one_line(r), "one line saying gh is not logged in", r)
 
 
 def test_sync_disabled_does_not_check_gh(base):
-    empty = Path(base) / "empty-path"
-    empty.mkdir()
-    r = Project(base).run("sync", env={"PATH": path_with_git(empty)})
+    r = Project(base).run("sync", env={"PATH": hermetic_path(base)})
     expect(r.returncode == 0 and "disabled" in r.stdout, "disabled sync should print so and exit 0", r)
 
 
 def test_doctor_is_unchanged_without_gh(base):
-    empty = Path(base) / "empty-path"
-    empty.mkdir()
-    r = gh_project(base).run("doctor", env={"PATH": path_with_git(empty)})
+    r = gh_project(base).run("doctor", env={"PATH": hermetic_path(base)})
     expect(r.returncode == 0 and "doctor: ok" in r.stdout and "gh" not in r.all, "doctor ignores gh", r)
 
 
