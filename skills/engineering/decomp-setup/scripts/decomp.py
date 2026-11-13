@@ -1442,6 +1442,11 @@ def cmd_sync(a):
     if not gh.get("enabled"):
         print("github sync disabled in decomp.json")
         return
+    gh_path = shutil.which("gh")
+    if not gh_path:
+        die("gh was not found on PATH; install it to mirror progress to GitHub.", ENV_EXIT)
+    if subprocess.run([gh_path, "auth", "status"], capture_output=True).returncode != 0:
+        die("gh is not logged in; run `gh auth login`.", ENV_EXIT)
     repo = gh["repo"]
     state_p = ledger("github.json")
     state = json.loads(state_p.read_text()) if state_p.exists() else {"units": {}, "progress": None}

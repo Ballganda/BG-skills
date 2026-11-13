@@ -379,6 +379,54 @@ def test_doctor_refuses_too_few_probes_with_the_count(base):
     expect(r.returncode == ENV_EXIT and "1 of 3" in r.stderr, "unrecognised file should print the probe count", r)
 
 
+def path_with_git(first):
+    """A PATH of `first` plus the folder holding git, so the tool can run git but finds no other gh."""
+    return os.pathsep.join([str(first), str(Path(shutil.which("git")).parent)])
+
+
+def gh_project(base):
+    return Project(base, config={"github": {"enabled": True, "repo": "o/r"}})
+
+
+def one_line(r):
+    return len(r.all.strip().splitlines()) == 1 and "Traceback" not in r.all
+
+
+def test_sync_without_gh_on_path_exits_6_with_one_line(base):
+    empty = Path(base) / "empty-path"
+    empty.mkdir()
+    r = gh_project(base).run("sync", env={"PATH": path_with_git(empty)})
+    expect(r.returncode == ENV_EXIT, "sync without gh should exit 6", r)
+    expect("gh" in r.all and "not found on PATH" in r.all and one_line(r), "one line saying gh was not found", r)
+
+
+def test_sync_with_gh_not_logged_in_exits_6_with_one_line(base):
+    bin_dir = Path(base) / "fake-bin"
+    bin_dir.mkdir()
+    if os.name == "nt":
+        (bin_dir / "gh.cmd").write_text("@echo off\r\nexit /b 1\r\n")
+    else:
+        (bin_dir / "gh").write_text("#!/bin/sh\nexit 1\n")
+        (bin_dir / "gh").chmod(0o755)
+    r = gh_project(base).run("sync", env={"PATH": path_with_git(bin_dir)})
+    expect(r.returncode == ENV_EXIT, "sync with gh logged out should exit 6", r)
+    expect("gh" in r.all and "not logged in" in r.all and one_line(r), "one line saying gh is not logged in", r)
+
+
+def test_sync_disabled_does_not_check_gh(base):
+    empty = Path(base) / "empty-path"
+    empty.mkdir()
+    r = Project(base).run("sync", env={"PATH": path_with_git(empty)})
+    expect(r.returncode == 0 and "disabled" in r.stdout, "disabled sync should print so and exit 0", r)
+
+
+def test_doctor_is_unchanged_without_gh(base):
+    empty = Path(base) / "empty-path"
+    empty.mkdir()
+    r = gh_project(base).run("doctor", env={"PATH": path_with_git(empty)})
+    expect(r.returncode == 0 and "doctor: ok" in r.stdout and "gh" not in r.all, "doctor ignores gh", r)
+
+
 def test_check_stops_on_function_the_edition_holds_differently(base):
     p = Project(base, manifest=editions_manifest(), target=STORE)
     r = p.run("check", TID)
