@@ -1079,6 +1079,26 @@ def test_revalidate_stops_before_any_write_on_a_compiler_outside_the_manifest(ba
     expect(r.returncode == ENV_EXIT and "ghost" in r.stderr and not (p.root / "ledger").exists(), "exit 6, no record", r)
 
 
+def test_revalidate_stops_before_measuring_any_unit_when_a_later_units_compiler_is_missing(base):
+    p = Project(base, status="integrated", files=second_ticket(),
+                config={"compiler": "compiler", "unit_compilers": {"u0002": "ghost"}})
+    r = p.run("revalidate")
+    expect(r.returncode == ENV_EXIT and "ghost" in r.stderr, "exit 6 on the missing compiler", r)
+    expect("revalidated" not in r.stdout and not (p.root / "ledger").exists(), "no unit is measured or recorded", r)
+    expect(p.statuses() == {"integrated": 2}, "no status should change", r)
+
+
+def test_check_and_verify_stop_on_the_edition_after_a_cached_doctor(base):
+    p = Project(base, manifest=editions_manifest(), target=STORE, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
+    r = p.run("doctor")
+    expect(r.returncode == 0, "doctor should pass and cache its check", r)
+    for args in (("check", TID), ("verify", TID, "--model", "m")):
+        r = p.run(*args)
+        expect(r.returncode == ENV_EXIT and "store re-release" in r.stderr, f"{args[0]} should exit 6 on the edition", r)
+    expect(not (p.root / "ledger").exists() and p.status() == "claimed", "nothing should be recorded", r)
+
+
 # ---- adapter commands ----
 
 def test_adapter_commands_fill_tools_and_python(base):

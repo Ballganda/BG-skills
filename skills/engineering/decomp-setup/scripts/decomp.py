@@ -7,6 +7,7 @@ Standard library only. Run from the project root: python tools/decomp.py <cmd>.
 """
 import argparse
 import codecs
+import collections
 import contextlib
 import hashlib
 import json
@@ -319,12 +320,18 @@ def environment_stamp(tc):
     return sha("\n".join(stamp).encode())
 
 
+# What doctor found on this machine. edition: the recognised accepted edition. unusable: tool
+# name to why it failed, for tools outside doctor's need. vars: the tool environment variables
+# for adapters and tool commands. lines: doctor's report lines (none when the cache was trusted).
+Environment = collections.namedtuple("Environment", "edition unusable vars lines")
+
+
 def doctor(full=True, need=None):
-    """Stop unless the target, host prerequisites, and tools equal toolchain.json. Returns the report lines.
+    """Stop unless the target, host prerequisites, and tools equal toolchain.json. Returns the Environment.
 
     need names the tools that must pass (None: all of them). A tool outside need that fails
-    is reported and left in toolchain()["unusable"], so only the units built with it stop.
-    Leaves the recognised edition in toolchain()["target"]["edition"].
+    is reported and returned in the Environment's unusable, so only the units built with it stop.
+    The cached toolchain is never changed.
 
     full=False trusts the last check that passed in full while toolchain.json, the target,
     and every required file keep the same size and modification time.
@@ -332,23 +339,22 @@ def doctor(full=True, need=None):
     tc = toolchain()
     loc = local_dir()
     tgt = tc["target"]
-    tc["unusable"] = {}
+    unusable = {}
     stamp = environment_stamp(tc)
     cache = loc / "doctor.json"
     if not full and cache.exists():
         last = json.loads(cache.read_text(encoding="utf-8"))
         edition = edition_named(last.get("edition"))
         if last.get("ok") == stamp and edition:
-            tgt["edition"] = edition
-            return []
-    bad, lines = [], []
+            return Environment(edition, {}, tool_env(), [])
+    bad, lines, edition = [], [], None
     if not tgt["path"]:
         bad.append('target: no path; set "target" in .decomp/local.json or DECOMP_TARGET')
     elif not Path(tgt["path"]).is_file():
         bad.append(f"target: {tgt['path']} not found")
     else:
-        tgt["edition"], line = recognise(tgt)
-        (lines if tgt["edition"] else bad).append(line)
+        edition, line = recognise(tgt)
+        (lines if edition else bad).append(line)
     env = tool_env()
     behind = prerequisite_failure(tc, env, lines)
     if behind:
@@ -361,7 +367,7 @@ def doctor(full=True, need=None):
             elif need is None or t["name"] in need:
                 bad.append(why)
             else:
-                tc["unusable"][t["name"]] = why
+                unusable[t["name"]] = why
                 lines.append(f"not usable here: {why}")
     if bad:
         cache.unlink(missing_ok=True)
@@ -369,17 +375,17 @@ def doctor(full=True, need=None):
             print(f"ENVIRONMENT: {b}", file=sys.stderr)
         die("this machine does not match toolchain.json; nothing was built or recorded. "
             "Fix it with `decomp.py provision` or the user's own install, never by editing toolchain.json.", ENV_EXIT)
-    if tc["unusable"]:
+    if unusable:
         cache.unlink(missing_ok=True)
     else:
         loc.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": tgt["edition"]["name"]}), encoding="utf-8")
-    return lines
+        cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": edition["name"]}), encoding="utf-8")
+    return Environment(edition, unusable, env, lines)
 
 
-def edition_differs(t):
-    """True when the recognised edition holds ticket t's function differently. Needs doctor first."""
-    held = toolchain()["target"]["edition"].get("differs", [])
+def edition_differs(environment, t):
+    """True when doctor's recognised edition holds ticket t's function differently."""
+    held = environment.edition.get("differs", [])
     return (t["id"] in held or t["id"].split("-", 1)[1] in held
             or same_address(t["address"]) in {same_address(a) for a in held if ":" in a or HEX.fullmatch(a)})
 
@@ -398,16 +404,16 @@ def compiler_for(unit):
     return name
 
 
-def tools_needed(units):
-    """Every tool but the compilers that build none of these units."""
+def tools_needed(compilers):
+    """Every tool but the compilers outside these ones (each from compiler_for)."""
     every = {CFG.get("compiler", "")} | set(CFG.get("unit_compilers", {}).values())
-    return {t["name"] for t in toolchain()["tools"]} - (every - {compiler_for(u) for u in units})
+    return {t["name"] for t in toolchain()["tools"]} - (every - set(compilers))
 
 
-def stop_if_edition_differs(t):
-    """After doctor: stop with the environment exit when this machine's edition cannot judge ticket t."""
-    if edition_differs(t):
-        e = toolchain()["target"]["edition"]
+def stop_if_edition_differs(environment, t):
+    """Stop with the environment exit when doctor's edition cannot judge ticket t."""
+    if edition_differs(environment, t):
+        e = environment.edition
         print(f"ENVIRONMENT: edition '{e['name']}' holds {t['id']} ({t['address']}) differently from the "
               "contract's expected bytes", file=sys.stderr)
         die("nothing was built or recorded; this function is matched only on an edition that holds it unchanged.",
@@ -415,7 +421,7 @@ def stop_if_edition_differs(t):
 
 
 def cmd_doctor(a):
-    for line in doctor(full=True):
+    for line in doctor(full=True).lines:
         print(line)
     print("doctor: ok")
 
@@ -773,18 +779,18 @@ def scan(text):
     return bad
 
 
-def fill(template, t, obj, report, tree):
+def fill(template, t, compiler, obj, report, tree):
     return expand(
         template, id=t["id"], unit=t["unit"], source=t["source"], expected=t["expected"],
         address=t["address"], obj=obj, report=report,
-        symbols=Path(tree) / SYMBOLS, compiler=compiler_for(t["unit"]),
+        symbols=Path(tree) / SYMBOLS, compiler=compiler,
         tools=Path(tree) / "tools", python=sys.executable,
     )
 
 
-def adapter(template, t, obj, report, tree, env):
+def adapter(template, t, compiler, obj, report, tree, env):
     """Run one adapter command. A tool's output is in the tool's encoding, never assumed to be this system's."""
-    return subprocess.run(fill(template, t, obj, report, tree), shell=True, cwd=tree, env=env,
+    return subprocess.run(fill(template, t, compiler, obj, report, tree), shell=True, cwd=tree, env=env,
                           capture_output=True, text=True, errors="replace")
 
 
@@ -793,8 +799,8 @@ def marker_count(text, tid):
     return len(re.findall(r"(?://|/\*)[ \t]*@decomp " + re.escape(tid) + r"(?![\w.-])", text))
 
 
-def build_and_diff(t, tree, report):
-    """Build t's unit in tree and compare. Returns (result, differ_bytes, log)."""
+def build_and_diff(environment, t, compiler, tree, report):
+    """Build t's unit in tree with compiler (from compiler_for) and compare. Returns (result, differ_bytes, log)."""
     src = Path(tree) / t["source"]
     if not src.exists():
         return "build-fail", None, f"missing {t['source']}"
@@ -810,11 +816,10 @@ def build_and_diff(t, tree, report):
     if bad:
         return "guardrail", None, "\n".join(bad)
     obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
-    env = tool_env()
-    b = adapter(CFG["build"], t, obj, report, tree, env)
+    b = adapter(CFG["build"], t, compiler, obj, report, tree, environment.vars)
     if b.returncode != 0:
         return "build-fail", None, (b.stderr or b.stdout)[-4000:]
-    d = adapter(CFG["diff"], t, obj, report, tree, env)
+    d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment.vars)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -962,38 +967,39 @@ def cmd_release(a):
     print(f"{a.id} -> {move(a.id, event)}")
 
 
-def run_adapter(name, **values):
+def run_adapter(name, environment, **values):
     """Run an adapter that reports to the caller, in the project root. Exit 1, naming its exit code, when it fails.
 
     Its output goes straight through, in whatever encoding the tool writes.
     """
     if not CFG.get(name):
         die(f"decomp.json has no `{name}` adapter command; run /decomp-setup")
-    code = subprocess.run(tool_command(CFG[name], **values), shell=True, cwd=ROOT, env=tool_env()).returncode
+    code = subprocess.run(tool_command(CFG[name], **values), shell=True, cwd=ROOT, env=environment.vars).returncode
     if code:
         die(f"the {name} adapter failed (exit {code})")
 
 
 def cmd_inventory(a):
-    doctor(full=True)
+    environment = doctor(full=True)
     if git("tag", "--list", "decomp-start").strip() and not a.redo:
         die("the decomp-start tag exists, so inventory.json and expected/ are frozen; nothing was written. "
             "Redoing the inventory is /decomp-start's redo flow: with the user's go-ahead, run `inventory --redo`.", 2)
-    run_adapter("inventory")
+    run_adapter("inventory", environment)
 
 
 def cmd_disasm(a):
     t, _ = read_ticket(a.id)
-    doctor(full=False, need=tools_needed([t["unit"]]))
-    run_adapter("disasm", expected=t["expected"], address=t["address"])
+    environment = doctor(full=False, need=tools_needed([compiler_for(t["unit"])]))
+    run_adapter("disasm", environment, expected=t["expected"], address=t["address"])
 
 
 def cmd_check(a):
     t, _ = read_ticket(a.id)
-    doctor(full=False, need=tools_needed([t["unit"]]))
-    stop_if_edition_differs(t)
+    compiler = compiler_for(t["unit"])
+    environment = doctor(full=False, need=tools_needed([compiler]))
+    stop_if_edition_differs(environment, t)
     report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
-    result, n, log = build_and_diff(t, os.getcwd(), report)
+    result, n, log = build_and_diff(environment, t, compiler, os.getcwd(), report)
     print(json.dumps({"result": result, "differ_bytes": n, "report": report}))
     if log:
         print(log)
@@ -1002,13 +1008,14 @@ def cmd_check(a):
 def cmd_verify(a):
     frozen_check()
     t, _ = read_ticket(a.id)
-    doctor(need=tools_needed([t["unit"]]))
+    compiler = compiler_for(t["unit"])
+    environment = doctor(need=tools_needed([compiler]))
     refuse_unless(t, "bytes-match")
     if a.category == "none":  # a writer that matched reports no category
         a.category = None
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
-    stop_if_edition_differs(t)
+    stop_if_edition_differs(environment, t)
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
     stamp = now()
@@ -1029,7 +1036,7 @@ def cmd_verify(a):
             dest = Path(tree) / t["source"]
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(src)
-            result, n, log = build_and_diff(t, tree, str(evidence))
+            result, n, log = build_and_diff(environment, t, compiler, tree, str(evidence))
     rec.update(result=result, differ_bytes=n, source_sha256=sha(src))
     if result == "bytes-match":
         rec["category"] = ""
@@ -1181,8 +1188,8 @@ def cmd_revalidate(a):
         frozen_check()
         ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
     built_with = {t["unit"]: compiler_for(t["unit"]) for t in ts}  # stops here, before any status is written
-    doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
-    unusable = toolchain()["unusable"]
+    environment = doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
+    unusable = environment.unusable
     ref = candidate if judging else a.ref or CFG["integration_branch"]
     on_integ = not judging and ref == CFG["integration_branch"]
     if not on_integ and not judging:
@@ -1200,7 +1207,7 @@ def cmd_revalidate(a):
             ts = [t for t in ts if (Path(tree) / t["source"]).exists() and any(
                 Path(h).name.casefold() == name for h in included(tree, t["source"])[0])]
         for t in ts:
-            why = ("this machine's edition holds it differently" if edition_differs(t) else
+            why = ("this machine's edition holds it differently" if edition_differs(environment, t) else
                    f"its compiler '{built_with[t['unit']]}' is not usable here" if built_with[t["unit"]] in unusable
                    else "")
             if why:  # its bytes cannot be measured on this machine, either way
@@ -1209,7 +1216,7 @@ def cmd_revalidate(a):
                 continue
             measured += 1
             report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
-            result, n, _ = build_and_diff(t, tree, report)
+            result, n, _ = build_and_diff(environment, t, built_with[t["unit"]], tree, report)
             ok = result == "bytes-match"
             if not ok:
                 bad += 1
@@ -1265,8 +1272,8 @@ def cmd_unlock(a):
 LINK_MISMATCH_EXIT = 4  # the linked file is not the edition on this machine
 
 
-def link_plan(ts, inv):
-    """Which units link from source, and the raw blocks of the target around them. Needs doctor first.
+def link_plan(environment, ts, inv):
+    """Which units link from source, and the raw blocks of the target around them, on doctor's environment.
 
     Returns (source units: unit id to its in-scope functions in offset order, blocks, in-scope bytes).
     A unit links from source only when every in-scope function in it is integrated or revalidated
@@ -1281,7 +1288,7 @@ def link_plan(ts, inv):
     source = {}
     for unit, mine in by_unit.items():
         held = [status.get(f["id"]) for f in mine]
-        if all(t and t["status"] in FINISHED and not edition_differs(t) for t in held):
+        if all(t and t["status"] in FINISHED and not edition_differs(environment, t) for t in held):
             missing = [f["id"] for f in mine if not isinstance(f.get("offset"), int)]
             if missing:
                 die(f"inventory.json gives no file `offset` for {missing}; the link places a function by it. "
@@ -1321,10 +1328,11 @@ def cmd_link(a):
     ts = all_tickets()
     inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
     whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in FINISHED}
-    doctor(need=tools_needed(sorted(whole)))
-    edition = toolchain()["target"]["edition"]
+    built_with = {u: compiler_for(u) for u in sorted(whole)}
+    environment = doctor(need=tools_needed(built_with.values()))
+    edition = environment.edition
     target = Path(toolchain()["target"]["path"])
-    source, blocks, in_scope = link_plan(ts, inv)
+    source, blocks, in_scope = link_plan(environment, ts, inv)
     out = local_dir() / "link" / target.name
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
@@ -1333,12 +1341,12 @@ def cmd_link(a):
     first, why = None, ""
     with Worktree(CFG["integration_branch"]) as tree:
         objdir = Path(tempfile.mkdtemp(prefix="decomp-link-"))
-        env = tool_env()
+        env = environment.vars
         objects = []
         for unit, mine in sorted(source.items()):
             t = next(t for t in ts if t["unit"] == unit)
             obj = objdir / f"{unit}.obj"
-            b = adapter(CFG["build"], t, str(obj), "", tree, env)
+            b = adapter(CFG["build"], t, built_with.get(unit) or compiler_for(unit), str(obj), "", tree, env)
             if b.returncode != 0:
                 why = f"unit {unit} did not build: {(b.stderr or b.stdout)[-2000:]}"
                 break
