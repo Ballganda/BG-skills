@@ -6,16 +6,10 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), "..");
-const failures = [];
-
-const ctx = {
-  read: (rel) => readFileSync(join(root, "skills", rel), "utf8"),
-  fail: (message) => failures.push(message),
-  skills: readSkills(), // read once per run, shared by every check that needs the skill tree
-};
+// Set by main(): importing this file runs nothing.
+let root;
 
 // Each creation-flow skill ends its closing message with one boundary line.
 const boundaryLines = [
@@ -35,7 +29,7 @@ function checkBoundaryLines({ read, fail }) {
 }
 
 // Decomp skills carry lines that guard against skipped steps. Add a row per required line.
-const decompRequiredLines = [
+export const decompRequiredLines = [
   [
     "engineering/decomp-run/SKILL.md",
     "Compare the integration branch's `tools/decomp.py` with `../decomp-setup/scripts/decomp.py`, ignoring line endings.",
@@ -237,10 +231,21 @@ const checks = [
   checkPluginIcon,
 ];
 
-for (const check of checks) check(ctx);
+function main() {
+  root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), "..");
+  const failures = [];
+  const ctx = {
+    read: (rel) => readFileSync(join(root, "skills", rel), "utf8"),
+    fail: (message) => failures.push(message),
+    skills: readSkills(), // read once per run, shared by every check that needs the skill tree
+  };
+  for (const check of checks) check(ctx);
 
-if (failures.length) {
-  for (const f of failures) console.error(`FAIL ${f}`);
-  process.exit(1);
+  if (failures.length) {
+    for (const f of failures) console.error(`FAIL ${f}`);
+    process.exit(1);
+  }
+  console.log(`skills check passed (${checks.length} checks)`);
 }
-console.log(`skills check passed (${checks.length} checks)`);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
