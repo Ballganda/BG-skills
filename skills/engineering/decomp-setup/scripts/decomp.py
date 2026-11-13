@@ -137,6 +137,15 @@ def function_keys(functions):
     return keys
 
 
+def read_inventory():
+    """The one reader of inventory.json: its units and functions, each function with its `key` and ticket `id` set."""
+    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
+        f["key"] = key
+        f["id"] = f"{f['unit']}-{key}"
+    return inv
+
+
 # ---------- environment ----------
 
 ENV_EXIT = 6  # the machine's target or toolchain differs from toolchain.json
@@ -858,9 +867,7 @@ class Worktree:
 # ---------- commands ----------
 
 def cmd_gen_specs(a):
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
-    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
-        f["key"] = key
+    inv = read_inventory()
     funcs = sorted(inv["functions"], key=lambda f: address_order(f["address"]))
     for u in inv["units"]:
         mine = [f for f in funcs if f["unit"] == u["id"]]
@@ -888,10 +895,11 @@ def cmd_gen_specs(a):
 
 
 def cmd_gen_tickets(a):
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    inv = read_inventory()
     units = {u["id"]: u for u in inv["units"]}
     made = kept = 0
-    for f, key in zip(inv["functions"], function_keys(inv["functions"])):
+    for f in inv["functions"]:
+        key = f["key"]
         if f["scope"] != "in":
             continue
         tid = f"{f['unit']}-{key}"
@@ -1280,7 +1288,7 @@ def link_plan(environment, ts, inv):
     and none is on this edition's differs list. Every other byte is a raw block.
     """
     status = {t["id"]: t for t in ts}
-    funcs = [dict(f, id=f"{f['unit']}-{key}") for f, key in zip(inv["functions"], function_keys(inv["functions"]))]
+    funcs = inv["functions"]
     inn = [f for f in funcs if f["scope"] == "in"]
     by_unit = {}
     for f in inn:
@@ -1326,7 +1334,7 @@ def cmd_link(a):
         die("this project has no link adapter: decomp.json has no `link` command. It reaches a project past "
             "setup through the skill-upgrade section of /decomp-setup, as a change on a candidate branch.")
     ts = all_tickets()
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    inv = read_inventory()
     whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in FINISHED}
     built_with = {u: compiler_for(u) for u in sorted(whole)}
     environment = doctor(need=tools_needed(built_with.values()))
@@ -1427,7 +1435,7 @@ def cmd_report(a):
     ts = all_tickets()
     atts = records("attempts.jsonl")
     matches = records("matches.jsonl")
-    inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
+    inv = read_inventory()
     total_b = sum(t["size"] for t in ts)
     done = [t for t in ts if t["status"] in MATCHED]
     done_b = sum(t["size"] for t in done)
