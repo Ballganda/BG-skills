@@ -633,6 +633,15 @@ def test_verify_rejects_writer_branch_touching_symbol_map(base):
     expect("guarded" in ev and "symbols.json" in ev, f"evidence should name the guarded path: {ev}", r)
 
 
+def test_verify_names_status_files_swept_onto_a_writer_branch(base):
+    p = Project(base, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n", f"tickets/{TID}.md": "status: open\n"})
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 4 and '"result": "guardrail"' in r.stdout, "verify should record guardrail", r)
+    ev = (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text()
+    expect("status files" in ev and "too broadly" in ev, f"evidence should name status files and a broad commit: {ev}", r)
+
+
 def test_revalidate_accepts_repair_branch_touching_symbol_map(base):
     p = Project(base, status="matched")
     p.branch("r/sym", {"symbols.json": '{"f": "0x00401000"}\n', "include/keep.h": "/* shared, repaired */\n"})
