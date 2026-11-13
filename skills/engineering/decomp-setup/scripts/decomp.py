@@ -22,6 +22,9 @@ from pathlib import Path
 
 TIERS = [("TINY", 25), ("SMALL", 256), ("MEDIUM", 511)]  # else LARGE
 MATCHED = {"matched", "integrated", "revalidated"}
+READY = ("open", "regressed")  # work a writer may claim
+BUSY = ("claimed", "bytes-match", "matched")  # a writer holds the unit
+FINISHED = ("integrated", "revalidated")  # merged into the integration branch
 STATUSES = {"open", "claimed", "blocked-reference", "bytes-match"} | MATCHED | {"regressed"}
 CATEGORIES = {
     "build-fail", "reference-gap", "signedness", "width", "operator", "control-flow",
@@ -536,6 +539,37 @@ def append(name, rec):
         f.write(json.dumps(rec, sort_keys=True) + "\n")
 
 
+def next_attempt_id(tid):
+    """The id of the ticket's next attempt: one numbering for verify and a failed audit."""
+    return f"{tid}-a{1 + sum(r['ticket'] == tid for r in records('attempts.jsonl')):03d}"
+
+
+def event_out_of_order(tid, reason):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "out-of-order", "reason": reason})
+
+
+def event_integrated(tid):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "integrated"})
+
+
+def event_revalidated(tid):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "revalidated"})
+
+
+def event_regressed(tid):
+    append("events.jsonl", {"unix": now(), "ticket": tid, "event": "regressed"})
+
+
+def event_rejected_repair(ref):
+    append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
+
+
+def event_link(result, edition, units, source_bytes, in_scope_bytes, **more):
+    append("events.jsonl", dict({"unix": now(), "ref": CFG["integration_branch"], "event": "link", "edition": edition,
+                                 "units": units, "source_bytes": source_bytes, "in_scope_bytes": in_scope_bytes,
+                                 "result": result}, **more))
+
+
 def records(name):
     p = ROOT / "ledger" / name
     if not p.exists():
@@ -811,9 +845,9 @@ def cmd_next(a):
     if bool(a.first) != bool(a.reason):
         die("next: --first and --reason go together")
     ts = [t for t in all_tickets()]
-    busy = {t["unit"] for t in ts if t["status"] in ("claimed", "bytes-match", "matched")}
-    ready = [t for t in ts if t["status"] in ("open", "regressed") and t["unit"] not in busy]
-    order = {"TINY": 0, "SMALL": 1, "MEDIUM": 2, "LARGE": 3}
+    busy = {t["unit"] for t in ts if t["status"] in BUSY}
+    ready = [t for t in ts if t["status"] in READY and t["unit"] not in busy]
+    order = {name: i for i, name in enumerate([n for n, _ in TIERS] + ["LARGE"])}
     ready.sort(key=lambda t: (order[t["tier"]], int(t["size"]), address_order(t["address"])))
     if a.first:
         head = next((t for t in ready if t["id"] == a.first), None)
@@ -827,7 +861,7 @@ def cmd_next(a):
             picked.append(t)
             units.add(t["unit"])
     if a.first:
-        append("events.jsonl", {"unix": now(), "ticket": a.first, "event": "out-of-order", "reason": a.reason})
+        event_out_of_order(a.first, a.reason)
     for t in picked[: a.n]:
         print(f"{t['id']} {t['tier']} {t['size']}B {ticket_path(t['id']).relative_to(ROOT).as_posix()}")
 
@@ -849,7 +883,7 @@ def take_lock(name, by):
 
 def cmd_claim(a):
     t, _ = read_ticket(a.id)
-    if t["status"] not in ("open", "regressed"):
+    if t["status"] not in READY:
         die(f"{a.id} is {t['status']}, not open")
     take_lock(f"unit-{t['unit']}", a.by)
     set_status(a.id, "claimed", claimed_by=a.by, claimed_at=str(now()))
@@ -921,7 +955,7 @@ def cmd_verify(a):
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
     stamp = now()
-    aid = f"{a.id}-a{1 + sum(r['ticket'] == a.id for r in records('attempts.jsonl')):03d}"
+    aid = next_attempt_id(a.id)
     evidence = ledger(f"evidence/{aid}.txt")
     rec = {"id": aid, "ticket": a.id, "unix": stamp, "model": a.model, "tier": t["tier"],
            "category": a.category or "", "differ_bytes": None, "evidence": evidence.relative_to(ROOT).as_posix()}
@@ -969,8 +1003,7 @@ def cmd_audit(a):
         set_status(a.id, "matched")
         print(f"matched {a.id} (attempt {last['id']})")
     else:
-        n = 1 + sum(r["ticket"] == a.id for r in records("attempts.jsonl"))
-        append("attempts.jsonl", dict(last, id=f"{a.id}-a{n:03d}", unix=now(), result="audit-fail",
+        append("attempts.jsonl", dict(last, id=next_attempt_id(a.id), unix=now(), result="audit-fail",
                                       category="unknown", auditor=a.auditor))
         set_status(a.id, "claimed")
         append_note(a.id, f"audit-fail: {a.note or 'see auditor'}")
@@ -987,7 +1020,7 @@ def cmd_integrate(a):
         die(f"{branch} is not merged into {CFG['integration_branch']}")
     set_status(a.id, "integrated", claimed_by="", claimed_at="")
     lockfile(f"unit-{t['unit']}").unlink(missing_ok=True)
-    append("events.jsonl", {"unix": now(), "ticket": a.id, "event": "integrated"})
+    event_integrated(a.id)
     print(f"integrated {a.id}")
 
 
@@ -1108,7 +1141,7 @@ def cmd_revalidate(a):
         outside = [p for p in git("diff", "--name-only", f"{CFG['integration_branch']}...{ref}").split()
                    if not p.startswith("include/") and p != SYMBOLS]
         if outside:
-            append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
+            event_rejected_repair(ref)
             die(f"{ref} touches paths outside include/ and {SYMBOLS}: {outside}", 5)
     bad, skipped, measured = len(gone), 0, 0
     for i in gone:
@@ -1136,12 +1169,12 @@ def cmd_revalidate(a):
             if on_integ:
                 if ok and t["status"] in ("integrated", "regressed"):
                     set_status(t["id"], "revalidated")
-                    append("events.jsonl", {"unix": now(), "ticket": t["id"], "event": "revalidated"})
+                    event_revalidated(t["id"])
                 elif not ok:
                     set_status(t["id"], "regressed")
-                    append("events.jsonl", {"unix": now(), "ticket": t["id"], "event": "regressed"})
+                    event_regressed(t["id"])
     if bad and not on_integ and not judging:
-        append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
+        event_rejected_repair(ref)
     print(f"revalidated {measured} on {ref}: {bad} regressed, {skipped} skipped")
     if bad and not (judging and skipped):  # a candidate that was not fully measured is exit 6, whatever it broke
         sys.exit(5)
@@ -1202,7 +1235,7 @@ def link_plan(ts, inv):
     source = {}
     for unit, mine in by_unit.items():
         held = [status.get(f["id"]) for f in mine]
-        if all(t and t["status"] in ("integrated", "revalidated") and not edition_differs(t) for t in held):
+        if all(t and t["status"] in FINISHED and not edition_differs(t) for t in held):
             missing = [f["id"] for f in mine if not isinstance(f.get("offset"), int)]
             if missing:
                 die(f"inventory.json gives no file `offset` for {missing}; the link places a function by it. "
@@ -1241,7 +1274,7 @@ def cmd_link(a):
             "setup through the skill-upgrade section of /decomp-setup, as a change on a candidate branch.")
     ts = all_tickets()
     inv = json.loads((ROOT / "inventory.json").read_text(encoding="utf-8"))
-    whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in ("integrated", "revalidated")}
+    whole = {t["unit"] for t in ts} - {t["unit"] for t in ts if t["status"] not in FINISHED}
     doctor(need=tools_needed(sorted(whole)))
     edition = toolchain()["target"]["edition"]
     target = Path(toolchain()["target"]["path"])
@@ -1250,8 +1283,7 @@ def cmd_link(a):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     from_source = sum(f["size"] for mine in source.values() for f in mine)
-    rec = {"unix": now(), "ref": CFG["integration_branch"], "event": "link", "edition": edition["name"],
-           "units": sorted(source), "source_bytes": from_source, "in_scope_bytes": in_scope}
+    linked = (edition["name"], sorted(source), from_source, in_scope)
     first, why = None, ""
     with Worktree(CFG["integration_branch"]) as tree:
         objdir = Path(tempfile.mkdtemp(prefix="decomp-link-"))
@@ -1277,20 +1309,18 @@ def cmd_link(a):
     share = f"{from_source} / {in_scope} in-scope code B from source ({100 * from_source / in_scope:.2f}%)" \
         if in_scope else "no in-scope code"
     if why:
-        rec["result"] = "fail"
-        append("events.jsonl", rec)
+        event_link("fail", *linked)
         print(f"link: fail; {share}; output {out}")
         die(why)
     got, want = out.read_bytes(), target.read_bytes()
-    rec.update(sha256=sha(got), size=len(got))
-    if got == want:
-        rec["result"] = "pass"
-    else:
-        rec["result"] = "mismatch"
+    more = {"sha256": sha(got), "size": len(got)}
+    result = "pass"
+    if got != want:
+        result = "mismatch"
         first = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
-        rec["first_differ"] = first
-    append("events.jsonl", rec)
-    print(f"link: {rec['result']}; {share}; output {out}")
+        more["first_differ"] = first
+    event_link(result, *linked, **more)
+    print(f"link: {result}; {share}; output {out}")
     if first is not None:
         print(f"first difference at file offset 0x{first:X}: {link_owner(first, source, blocks, inv)}; "
               f"output {len(got)} B sha256 {sha(got)[:16]}, edition '{edition['name']}' {len(want)} B sha256 "
@@ -1324,7 +1354,7 @@ def milestone_line(ts):
     for e in records("events.jsonl"):
         if e.get("event") == "link":
             linked = set(e.get("units", []))
-    open_units = {t["unit"] for t in ts if t["status"] not in ("integrated", "revalidated")}
+    open_units = {t["unit"] for t in ts if t["status"] not in FINISHED}
     fresh = sum(t["size"] for t in ts if t["unit"] not in open_units and t["unit"] not in linked)
     size = link_milestone(sum(t["size"] for t in ts))
     return f"{'due' if fresh >= size else 'not due'} ({fresh} B newly matched of {size} B)"
