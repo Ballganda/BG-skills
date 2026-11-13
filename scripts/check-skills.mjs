@@ -57,6 +57,13 @@ export const decompRequiredLines = [
   ["engineering/decomp-identify/SIGNALS.md", "| Padding and `mov edi, edi` |"],
   ["engineering/decomp-identify/SIGNALS.md", "| Vendor signature over Rich header |"],
   ["engineering/decomp-identify/SIGNALS.md", "`/arch:SSE` (SSE1 scalar single with x87 doubles)"],
+  ["engineering/decomp-identify/SKILL.md", "Run the static-runtime probe:"],
+  ["engineering/decomp-identify/SKILL.md", "Function boundaries in a stripped binary:"],
+  ["engineering/decomp-identify/SKILL.md", "cite them inline in `IDENTIFY.md`"],
+  ["engineering/decomp-identify/SKILL.md", "labelled `neighbour <version>`"],
+  ["engineering/decomp-identify/SKILL.md", "Investigated <Unix time> (<ISO 8601 date>)"],
+  ["engineering/decomp-identify/SKILL.md", "## Signals"],
+  ["engineering/decomp-identify/SKILL.md", "## Toolset to install"],
 ];
 
 function checkDecompRequiredLines({ read, fail }) {
