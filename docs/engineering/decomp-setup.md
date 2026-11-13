@@ -21,12 +21,12 @@ To turn a set-up project into tickets, use [decomp-start](./decomp-start.md). To
 
 - **The target binary**, on this machine. It stays where it is: the contract records its hash and size, and a never-committed `.decomp/local.json` records its path.
 - **Python 3**, for the project tool `tools/decomp.py`, which the skill copies into the project.
-- **A private remote, if any.** The project starts with no remote. Nothing from the target, its bytes, or the reconstructed source ever goes into a public repo.
+- **A private remote, if any.** The project starts with no remote. You can name an existing, empty folder for the project, if it holds nothing else; an existing remote must be private. Nothing from the target, its bytes, or the reconstructed source ever goes into a public repo.
 - **Host prerequisites the contract names**, such as an archive tool or a compatibility layer. You install these; the tool checks their versions.
 
 ## The contract
 
-The contract is the whole point of setup. It is grilled with you heading by heading, but you are usually not the one who knows the compiler. A background subagent runs [decomp-identify](./decomp-identify.md) on the binary while the grilling covers the decisions that don't depend on it. Toolchain questions then arrive with a recommendation, its evidence, and a confidence. A low-confidence identification stays open until a probe or you settle it. Every hard-to-reverse decision (scope, a relocation policy departure, the fakematch rule, an accepted edition) gets an ADR.
+The contract is the whole point of setup. It is grilled with you heading by heading, but you are usually not the one who knows the compiler. Setup first lists the compilers, linkers, SDKs, and analysis tools installed on this machine, and hands that list to a background subagent that runs [decomp-identify](./decomp-identify.md) on the binary. While it runs, the grilling covers the headings tagged `[independent]`, and each heading is tagged in the contract so you can see which ones wait for identify. Toolchain questions then arrive with a recommendation, its evidence, and a confidence. A low-confidence identification stays open until a probe or you settle it. Every hard-to-reverse decision (scope, a relocation policy departure, the fakematch rule, an accepted edition) gets an ADR.
 
 The contract is done when a writer could start any ticket, and a coordinator could pick, escalate, and verify, without asking you a single question.
 
