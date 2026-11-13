@@ -7,6 +7,11 @@ fake tools that only print a banner), runs decomp.py commands in it, and asserts
 on exit codes and output. No real compiler, no network. Standard library only.
 
 Run: python scripts/test-decomp.py [name-filter]
+
+A full run takes minutes, longer than the default 120-second tool timeout, so run
+it in the background. While iterating, pass a name filter (a substring of the test
+function names) to run only the matching cases, for example:
+python scripts/test-decomp.py verify
 """
 import hashlib
 import json
