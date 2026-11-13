@@ -2,6 +2,8 @@
 
 Copy into the project as `DECOMP.md` and fill every section. A section with nothing to say states why. Each value names its source: `IDENTIFY.md`, an ADR, or the user.
 
+The contract records nothing about the current state of this machine (what is installed, logged in, or missing). Facts about the machine come from `doctor` and the tool at run time: the contract is frozen by the `decomp-setup` tag, so such a note goes stale and cannot be corrected without a contract change.
+
 ```markdown
 # Decomp contract: <target name>
 

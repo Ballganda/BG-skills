@@ -20,6 +20,7 @@ The leading word is **byte-for-byte**: the original binary is the authority, the
 | [Guardrails](../../skills/engineering/decomp-standards/GUARDRAILS.md) | Eight rules no contract loosens, plus the auditor's checklist |
 | Size tiers | TINY (25 B or less), SMALL (to 256 B), MEDIUM (to 511 B), LARGE (512 B or more); the contract maps each to a model and an attempt budget |
 | Mismatch categories | One tag per failed attempt, for the category that best explains the first differing instruction |
+| Commits | Every commit a decomp skill makes, the coordinator's ledger commits, writers' and repairs' included, ends with the harness's attribution lines |
 | [Layout](../../skills/engineering/decomp-standards/LAYOUT.md) | Every project file and who writes it, ticket statuses, ledger records, tool commands, the change flow, and the default relocation policy |
 
 The guardrails, in short:

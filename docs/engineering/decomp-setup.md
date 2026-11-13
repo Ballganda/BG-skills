@@ -37,7 +37,7 @@ Every tool the contract names is pinned in a frozen `toolchain.json`: its exact 
 - **You install it**, and the manifest records where.
 - **The agent downloads and unpacks it** into the project, after you approve the exact files and sources. Size and SHA-256 are checked on every download.
 
-`decomp.py doctor` then has to pass. It checks the target's edition, each host prerequisite, and each tool's files and banner, and the tool runs it before every build or comparison afterwards. Exit 6 always means the machine differs from the contract, never the source.
+`decomp.py doctor` then has to pass. It checks the target's edition, each host prerequisite, and each tool's files and banner, and the tool runs it before every build or comparison afterwards. Exit 6 always means the machine differs from the contract, never the source. The contract itself records nothing about this machine's current state, such as what is installed, logged in, or missing: that comes from `doctor` and the tool at run time, because a frozen contract would go stale on it.
 
 The pipeline check proves the system works before anything depends on it, in a throwaway clone so nothing reaches the real records. A stub function has to build and match its own bytes, and differ from a real function. The scan has to refuse inline assembly, an unlisted pragma, and the other hidden-directive forms. The inventory has to account for the target's code. A link made from raw blocks alone has to reproduce the original's hash. Where the format cannot be linked whole, the contract records why instead.
 
