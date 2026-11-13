@@ -19,11 +19,18 @@ Then take one branch:
 - Get the target binary's path. Hash it (SHA-256) and note its size.
 - Agree the project folder with the user (default: a sibling of the current project, `<target>-decomp`). Create it as a new git repo with `main` as the integration branch and no remote until the user names a **private** one. Add `.decomp/` to `.gitignore`, and a `.gitattributes` of `* text=auto eol=lf` plus `expected/** binary`, so line-ending conversion can never alter an expected byte.
 - Ask whether the user knows of other editions of the same product. One whose code is the same can be accepted beside this one, and one known to be wrong gets a message: see Editions in [PROVISION.md](PROVISION.md).
+- **Existing folder** (the user names a folder that already exists, for example an empty repo with a remote): accept it only when it is empty or already a decomp project; anything else stops, and you ask for another folder. If the folder has a remote, confirm with the user that the remote is **private** before anything is pushed.
+- Keep the hash and size until step 5 writes them into `DECOMP.md` § Target. Nothing else holds them yet.
 - The target stays where it is: the contract records its hash and size, and `.decomp/local.json` records its path on this machine. Nothing from it ever goes into a public repo.
+- End step 1 with a first commit of `.gitignore` and `.gitattributes` on `main`, so the frozen-path check has history from the start.
 
 ## 2. Identify
 
-Start a background subagent with a fresh context window. Tell it to call the Skill tool with `decomp-identify`, give it the target path and the project folder, and have it write `IDENTIFY.md` there. While it runs, grill the decisions that do not depend on the compiler.
+Before you start the subagent, list the installed compilers, linkers, SDKs, and analysis tools on this machine, each with its version string, and put that list in the brief.
+
+Start a background subagent with a fresh context window. Tell it to call the Skill tool with `decomp-identify`, give it the target path, the project folder, and the list, and have it write `IDENTIFY.md` there. In the brief, say that Python packages and analysis tools are installed by the user, never downloaded by the subagent, and that an installed neighbour version may serve as a partial probe.
+
+While it runs, grill the decisions under the `[independent]` headings of CONTRACT.md. Each heading there is tagged `[needs IDENTIFY]` or `[independent]`: the first kind waits for `IDENTIFY.md`.
 
 ## 3. Grill the contract
 
@@ -34,6 +41,8 @@ Record each hard-to-reverse decision (scope, a departure from the default reloca
 **Done when** a `decomp-match` writer could start on any ticket without asking a single question, and a `/decomp-run` coordinator could pick, escalate, and verify without one.
 
 ## 4. Toolchain
+
+Step 4 may start once the compiler and flags questions are settled; the other grilling rounds stay open alongside it.
 
 Follow [PROVISION.md](PROVISION.md). `IDENTIFY.md` names the tools the target needs and which of them this machine lacks. For each missing tool the user chooses: they install it themselves, or you download and unpack it into the project after they approve the exact files and sources. Either way the result is recorded in `toolchain.json`, and `python tools/decomp.py doctor` must pass before you go on.
 

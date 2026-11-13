@@ -50,12 +50,59 @@ export const decompRequiredLines = [
     "engineering/decomp-setup/CONTRACT.md",
     "The contract records nothing about the current state of this machine (what is installed, logged in, or missing).",
   ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "accept it only when it is empty or already a decomp project",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "confirm with the user that the remote is **private**",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "Keep the hash and size until step 5",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "End step 1 with a first commit of `.gitignore` and `.gitattributes`",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "list the installed compilers, linkers, SDKs, and analysis tools on this machine, each with its version string",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "Python packages and analysis tools are installed by the user, never downloaded by the subagent",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "grill the decisions under the `[independent]` headings",
+  ],
+  [
+    "engineering/decomp-setup/SKILL.md",
+    "Step 4 may start once the compiler and flags questions are settled",
+  ],
 ];
 
 function checkDecompRequiredLines({ read, fail }) {
   for (const [file, line] of decompRequiredLines) {
     if (!read(file).includes(line)) fail(`${file}: missing required line: ${line}`);
   }
+}
+
+// Every heading of the decomp contract template carries exactly one tag: whether its
+// answer depends on the compiler (identify first) or not.
+const contractTags = ["[needs IDENTIFY]", "[independent]"];
+
+function checkContractHeadingTags({ read, fail }) {
+  const file = "engineering/decomp-setup/CONTRACT.md";
+  read(file)
+    .split("\n")
+    .forEach((line, i) => {
+      if (!line.startsWith("## ")) return;
+      const tags = contractTags.filter((tag) => line.includes(tag)).length;
+      if (tags !== 1) fail(`${file}:${i + 1}: heading must carry exactly one tag (${contractTags.join(" or ")}): ${line}`);
+    });
 }
 
 // ticket-gen's two templates each carry a tier field.
@@ -221,6 +268,7 @@ function checkPluginIcon({ fail }) {
 const checks = [
   checkBoundaryLines,
   checkDecompRequiredLines,
+  checkContractHeadingTags,
   checkDescriptionLengths,
   checkTicketTiers,
   checkModelsDoc,
