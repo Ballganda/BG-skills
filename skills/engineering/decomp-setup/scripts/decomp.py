@@ -808,22 +808,26 @@ def cmd_gen_tickets(a):
 
 
 def cmd_next(a):
+    if bool(a.first) != bool(a.reason):
+        die("next: --first and --reason go together")
     ts = [t for t in all_tickets()]
     busy = {t["unit"] for t in ts if t["status"] in ("claimed", "bytes-match", "matched")}
-    started = {t["unit"] for t in ts if t["status"] in MATCHED}
     ready = [t for t in ts if t["status"] in ("open", "regressed") and t["unit"] not in busy]
     order = {"TINY": 0, "SMALL": 1, "MEDIUM": 2, "LARGE": 3}
-    ready.sort(key=lambda t: (t["unit"] not in started, order[t["tier"]], address_order(t["address"])))
+    ready.sort(key=lambda t: (order[t["tier"]], int(t["size"]), address_order(t["address"])))
+    if a.first:
+        head = next((t for t in ready if t["id"] == a.first), None)
+        if not head:
+            die(f"next --first: {a.first} is not a ready ticket")
+        ready.remove(head)
+        ready.insert(0, head)
     picked, units = [], set()
     for t in ready:  # one ticket per unit: units are one writer at a time
         if t["unit"] not in units:
             picked.append(t)
             units.add(t["unit"])
-    if picked and not any(t["tier"] in ("MEDIUM", "LARGE") for t in picked[: a.n]):
-        big = next((t for t in picked if t["tier"] in ("MEDIUM", "LARGE")), None)
-        if big:  # keep one large slot so remaining bytes keep falling
-            picked.remove(big)
-            picked.insert(min(a.n - 1, len(picked)), big)
+    if a.first:
+        append("events.jsonl", {"unix": now(), "ticket": a.first, "event": "out-of-order", "reason": a.reason})
     for t in picked[: a.n]:
         print(f"{t['id']} {t['tier']} {t['size']}B {ticket_path(t['id']).relative_to(ROOT).as_posix()}")
 
@@ -1510,7 +1514,7 @@ def main():
     x.set_defaults(f=cmd_provision)
     s.add_parser("gen-specs").set_defaults(f=cmd_gen_specs)
     s.add_parser("gen-tickets").set_defaults(f=cmd_gen_tickets)
-    x = s.add_parser("next"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_next)
+    x = s.add_parser("next"); x.add_argument("--n", type=int, default=3); x.add_argument("--first"); x.add_argument("--reason"); x.set_defaults(f=cmd_next)
     x = s.add_parser("claim"); x.add_argument("id"); x.add_argument("--by", required=True); x.set_defaults(f=cmd_claim)
     x = s.add_parser("release"); x.add_argument("id"); x.add_argument("--to", default="open"); x.set_defaults(f=cmd_release)
     x = s.add_parser("inventory"); x.add_argument("--redo", action="store_true"); x.set_defaults(f=cmd_inventory)
