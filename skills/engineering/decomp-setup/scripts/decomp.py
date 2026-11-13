@@ -924,6 +924,9 @@ def cmd_verify(a):
     outside = [p for p in changed if p != t["source"]]
     if outside:
         result, n, log = "guardrail", None, f"branch touches guarded paths: {outside}"
+        swept = [q for q in outside if q.startswith(("tickets/", "ledger/"))]
+        if swept:
+            log += f"\n{swept} are status files: the branch was committed too broadly (stage named paths only)"
         src = b""
     else:
         src = git_bytes("show", f"{branch}:{t['source']}")

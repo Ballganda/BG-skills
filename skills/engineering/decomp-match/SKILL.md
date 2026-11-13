@@ -44,7 +44,7 @@ Stop at a local `bytes-match` or when the contract's attempt budget for this tie
 
 ## 5. Commit and report
 
-Commit only the unit's source file to your branch. Your local result does not count: the coordinator's clean `verify` and an auditor decide. Reply in at most 60 words, exactly these lines:
+Commit only the unit's source file to your branch: stage it by name (`git add <source>`), never `git commit -a` or `git add -A`, so no ticket or ledger file rides along. Your local result does not count: the coordinator's clean `verify` and an auditor decide. Reply in at most 60 words, exactly these lines:
 
 ```
 ticket: <id>
