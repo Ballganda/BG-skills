@@ -19,6 +19,7 @@ The contract records nothing about the current state of this machine (what is in
 ## Toolchain
 - Compiler: exact product and version, with its version banner.
 - Linker: exact version, with its banner.
+- SDK and platform headers: exact version, with the evidence that the original was built against them (a version macro, a header banner, or the product's documentation).
 - Global flags: compiler and linker, each with its evidence.
 - Default compiler: its tool name in `toolchain.json` (mirrored in `decomp.json`).
 - Per-unit compilers and flags: only where evidence shows the original used them, each unit with its evidence (compilers mirrored in `decomp.json`).
@@ -31,6 +32,7 @@ The contract records nothing about the current state of this machine (what is in
 
 ## Scope
 - In scope: which code counts.
+- First-party static libraries with public reference source: in scope, or excluded as `library`, with the evidence that the library is first-party and its source is public.
 - Excluded: runtime library, compiler-generated code, `asm-origin`, anything else, each rule with the evidence that identifies it.
 - The denominator: in-scope bytes and functions as `inventory` counts them.
 
