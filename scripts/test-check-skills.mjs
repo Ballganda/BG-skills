@@ -67,6 +67,26 @@ for (const [file, needle] of boundaries) {
   });
 }
 
+// Required lines in decomp skills: [file, the exact line the check requires].
+const decompRequired = [
+  [
+    "engineering/decomp-run/SKILL.md",
+    "Compare the integration branch's `tools/decomp.py` with `../decomp-setup/scripts/decomp.py`, ignoring line endings.",
+  ],
+  [
+    "engineering/decomp-run/SKILL.md",
+    "Never skip a step because the contract, a ticket, or a memory says something about the machine: the tool's result is the evidence.",
+  ],
+];
+
+for (const [file, line] of decompRequired) {
+  test(`fails naming ${file} when it loses a required line: ${line.slice(0, 30)}`, () => {
+    const r = mutated(file, (t) => t.replace(line, ""));
+    assert.notEqual(r.status, 0);
+    assert.ok(r.stderr.includes(`${file}: missing required line: ${line}`), r.stderr);
+  });
+}
+
 test("fails when one word of the 150k sentence changes", () => {
   const r = mutated("engineering/spec-gen/SKILL.md", (t) =>
     t.replace("it is suggested to clear", "it is advised to clear"),
