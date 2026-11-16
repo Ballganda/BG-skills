@@ -429,6 +429,16 @@ def stop_if_edition_differs(environment, t):
             ENV_EXIT)
 
 
+def prepare(t, full=False, judge=True):
+    """Resolve ticket t's compiler, run doctor for the tools it needs, and (when judge) stop if the edition
+    holds t differently. Returns (environment, compiler)."""
+    compiler = compiler_for(t["unit"])
+    environment = doctor(full=full, need=tools_needed([compiler]))
+    if judge:
+        stop_if_edition_differs(environment, t)
+    return environment, compiler
+
+
 def cmd_doctor(a):
     for line in doctor(full=True).lines:
         print(line)
@@ -571,7 +581,7 @@ def event_rejected_repair(ref):
     append("events.jsonl", {"unix": now(), "ref": ref, "event": "rejected-repair"})
 
 
-def event_link(result, edition, units, source_bytes, in_scope_bytes, **more):
+def event_link(result, *, edition, units, source_bytes, in_scope_bytes, **more):
     append("events.jsonl", dict({"unix": now(), "ref": CFG["integration_branch"], "event": "link", "edition": edition,
                                  "units": units, "source_bytes": source_bytes, "in_scope_bytes": in_scope_bytes,
                                  "result": result}, **more))
@@ -597,7 +607,7 @@ EVENTS = {  # event: (statuses it may leave, the status it reaches, fields it wr
     "audit-fail": (("bytes-match",), "claimed", {}),
     "integrate": (("matched",), "integrated", UNCLAIMED),
     "revalidate-pass": (("integrated", "regressed"), "revalidated", {}),
-    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", {}),
+    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", UNCLAIMED),
 }
 MOVES = {(s, e): to for e, (froms, to, _) in EVENTS.items() for s in froms}  # (status, event): new status
 
@@ -802,9 +812,9 @@ def fill(template, t, compiler, obj, report, tree):
     )
 
 
-def adapter(template, t, compiler, obj, report, tree, env):
+def adapter(template, t, compiler, obj, report, tree, environment):
     """Run one adapter command. A tool's output is in the tool's encoding, never assumed to be this system's."""
-    return subprocess.run(fill(template, t, compiler, obj, report, tree), shell=True, cwd=tree, env=env,
+    return subprocess.run(fill(template, t, compiler, obj, report, tree), shell=True, cwd=tree, env=environment.vars,
                           capture_output=True, text=True, errors="replace")
 
 
@@ -830,10 +840,10 @@ def build_and_diff(environment, t, compiler, tree, report):
     if bad:
         return "guardrail", None, "\n".join(bad)
     obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
-    b = adapter(CFG["build"], t, compiler, obj, report, tree, environment.vars)
+    b = adapter(CFG["build"], t, compiler, obj, report, tree, environment)
     if b.returncode != 0:
         return "build-fail", None, (b.stderr or b.stdout)[-4000:]
-    d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment.vars)
+    d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -888,7 +898,7 @@ def cmd_gen_specs(a):
             "| Ticket | Size | Tier |", "| --- | --- | --- |",
         ]
         for f in inn:
-            lines.append(f"| {u['id']}-{f['key']} | {f['size']} | {tier(f['size'])} |")
+            lines.append(f"| {f['id']} | {f['size']} | {tier(f['size'])} |")
         if out:
             lines += ["", "## Excluded", "", "| Address | Size | Scope | Evidence |", "| --- | --- | --- | --- |"]
             for f in out:
@@ -907,7 +917,7 @@ def cmd_gen_tickets(a):
         key = f["key"]
         if f["scope"] != "in":
             continue
-        tid = f"{f['unit']}-{key}"
+        tid = f["id"]
         plain = HEX.fullmatch(f["address"])
         fields = {
             "id": tid, "unit": f["unit"], "address": f"0x{int(f['address'], 16):08X}" if plain else f["address"],
@@ -1002,15 +1012,13 @@ def cmd_inventory(a):
 
 def cmd_disasm(a):
     t, _ = read_ticket(a.id)
-    environment = doctor(full=False, need=tools_needed([compiler_for(t["unit"])]))
+    environment, _ = prepare(t, judge=False)
     run_adapter("disasm", environment, expected=t["expected"], address=t["address"])
 
 
 def cmd_check(a):
     t, _ = read_ticket(a.id)
-    compiler = compiler_for(t["unit"])
-    environment = doctor(full=False, need=tools_needed([compiler]))
-    stop_if_edition_differs(environment, t)
+    environment, compiler = prepare(t)
     report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
     result, n, log = build_and_diff(environment, t, compiler, os.getcwd(), report)
     print(json.dumps({"result": result, "differ_bytes": n, "report": report}))
@@ -1021,14 +1029,12 @@ def cmd_check(a):
 def cmd_verify(a):
     frozen_check()
     t, _ = read_ticket(a.id)
-    compiler = compiler_for(t["unit"])
-    environment = doctor(need=tools_needed([compiler]))
+    environment, compiler = prepare(t, full=True)
     refuse_unless(t, "bytes-match")
     if a.category == "none":  # a writer that matched reports no category
         a.category = None
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
-    stop_if_edition_differs(environment, t)
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
     stamp = now()
@@ -1350,16 +1356,15 @@ def cmd_link(a):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     from_source = sum(f["size"] for mine in source.values() for f in mine)
-    linked = (edition["name"], sorted(source), from_source, in_scope)
+    linked = dict(edition=edition["name"], units=sorted(source), source_bytes=from_source, in_scope_bytes=in_scope)
     first, why = None, ""
     with Worktree(CFG["integration_branch"]) as tree:
         objdir = Path(tempfile.mkdtemp(prefix="decomp-link-"))
-        env = environment.vars
         objects = []
         for unit, mine in sorted(source.items()):
             t = next(t for t in ts if t["unit"] == unit)
             obj = objdir / f"{unit}.obj"
-            b = adapter(CFG["build"], t, built_with.get(unit) or compiler_for(unit), str(obj), "", tree, env)
+            b = adapter(CFG["build"], t, built_with[unit], str(obj), "", tree, environment)
             if b.returncode != 0:
                 why = f"unit {unit} did not build: {(b.stderr or b.stdout)[-2000:]}"
                 break
@@ -1369,14 +1374,14 @@ def cmd_link(a):
             plan = objdir / "plan.json"
             plan.write_text(json.dumps({"objects": objects, "blocks": blocks, "output": str(out)}, indent=1),
                             encoding="utf-8")
-            r = subprocess.run(tool_command(CFG["link"], plan=plan, out=out), shell=True, cwd=tree, env=env,
+            r = subprocess.run(tool_command(CFG["link"], plan=plan, out=out), shell=True, cwd=tree, env=environment.vars,
                                capture_output=True, text=True, errors="replace")
             if r.returncode != 0 or not out.is_file():
                 why = f"the link adapter failed (exit {r.returncode}): {(r.stderr or r.stdout)[-2000:]}"
     share = f"{from_source} / {in_scope} in-scope code B from source ({100 * from_source / in_scope:.2f}%)" \
         if in_scope else "no in-scope code"
     if why:
-        event_link("fail", *linked)
+        event_link("fail", **linked)
         print(f"link: fail; {share}; output {out}")
         die(why)
     got, want = out.read_bytes(), target.read_bytes()
@@ -1386,7 +1391,7 @@ def cmd_link(a):
         result = "mismatch"
         first = next((i for i, (x, y) in enumerate(zip(got, want)) if x != y), min(len(got), len(want)))
         more["first_differ"] = first
-    event_link(result, *linked, **more)
+    event_link(result, **linked, **more)
     print(f"link: {result}; {share}; output {out}")
     if first is not None:
         print(f"first difference at file offset 0x{first:X}: {link_owner(first, source, blocks, inv)}; "

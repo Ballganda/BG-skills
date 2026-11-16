@@ -1767,6 +1767,19 @@ def test_every_move_that_leaves_the_claim_frees_the_unit_for_another_ticket(base
         expect(r.returncode == 0 and f"claimed {other}" in r.stdout, f"after {leave} the unit is free", r)
 
 
+def test_a_regressed_ticket_shows_no_claimant(base):
+    p = Project(base)
+    p.advance("matched")
+    ticket = p.root / f"tickets/{UNIT}/{TID}.md"
+    expect("claimed_by: w1" in ticket.read_text(), "the matched ticket still names its claimant")
+    p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
+    p.git("commit", "-aq", "-m", "break the match")
+    r = p.run("revalidate")
+    expect(r.returncode == 5 and p.status() == "regressed", "the match regresses", r)
+    text = ticket.read_text()
+    expect("claimed_by: w1" not in text and "claimed_at: 1" not in text, "a regressed ticket names no claimant", r)
+
+
 def test_note_appends_a_line_under_notes(base):
     p = Project(base)
     r = p.run("note", TID, "tried", "a", "loop")
