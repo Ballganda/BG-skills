@@ -1460,6 +1460,8 @@ def cmd_report(a):
     for t in ts:
         status[t["status"]] = status.get(t["status"], 0) + 1
     print("status:    " + ", ".join(f"{k} {v}" for k, v in sorted(status.items())))
+    held = [f"{t['id']} {t['claimed_by']}" for t in ts if t["status"] in BUSY and t["claimed_by"]]
+    print("claims:    " + (", ".join(held) or "none"))
     excl = {}
     for f in inv["functions"]:
         if f["scope"] != "in":

@@ -182,6 +182,24 @@ class Project:
         expect(r.returncode == 0 and len(line) == 1, "report should print one status line", r)
         return {k: int(v) for k, v in (c.split() for c in line[0][len("status:"):].split(","))}
 
+    def claims(self):
+        """Claimants as the tool reports them: {ticket id: claimant} from the `claims:` line of `report`."""
+        made = not (self.root / "inventory.json").exists()
+        had_open = (self.root / "OPEN.md").exists()
+        if made:
+            self.write("inventory.json", '{"units": [], "functions": []}\n')
+        try:
+            r = self.run("report", tool=TOOL)
+        finally:
+            if made:
+                (self.root / "inventory.json").unlink()
+            if not had_open:
+                (self.root / "OPEN.md").unlink(missing_ok=True)
+        line = [l for l in r.stdout.splitlines() if l.startswith("claims:")]
+        expect(r.returncode == 0 and len(line) == 1, "report should print one claims line", r)
+        body = line[0][len("claims:"):].strip()
+        return {} if body == "none" else dict(c.split() for c in body.split(", "))
+
     def status(self):
         """The status of a project that holds one ticket."""
         got = self.statuses()
@@ -1771,13 +1789,22 @@ def test_a_regressed_ticket_shows_no_claimant(base):
     p = Project(base)
     p.advance("matched")
     ticket = p.root / f"tickets/{UNIT}/{TID}.md"
-    expect("claimed_by: w1" in ticket.read_text(), "the matched ticket still names its claimant")
+    expect(p.claims() == {TID: "w1"}, "the matched ticket still names its claimant", p.claims())
     p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
     p.git("commit", "-aq", "-m", "break the match")
     r = p.run("revalidate")
     expect(r.returncode == 5 and p.status() == "regressed", "the match regresses", r)
-    text = ticket.read_text()
-    expect("claimed_by: w1" not in text and "claimed_at: 1" not in text, "a regressed ticket names no claimant", r)
+    expect(p.claims() == {}, "a regressed ticket names no claimant", p.claims())
+
+
+def test_report_lists_each_claim_and_its_claimant(base):
+    for to in ("open", "claimed", "bytes-match", "matched", "integrated"):
+        (Path(base) / to).mkdir()
+        p = Project(Path(base) / to)
+        if to != "open":
+            p.advance(to)
+        want = {TID: "w1"} if to in ("claimed", "bytes-match", "matched") else {}
+        expect(p.claims() == want, f"a {to} ticket's claimants", p.claims())
 
 
 def test_note_appends_a_line_under_notes(base):
