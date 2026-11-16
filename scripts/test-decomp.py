@@ -1603,6 +1603,35 @@ def test_audit_pass_records_the_match_once_even_when_run_twice(base):
     expect(p.status() == "matched", "still matched", r)
 
 
+def test_audit_pass_after_regress_and_reclaim_still_has_one_match_record(base):
+    p = Project(base)
+    p.advance("matched")
+    p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
+    p.git("commit", "-aq", "-m", "break the match")
+    r = p.run("revalidate")
+    expect(r.returncode == 5 and "REGRESSED" in r.stdout, "the match regresses", r)
+    expect(p.status() == "regressed", "regressed", r)
+    r = p.run("claim", TID, "--by", "w1")
+    expect(r.returncode == 0, "the regressed ticket is claimed again", r)
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 0, "verify reaches bytes-match again", r)
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode == 0 and "matched" in r.stdout, "the second audit pass succeeds", r)
+    expect(p.status() == "matched", "matched again", r)
+    expect(len(p.lines("matches.jsonl")) == 1, "still one match record", r)
+
+
+def test_audit_pass_leaves_bytes_match_when_the_match_record_cannot_be_written(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    (p.root / "ledger").mkdir(exist_ok=True)
+    (p.root / "ledger" / "matches.jsonl").mkdir()  # a directory: neither read nor append can work
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode != 0, "audit pass fails when the record cannot be written", r)
+    (p.root / "ledger" / "matches.jsonl").rmdir()  # so `report` can read the ledger again
+    expect(p.status() == "bytes-match", "the ticket stays bytes-match", r)
+
+
 def test_audit_pass_is_refused_with_exit_2_when_the_branch_changed_since_verify(base):
     p = Project(base)
     p.advance("bytes-match")
