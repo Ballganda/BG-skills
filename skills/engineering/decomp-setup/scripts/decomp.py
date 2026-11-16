@@ -24,6 +24,7 @@ from pathlib import Path
 TIERS = [("TINY", 25), ("SMALL", 256), ("MEDIUM", 511)]  # else LARGE
 MATCHED = {"matched", "integrated", "revalidated"}
 READY = ("open", "regressed")  # work a writer may claim
+REGRESSABLE = tuple(sorted(MATCHED)) + ("regressed",)  # statuses a regress leaves, in `revalidate` and the lifecycle
 BUSY = ("claimed", "bytes-match", "matched")  # a writer holds the unit
 FINISHED = ("integrated", "revalidated")  # merged into the integration branch
 STATUSES = {"open", "claimed", "blocked-reference", "bytes-match"} | MATCHED | {"regressed"}
@@ -355,7 +356,7 @@ def doctor(full=True, need=None):
         last = json.loads(cache.read_text(encoding="utf-8"))
         edition = edition_named(last.get("edition"))
         if last.get("ok") == stamp and edition:
-            return Environment(edition, {}, tool_env(), [])
+            return Environment(edition=edition, unusable={}, vars=tool_env(), lines=[])
     bad, lines, edition = [], [], None
     if not tgt["path"]:
         bad.append('target: no path; set "target" in .decomp/local.json or DECOMP_TARGET')
@@ -389,7 +390,7 @@ def doctor(full=True, need=None):
     else:
         loc.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps({"ok": stamp, "unix": now(), "edition": edition["name"]}), encoding="utf-8")
-    return Environment(edition, unusable, env, lines)
+    return Environment(edition=edition, unusable=unusable, vars=env, lines=lines)
 
 
 def edition_differs(environment, t):
@@ -597,19 +598,20 @@ def records(name):
 # ---------- ticket lifecycle ----------
 
 UNCLAIMED = {"claimed_by": "", "claimed_at": ""}
-EVENTS = {  # event: (statuses it may leave, the status it reaches, fields it writes)
-    "claim": (READY, "claimed", {}),
-    "release": (("claimed",), "open", UNCLAIMED),
-    "block": (("claimed",), "blocked-reference", UNCLAIMED),
-    "unblock": (("blocked-reference",), "open", {}),
-    "bytes-match": (("claimed",), "bytes-match", {}),
-    "audit-pass": (("bytes-match",), "matched", {}),
-    "audit-fail": (("bytes-match",), "claimed", {}),
-    "integrate": (("matched",), "integrated", UNCLAIMED),
-    "revalidate-pass": (("integrated", "regressed"), "revalidated", {}),
-    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", UNCLAIMED),
+Move = collections.namedtuple("Move", "froms to writes")  # statuses it may leave, the status it reaches, fields it writes
+EVENTS = {  # event: its Move
+    "claim": Move(READY, "claimed", {}),
+    "release": Move(("claimed",), "open", UNCLAIMED),
+    "block": Move(("claimed",), "blocked-reference", UNCLAIMED),
+    "unblock": Move(("blocked-reference",), "open", {}),
+    "bytes-match": Move(("claimed",), "bytes-match", {}),
+    "audit-pass": Move(("bytes-match",), "matched", {}),
+    "audit-fail": Move(("bytes-match",), "claimed", {}),
+    "integrate": Move(("matched",), "integrated", UNCLAIMED),
+    "revalidate-pass": Move(("integrated", "regressed"), "revalidated", {}),
+    "regress": Move(REGRESSABLE, "regressed", UNCLAIMED),
 }
-MOVES = {(s, e): to for e, (froms, to, _) in EVENTS.items() for s in froms}  # (status, event): new status
+MOVES = {(s, e): m.to for e, m in EVENTS.items() for s in m.froms}  # (status, event): new status
 
 
 def may_move(t, event):
@@ -619,7 +621,7 @@ def may_move(t, event):
 def refuse_unless(t, event):
     """Stop, exit 1, unless the ticket `t` may take `event`: one message shape for every command."""
     if not may_move(t, event):
-        froms = EVENTS[event][0]
+        froms = EVENTS[event].froms
         allowed = " or ".join(froms) if len(froms) < 3 else ", ".join(froms[:-1]) + " or " + froms[-1]
         die(f"{t['id']} is {t['status']}; {event} needs {allowed}")
 
@@ -644,7 +646,7 @@ RECORDS = {  # event: what the move writes to the ledger
 }
 
 
-RECORD_FIRST = ("audit-pass",)  # events whose ledger record is written before the ticket moves
+RECORD_FIRST = ("audit-pass", "audit-fail")  # events whose ledger record is written before the ticket moves
 
 
 def move(tid, event, by=None, **args):
@@ -663,7 +665,7 @@ def move(tid, event, by=None, **args):
         take_lock(lock, by)
         fields.update(claimed_by=by, claimed_at=str(now()))
     fields["status"] = after
-    fields.update(EVENTS[event][2])
+    fields.update(EVENTS[event].writes)
     if event in RECORD_FIRST:  # a failed write here leaves the ticket where it was
         RECORDS[event](fields, **args)
     write_ticket(fields, body)
@@ -1205,7 +1207,7 @@ def cmd_revalidate(a):
         ts = [read_ticket(i)[0] for i in matched_ids if i not in gone]
     else:
         frozen_check()
-        ts = [t for t in all_tickets() if t["status"] in MATCHED | {"regressed"}]
+        ts = [t for t in all_tickets() if t["status"] in REGRESSABLE]
     built_with = {t["unit"]: compiler_for(t["unit"]) for t in ts}  # stops here, before any status is written
     environment = doctor(need=tools_needed([]) | {CFG.get("compiler", "")})
     unusable = environment.unusable
