@@ -987,6 +987,9 @@ def cmd_release(a):
         die("release --to open|blocked-reference")
     event = ("block" if a.to == "blocked-reference" else
              "unblock" if t["status"] == "blocked-reference" else "release")
+    if not may_move(t, event):  # the user typed `release`, so name it and every status it accepts for --to
+        accepted = "claimed" if a.to == "blocked-reference" else "claimed or blocked-reference"
+        die(f"{a.id} is {t['status']}; release needs {accepted}")
     print(f"{a.id} -> {move(a.id, event)}")
 
 
@@ -1029,12 +1032,13 @@ def cmd_check(a):
 def cmd_verify(a):
     frozen_check()
     t, _ = read_ticket(a.id)
-    environment, compiler = prepare(t, full=True)
+    environment, compiler = prepare(t, full=True, judge=False)
     refuse_unless(t, "bytes-match")
     if a.category == "none":  # a writer that matched reports no category
         a.category = None
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
+    stop_if_edition_differs(environment, t)
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
     stamp = now()

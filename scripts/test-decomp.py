@@ -1117,6 +1117,16 @@ def test_check_and_verify_stop_on_the_edition_after_a_cached_doctor(base):
     expect(not (p.root / "ledger").exists() and p.status() == "claimed", "nothing should be recorded", r)
 
 
+def test_verify_refuses_before_the_edition_check(base):
+    for d, (status, extra, word) in each(base, [("open", [], "bytes-match needs claimed"),
+                                                ("claimed", ["--category", "bogus"], "unknown category")]):
+        p = Project(d, manifest=editions_manifest(), target=STORE, status=status)
+        p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
+        r = p.run("verify", TID, "--model", "m", *extra)
+        expect(r.returncode == 1 and word in r.stderr, f"verify refuses with exit 1 ({word})", r)
+        expect(not (p.root / "ledger").exists() and p.status() == status, "nothing is recorded", r)
+
+
 # ---- adapter commands ----
 
 def test_adapter_commands_fill_tools_and_python(base):
@@ -1751,8 +1761,8 @@ def test_each_command_refuses_an_illegal_move_with_the_shared_message(base):
              ("claimed", ["audit", TID, "pass", "--auditor", "a1"], "audit-pass needs bytes-match"),
              ("claimed", ["audit", TID, "fail", "--auditor", "a1"], "audit-fail needs bytes-match"),
              ("bytes-match", ["integrate", TID], "integrate needs matched"),
-             ("open", ["release", TID], "release needs claimed"),
-             ("open", ["release", TID, "--to", "blocked-reference"], "block needs claimed")]
+             ("open", ["release", TID], "release needs claimed or blocked-reference"),
+             ("open", ["release", TID, "--to", "blocked-reference"], "release needs claimed")]
     for d, (status, args, needs) in each(base, cases):
         p = Project(d, status=status)
         r = p.run(*args)
