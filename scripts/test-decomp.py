@@ -165,6 +165,70 @@ class Project:
         r.all = r.stdout + r.stderr
         return r
 
+    def statuses(self):
+        """Ticket statuses as the tool reports them: {status: count} from the status line of `report`."""
+        made = not (self.root / "inventory.json").exists()
+        had_open = (self.root / "OPEN.md").exists()
+        if made:
+            self.write("inventory.json", '{"units": [], "functions": []}\n')
+        try:
+            r = self.run("report", tool=TOOL)  # the skill's copy: a test may break the project's own
+        finally:
+            if made:
+                (self.root / "inventory.json").unlink()
+            if not had_open:
+                (self.root / "OPEN.md").unlink(missing_ok=True)
+        return {k: int(v) for k, v in (c.split() for c in report_line(r, "status:").split(","))}
+
+    def claims(self):
+        """Claimants as the tool reports them: {ticket id: claimant} from the `claims:` line of `report`."""
+        made = not (self.root / "inventory.json").exists()
+        had_open = (self.root / "OPEN.md").exists()
+        if made:
+            self.write("inventory.json", '{"units": [], "functions": []}\n')
+        try:
+            r = self.run("report", tool=TOOL)
+        finally:
+            if made:
+                (self.root / "inventory.json").unlink()
+            if not had_open:
+                (self.root / "OPEN.md").unlink(missing_ok=True)
+        body = report_line(r, "claims:").strip()
+        return {} if body == "none" else dict(c.split() for c in body.split(", "))
+
+    def status(self):
+        """The status of a project that holds one ticket."""
+        got = self.statuses()
+        expect(sum(got.values()) == 1, f"expected one ticket, report says {got}")
+        return next(iter(got))
+
+    def advance(self, to):
+        """Drive the ticket through the CLI to `to`: claimed, bytes-match, matched or integrated."""
+        want = ("claimed", "bytes-match", "matched", "integrated").index(to)
+        branch = f"w/{TID}"
+        if want >= 1:  # branch first: the claim edits a tracked ticket, which a branch commit would sweep up
+            self.branch(branch, {SOURCE: CLEAN + "/* w */\n"})
+        r = self.run("claim", TID, "--by", "w1")
+        expect(r.returncode == 0, "claim should pass", r)
+        if want >= 1:
+            r = self.run("verify", TID, "--model", "m")
+            expect(r.returncode == 0, "verify should reach bytes-match", r)
+        if want >= 2:
+            r = self.run("audit", TID, "pass", "--auditor", "a1")
+            expect(r.returncode == 0, "audit pass should reach matched", r)
+        if want >= 3:
+            self.git("merge", "-q", "--no-edit", branch)
+            r = self.run("integrate", TID)
+            expect(r.returncode == 0, "integrate should pass", r)
+        expect(self.status() == to, f"the scenario should end {to}")
+
+    def lines(self, name):
+        f = self.root / "ledger" / name
+        return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+    def lock_file(self, name):
+        return self.root / ".decomp" / "locks" / f"{name}.lock"
+
     def check(self, **kw):
         """Run `check` and return (process, parsed result line or None)."""
         r = self.run("check", TID, **kw)
@@ -178,6 +242,13 @@ def expect(cond, what, r=None):
     if not cond:
         detail = f"\n  exit {r.returncode}\n  stdout: {r.stdout.strip()}\n  stderr: {r.stderr.strip()}" if r else ""
         raise AssertionError(what + detail)
+
+
+def report_line(r, prefix):
+    """What follows `prefix` on the one line of `report` output that starts with it. Fails unless there is exactly one."""
+    line = [l for l in r.stdout.splitlines() if l.startswith(prefix)]
+    expect(r.returncode == 0 and len(line) == 1, f"report should print exactly one {prefix} line", r)
+    return line[0][len(prefix):]
 
 
 def expect_guardrail(p, *quoted):
@@ -459,7 +530,7 @@ def test_verify_records_nothing_on_function_the_edition_holds_differently(base):
     r = p.run("verify", TID, "--model", "m")
     expect(r.returncode == ENV_EXIT, "verify should exit 6 on a differs address", r)
     expect(not (p.root / "ledger").exists(), "no ledger record should be written", r)
-    expect("status: claimed" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
+    expect(p.status() == "claimed", "the ticket should not change", r)
 
 
 def test_check_runs_on_the_whole_file_edition_of_the_same_contract(base):
@@ -477,7 +548,7 @@ def test_revalidate_skips_on_the_integration_branch_and_says_so(base):
     p = Project(base, manifest=editions_manifest(), target=STORE, status="integrated")
     r = p.run("revalidate")
     expect(r.returncode == 0 and f"SKIPPED {TID}" in r.stdout and "1 skipped" in r.stdout, "it should skip, exit 0", r)
-    expect("status: integrated" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
+    expect(p.status() == "integrated", "the ticket should not change", r)
 
 
 def test_revalidate_does_not_accept_a_repair_it_could_not_measure(base):
@@ -500,7 +571,7 @@ def tickets_of(p):
     return sorted(f.stem for f in (p.root / "tickets" / UNIT).glob("*.md"))
 
 
-def test_tickets_for_a_64_bit_target(base):
+def test_tickets_and_patterns_for_a_64_bit_target(base):
     p = Project(base, files=inventory({"address": "0x0000000140001000"}))
     r = p.run("gen-tickets")
     expect(r.returncode == 0 and "u0001-140001000" in tickets_of(p), f"got {tickets_of(p)}", r)
@@ -518,7 +589,7 @@ def test_functions_sharing_an_address_need_keys(base):
     expect(r.returncode != 0 and "share the key" in r.stderr, "two functions at one address should stop", r)
 
 
-def test_keyed_functions_get_their_own_tickets_and_expected_files(base):
+def test_keyed_and_bank_addressed_functions_get_their_own_tickets(base):
     d = Path(base) / "keys"
     d.mkdir()
     p = Project(d, files=inventory({"address": "0x80101000", "key": "ovl1_80101000"},
@@ -615,7 +686,7 @@ def test_verify_accepts_clean_writer_branch(base):
     expect(ev.splitlines()[0].replace("\\", "/").endswith("/symbols.json"), f"evidence lacks the symbol map path: {ev}", r)
 
 
-def test_verify_accepts_the_category_none_a_matching_writer_reports(base):
+def test_verify_refuses_an_unknown_category_and_takes_none(base):
     p = Project(base, status="claimed")
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
     r = p.run("verify", TID, "--model", "m", "--category", "bogus")
@@ -686,8 +757,9 @@ def config_with(p, **changes):
 
 def expect_nothing_recorded(p, r, status="integrated"):
     expect(not (p.root / "ledger").exists(), "a candidate run should write no ledger record", r)
-    expect(f"status: {status}" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
     expect(p.git("status", "--porcelain").strip() == "", "the checkout should be left as it was", r)
+    held = len(list((p.root / "tickets").glob("*/*.md")))
+    expect(p.statuses() == {status: held}, "the tickets should not change", r)
 
 
 def test_candidate_may_change_paths_frozen_by_either_tag(base):
@@ -835,7 +907,7 @@ def test_plain_revalidate_still_refuses_when_a_frozen_path_differs(base):
         expect(not (p.root / "ledger").exists(), "nothing should be recorded", r)
 
 
-def test_repair_ref_is_still_held_to_headers_and_the_symbol_map(base):
+def test_repair_ref_may_not_touch_a_frozen_path_and_only_a_candidate_may(base):
     p = started_project(base)
     p.branch("r/contract", {"DECOMP.md": "# contract, changed\n"})
     r = p.run("revalidate", "--ref", "r/contract")
@@ -1019,13 +1091,43 @@ def test_revalidate_skips_a_unit_whose_compiler_is_not_usable(base):
                 config={"compiler": "compiler", "unit_compilers": {UNIT: "compiler2"}})
     r = p.run("revalidate")
     expect(r.returncode == 0 and f"SKIPPED {TID}" in r.stdout and "compiler2" in r.stdout, "it should skip that unit", r)
-    expect("status: integrated" in (p.root / f"tickets/{UNIT}/{TID}.md").read_text(), "the ticket should not change", r)
+    expect(p.status() == "integrated", "the ticket should not change", r)
 
 
 def test_revalidate_stops_before_any_write_on_a_compiler_outside_the_manifest(base):
     p = Project(base, status="integrated", config={"compiler": "compiler", "unit_compilers": {UNIT: "ghost"}})
     r = p.run("revalidate")
     expect(r.returncode == ENV_EXIT and "ghost" in r.stderr and not (p.root / "ledger").exists(), "exit 6, no record", r)
+
+
+def test_revalidate_stops_before_measuring_any_unit_when_a_later_units_compiler_is_missing(base):
+    p = Project(base, status="integrated", files=second_ticket(),
+                config={"compiler": "compiler", "unit_compilers": {"u0002": "ghost"}})
+    r = p.run("revalidate")
+    expect(r.returncode == ENV_EXIT and "ghost" in r.stderr, "exit 6 on the missing compiler", r)
+    expect("revalidated" not in r.stdout and not (p.root / "ledger").exists(), "no unit is measured or recorded", r)
+    expect(p.statuses() == {"integrated": 2}, "no status should change", r)
+
+
+def test_check_and_verify_stop_on_the_edition_after_a_cached_doctor(base):
+    p = Project(base, manifest=editions_manifest(), target=STORE, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
+    r = p.run("doctor")
+    expect(r.returncode == 0, "doctor should pass and cache its check", r)
+    for args in (("check", TID), ("verify", TID, "--model", "m")):
+        r = p.run(*args)
+        expect(r.returncode == ENV_EXIT and "store re-release" in r.stderr, f"{args[0]} should exit 6 on the edition", r)
+    expect(not (p.root / "ledger").exists() and p.status() == "claimed", "nothing should be recorded", r)
+
+
+def test_verify_refuses_before_the_edition_check(base):
+    for d, (status, extra, word) in each(base, [("open", [], "bytes-match needs claimed"),
+                                                ("claimed", ["--category", "bogus"], "unknown category")]):
+        p = Project(d, manifest=editions_manifest(), target=STORE, status=status)
+        p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
+        r = p.run("verify", TID, "--model", "m", *extra)
+        expect(r.returncode == 1 and word in r.stderr, f"verify refuses with exit 1 ({word})", r)
+        expect(not (p.root / "ledger").exists() and p.status() == status, "nothing is recorded", r)
 
 
 # ---- adapter commands ----
@@ -1272,30 +1374,29 @@ def test_check_trusts_the_last_pass_until_a_watched_file_changes(base):
 
 
 def state_of(p):
+    """The state word `report` prints on its state line."""
     r = p.run("report")
-    lines = [l for l in r.stdout.splitlines() if l.startswith("state:")]
-    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one state line", r)
-    return lines[0]
+    return report_line(r, "state:").split()[0]
 
 
 def test_report_states_more_when_a_ticket_is_ready(base):
     p = started_project(base, status="integrated", files=second_ticket(status="open"))
-    expect(state_of(p).split()[1] == "more", "a ready ticket means more", p.run("report"))
+    expect(state_of(p) == "more", "a ready ticket means more", p.run("report"))
 
 
 def test_report_states_stuck_when_the_rest_are_blocked_or_regressed(base):
     p = started_project(base, status="regressed", files=second_ticket(status="blocked-reference"))
-    expect(state_of(p).split()[1] == "stuck", "nothing ready means stuck", p.run("report"))
+    expect(state_of(p) == "stuck", "nothing ready means stuck", p.run("report"))
 
 
 def test_report_states_finished_when_every_ticket_is_revalidated(base):
     p = started_project(base, status="revalidated", files=second_ticket(status="revalidated"))
-    expect(state_of(p).split()[1] == "finished", "all revalidated means finished", p.run("report"))
+    expect(state_of(p) == "finished", "all revalidated means finished", p.run("report"))
 
 
 def test_report_does_not_state_finished_for_integrated_tickets(base):
     p = started_project(base, status="revalidated", files=second_ticket(status="integrated"))
-    expect(state_of(p).split()[1] == "more", "integrated, not revalidated, is not finished", p.run("report"))
+    expect(state_of(p) == "more", "integrated, not revalidated, is not finished", p.run("report"))
 
 
 # ---- whole-binary link ----
@@ -1461,9 +1562,7 @@ def milestone_project(base, sizes, statuses=("integrated", "integrated", "open")
 
 def milestone_of(p):
     r = p.run("report")
-    lines = [l for l in r.stdout.splitlines() if l.startswith("milestone:")]
-    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one milestone line", r)
-    return lines[0].split(":", 1)[1].strip()
+    return report_line(r, "milestone:").strip()
 
 
 def test_milestone_is_due_at_five_percent_of_in_scope_bytes(base):
@@ -1514,6 +1613,287 @@ def test_verify_checks_the_environment_before_recording(base):
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
     r = p.run("verify", TID, "--model", "m", env={"DECOMP_TARGET": str(p.root / "DECOMP.md")})
     expect(r.returncode == ENV_EXIT and not (p.root / "ledger").exists(), "verify should exit 6, recording nothing", r)
+
+
+# ---------- lifecycle commands: audit, integrate, release, note, similar, lock ----------
+
+def test_scenario_reaches_each_late_status_through_the_cli(base):
+    for d, to in each(base, ["claimed", "bytes-match", "matched", "integrated"]):
+        Project(d).advance(to)
+
+
+def test_second_audit_pass_on_a_matched_ticket_is_refused_and_keeps_one_record(base):
+    p = Project(base)
+    p.advance("matched")
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode != 0 and "audit-pass needs bytes-match" in r.stderr, "a second pass on a matched ticket is refused", r)
+    expect(len(p.lines("matches.jsonl")) == 1, "one match record", r)
+    expect(p.status() == "matched", "still matched", r)
+
+
+def test_audit_pass_after_regress_and_reclaim_still_has_one_match_record(base):
+    p = Project(base)
+    p.advance("matched")
+    p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
+    p.git("commit", "-aq", "-m", "break the match")
+    r = p.run("revalidate")
+    expect(r.returncode == 5 and "REGRESSED" in r.stdout, "the match regresses", r)
+    expect(p.status() == "regressed", "regressed", r)
+    r = p.run("claim", TID, "--by", "w1")
+    expect(r.returncode == 0, "the regressed ticket is claimed again", r)
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 0, "verify reaches bytes-match again", r)
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode == 0 and "matched" in r.stdout, "the second audit pass succeeds", r)
+    expect(p.status() == "matched", "matched again", r)
+    expect(len(p.lines("matches.jsonl")) == 1, "still one match record", r)
+
+
+def test_audit_pass_leaves_bytes_match_when_the_match_record_cannot_be_written(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    (p.root / "ledger").mkdir(exist_ok=True)
+    (p.root / "ledger" / "matches.jsonl").mkdir()  # a directory: neither read nor append can work
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode != 0, "audit pass fails when the record cannot be written", r)
+    (p.root / "ledger" / "matches.jsonl").rmdir()  # so `report` can read the ledger again
+    expect(p.status() == "bytes-match", "the ticket stays bytes-match", r)
+
+
+def test_audit_pass_is_refused_with_exit_2_when_the_branch_changed_since_verify(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    p.git("checkout", "-q", f"w/{TID}")
+    p.write(SOURCE, CLEAN + "/* changed after verify */\n")
+    p.git("add", SOURCE)
+    p.git("commit", "-q", "-m", "late edit")
+    p.git("checkout", "-q", "main")
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode == 2 and "branch changed since verify" in r.stderr, "audit pass should exit 2", r)
+    expect(p.status() == "bytes-match" and not p.lines("matches.jsonl"), "nothing should be recorded", r)
+
+
+def test_audit_fail_appends_an_attempt_returns_to_claimed_and_notes(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    r = p.run("audit", TID, "fail", "--auditor", "a1", "--note", "uses a banned trick")
+    expect(r.returncode == 0 and "back to claimed" in r.stdout, "audit fail should pass", r)
+    ids = [a["id"] for a in p.lines("attempts.jsonl")]
+    expect(ids == [f"{TID}-a001", f"{TID}-a002"], f"the next attempt id follows verify's, got {ids}", r)
+    expect(p.status() == "claimed", "the ticket returns to claimed", r)
+    notes = (p.root / f"tickets/{UNIT}/{TID}.md").read_text()
+    expect("audit-fail: uses a banned trick" in notes, "a note is appended", r)
+    r = p.run("verify", TID, "--model", "m")
+    expect(f"{TID}-a003" in r.stdout, "the next verify numbers after the failed audit", r)
+
+
+def test_audit_fail_whose_attempt_cannot_be_recorded_leaves_the_ticket_at_bytes_match(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    ticket = p.root / f"tickets/{UNIT}/{TID}.md"
+    before = ticket.read_bytes()
+    ledger = p.root / "ledger" / "attempts.jsonl"
+    os.chmod(ledger, stat.S_IREAD)
+    try:
+        r = p.run("audit", TID, "fail", "--auditor", "a1")
+    finally:
+        os.chmod(ledger, stat.S_IREAD | stat.S_IWRITE)
+    expect(r.returncode != 0, "an unwritable attempt record should fail the audit", r)
+    expect(ticket.read_bytes() == before, "the ticket should be byte for byte as it was", r)
+    expect(p.status() == "bytes-match", "the ticket stays at bytes-match", r)
+
+
+def test_regressing_an_integrated_or_revalidated_ticket_leaves_its_claimant_fields_alone(base):
+    for d, status in each(base, ["integrated", "revalidated"]):
+        p = Project(d)
+        p.advance("integrated")
+        if status == "revalidated":
+            r = p.run("revalidate")
+            expect(r.returncode == 0 and p.status() == "revalidated", "the match revalidates", r)
+        ticket = p.root / f"tickets/{UNIT}/{TID}.md"
+        claimant = lambda: [l for l in ticket.read_text().splitlines() if l.startswith(("claimed_by", "claimed_at"))]
+        before = claimant()
+        expect(len(before) == 2 and p.claims() == {}, f"a {status} ticket names no claimant", p.claims())
+        p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
+        p.git("commit", "-aq", "-m", "break the match")
+        r = p.run("revalidate")
+        expect(r.returncode == 5 and p.status() == "regressed", f"the {status} ticket regresses", r)
+        expect(claimant() == before, f"regressing a {status} ticket leaves its claimant fields unchanged", r)
+        expect(p.claims() == {}, f"the {status} ticket adds no claims line", p.claims())
+
+
+def test_audit_is_refused_unless_the_ticket_is_bytes_match(base):
+    p = Project(base)
+    p.advance("claimed")
+    r = p.run("audit", TID, "pass", "--auditor", "a1")
+    expect(r.returncode == 1 and f"{TID} is claimed; audit-pass needs bytes-match" in r.stderr, "audit refuses", r)
+
+
+def test_integrate_is_refused_when_the_branch_is_not_merged(base):
+    p = Project(base)
+    p.advance("matched")
+    r = p.run("integrate", TID)
+    expect(r.returncode == 1 and "is not merged into main" in r.stderr, "integrate refuses an unmerged branch", r)
+    expect(p.status() == "matched" and p.lock_file(f"unit-{UNIT}").exists(), "ticket and lock are unchanged", r)
+    expect(not events(p), "no event is recorded", r)
+
+
+def test_integrate_releases_the_unit_lock_and_records_the_event(base):
+    p = Project(base)
+    p.advance("matched")
+    expect(p.lock_file(f"unit-{UNIT}").exists(), "the claim holds the unit lock")
+    p.git("merge", "-q", "--no-edit", f"w/{TID}")
+    r = p.run("integrate", TID)
+    expect(r.returncode == 0 and f"integrated {TID}" in r.stdout, "integrate passes once merged", r)
+    expect(p.status() == "integrated", "the ticket is integrated", r)
+    expect(not p.lock_file(f"unit-{UNIT}").exists(), "the unit lock is released", r)
+    got = [(e["ticket"], e["event"]) for e in events(p)]
+    expect(got == [(TID, "integrated")], f"one integrated event, got {got}", r)
+
+
+def test_integrate_is_refused_unless_the_ticket_is_matched(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    r = p.run("integrate", TID)
+    expect(r.returncode == 1 and f"{TID} is bytes-match; integrate needs matched" in r.stderr, "integrate refuses", r)
+
+
+def test_release_moves_claimed_to_open_and_frees_the_lock(base):
+    p = Project(base)
+    p.advance("claimed")
+    r = p.run("release", TID)
+    expect(r.returncode == 0 and f"{TID} -> open" in r.stdout, "release to open", r)
+    expect(p.status() == "open" and not p.lock_file(f"unit-{UNIT}").exists(), "open and unlocked", r)
+
+
+def test_release_moves_claimed_to_blocked_reference_and_blocked_back_to_open(base):
+    p = Project(base)
+    p.advance("claimed")
+    r = p.run("release", TID, "--to", "blocked-reference")
+    expect(r.returncode == 0 and f"{TID} -> blocked-reference" in r.stdout, "release to blocked-reference", r)
+    expect(p.status() == "blocked-reference" and not p.lock_file(f"unit-{UNIT}").exists(), "blocked and unlocked", r)
+    r = p.run("release", TID)
+    expect(r.returncode == 0 and f"{TID} -> open" in r.stdout and p.status() == "open", "blocked back to open", r)
+
+
+def test_release_is_refused_from_any_other_status(base):
+    for d, status in each(base, ["open", "bytes-match", "matched", "integrated", "regressed", "revalidated"]):
+        p = Project(d, status=status)
+        r = p.run("release", TID)
+        expect(r.returncode == 1 and f"{TID} is {status}; release needs claimed" in r.stderr, f"{status}: release refuses", r)
+        expect(p.status() == status, f"{status}: the ticket does not change", r)
+
+
+def test_release_refuses_an_unknown_target(base):
+    p = Project(base, status="claimed")
+    r = p.run("release", TID, "--to", "matched")
+    expect(r.returncode == 1 and "release --to open|blocked-reference" in r.stderr, "release names its targets", r)
+
+
+def test_each_command_refuses_an_illegal_move_with_the_shared_message(base):
+    cases = [("matched", ["claim", TID, "--by", "w2"], "claim needs open or regressed"),
+             ("open", ["verify", TID, "--model", "m"], "bytes-match needs claimed"),
+             ("claimed", ["audit", TID, "pass", "--auditor", "a1"], "audit-pass needs bytes-match"),
+             ("claimed", ["audit", TID, "fail", "--auditor", "a1"], "audit-fail needs bytes-match"),
+             ("bytes-match", ["integrate", TID], "integrate needs matched"),
+             ("open", ["release", TID], "release needs claimed or blocked-reference"),
+             ("open", ["release", TID, "--to", "blocked-reference"], "release needs claimed")]
+    for d, (status, args, needs) in each(base, cases):
+        p = Project(d, status=status)
+        r = p.run(*args)
+        expect(r.returncode == 1 and f"{TID} is {status}; {needs}" in r.stderr, f"{args[0]} refuses {status}", r)
+        expect(p.status() == status, f"{args[0]}: the ticket does not change", r)
+
+
+def test_every_move_that_leaves_the_claim_frees_the_unit_for_another_ticket(base):
+    other = f"{UNIT}-00402000"
+    broken = {SOURCE: MARK + "int f(void) { return 2; }\n"}
+    for d, leave in each(base, ["release", "block", "integrate", "regress"]):
+        p = Project(d)
+        p.advance("matched" if leave in ("integrate", "regress") else "claimed")
+        p.write(f"tickets/{UNIT}/{other}.md", ticket_text(other, "0x00402000", SOURCE, "open"))
+        if leave == "release":
+            r = p.run("release", TID)
+        elif leave == "block":
+            r = p.run("release", TID, "--to", "blocked-reference")
+        elif leave == "integrate":
+            p.git("merge", "-q", "--no-edit", f"w/{TID}")
+            r = p.run("integrate", TID)
+        else:
+            for rel, text in broken.items():
+                p.write(rel, text)
+            p.git("commit", "-aq", "-m", "break the match")
+            r = p.run("revalidate")
+            expect(r.returncode == 5 and "REGRESSED" in r.stdout, "the match regresses", r)
+        expect(leave == "regress" or r.returncode == 0, f"{leave} passes", r)
+        r = p.run("claim", other, "--by", "w2")
+        expect(r.returncode == 0 and f"claimed {other}" in r.stdout, f"after {leave} the unit is free", r)
+
+
+def test_a_regressed_ticket_shows_no_claimant(base):
+    p = Project(base)
+    p.advance("matched")
+    expect(p.claims() == {TID: "w1"}, "the matched ticket still names its claimant", p.claims())
+    p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
+    p.git("commit", "-aq", "-m", "break the match")
+    r = p.run("revalidate")
+    expect(r.returncode == 5 and p.status() == "regressed", "the match regresses", r)
+    expect(p.claims() == {}, "a regressed ticket names no claimant", p.claims())
+
+
+def test_report_lists_each_claim_and_its_claimant(base):
+    for to in ("open", "claimed", "bytes-match", "matched", "integrated"):
+        (Path(base) / to).mkdir()
+        p = Project(Path(base) / to)
+        if to != "open":
+            p.advance(to)
+        want = {TID: "w1"} if to in ("claimed", "bytes-match", "matched") else {}
+        expect(p.claims() == want, f"a {to} ticket's claimants", p.claims())
+
+
+def test_note_appends_a_line_under_notes(base):
+    p = Project(base)
+    r = p.run("note", TID, "tried", "a", "loop")
+    expect(r.returncode == 0, "note passes", r)
+    text = (p.root / f"tickets/{UNIT}/{TID}.md").read_text()
+    expect(text.rstrip().endswith("tried a loop") and "## Notes" in text, "the note lands under Notes", r)
+    expect(p.status() == "open", "the status is unchanged", r)
+
+
+def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
+    other, third = "u0002-00402000", "u0003-00403000"
+    files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
+             "expected/00403000.bin": "zzzzzzzz\n", "src/u0002.c": "x\n", "src/u0003.c": "x\n",
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated"),
+             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated")}
+    p = Project(base, files=files)
+    r = p.run("similar", TID, "--n", "2")
+    rows = r.stdout.splitlines()
+    got = [l.split()[1] for l in rows]
+    expect(r.returncode == 0 and got == [other, third], f"closest first, got {got}", r)
+    expect(float(rows[0].split()[0]) > float(rows[1].split()[0]), "scores fall", r)
+
+
+def test_similar_ignores_tickets_that_are_not_matched(base):
+    other = "u0002-00402000"
+    files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgh\n", "src/u0002.c": "x\n",
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open")}
+    r = Project(base, files=files).run("similar", TID)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "an open ticket is never a model", r)
+
+
+def test_lock_refuses_a_held_lock_with_exit_3_and_unlock_frees_it(base):
+    p = Project(base)
+    r = p.run("lock", "gen", "--by", "w1")
+    expect(r.returncode == 0 and "locked gen" in r.stdout and p.lock_file("gen").exists(), "lock takes", r)
+    r = p.run("lock", "gen", "--by", "w2")
+    expect(r.returncode == 3 and "locked: gen: w1" in r.stderr, "a held lock exits 3 and names its holder", r)
+    r = p.run("unlock", "gen")
+    expect(r.returncode == 0 and "unlocked gen" in r.stdout and not p.lock_file("gen").exists(), "unlock frees it", r)
+    r = p.run("lock", "gen", "--by", "w2")
+    expect(r.returncode == 0, "the lock can be taken again", r)
+    r = p.run("unlock", "never-held")
+    expect(r.returncode == 0, "unlocking a free lock is not an error", r)
 
 
 def rmtree(path):

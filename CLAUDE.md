@@ -19,6 +19,10 @@ Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install comma
 - No em-dashes in any prose (skills, docs, READMEs, changelog, ADRs, changesets, code comments). Rewrite the sentence with a comma, colon, period, parentheses, or conjunction; never substitute blindly.
 - A skill that dispatches a subagent says to start it with a fresh context window: some harnesses (Codex) fork by default, and a fork inherits the context the subagent should escape.
 
+## Tests
+
+The test commands are stated in the [Checks section of `CONTRIBUTING.md`](./CONTRIBUTING.md#checks).
+
 ## Agent skills
 
 - Issue tracker: GitHub Issues on `Ballganda/BG-skills` via `gh`. See `docs/agents/issue-tracker.md`.
