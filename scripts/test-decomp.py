@@ -178,9 +178,7 @@ class Project:
                 (self.root / "inventory.json").unlink()
             if not had_open:
                 (self.root / "OPEN.md").unlink(missing_ok=True)
-        line = [l for l in r.stdout.splitlines() if l.startswith("status:")]
-        expect(r.returncode == 0 and len(line) == 1, "report should print one status line", r)
-        return {k: int(v) for k, v in (c.split() for c in line[0][len("status:"):].split(","))}
+        return {k: int(v) for k, v in (c.split() for c in report_line(r, "status:").split(","))}
 
     def claims(self):
         """Claimants as the tool reports them: {ticket id: claimant} from the `claims:` line of `report`."""
@@ -195,9 +193,7 @@ class Project:
                 (self.root / "inventory.json").unlink()
             if not had_open:
                 (self.root / "OPEN.md").unlink(missing_ok=True)
-        line = [l for l in r.stdout.splitlines() if l.startswith("claims:")]
-        expect(r.returncode == 0 and len(line) == 1, "report should print one claims line", r)
-        body = line[0][len("claims:"):].strip()
+        body = report_line(r, "claims:").strip()
         return {} if body == "none" else dict(c.split() for c in body.split(", "))
 
     def status(self):
@@ -246,6 +242,13 @@ def expect(cond, what, r=None):
     if not cond:
         detail = f"\n  exit {r.returncode}\n  stdout: {r.stdout.strip()}\n  stderr: {r.stderr.strip()}" if r else ""
         raise AssertionError(what + detail)
+
+
+def report_line(r, prefix):
+    """What follows `prefix` on the one line of `report` output that starts with it. Fails unless there is exactly one."""
+    line = [l for l in r.stdout.splitlines() if l.startswith(prefix)]
+    expect(r.returncode == 0 and len(line) == 1, f"report should print exactly one {prefix} line", r)
+    return line[0][len(prefix):]
 
 
 def expect_guardrail(p, *quoted):
@@ -568,7 +571,7 @@ def tickets_of(p):
     return sorted(f.stem for f in (p.root / "tickets" / UNIT).glob("*.md"))
 
 
-def test_tickets_for_a_64_bit_target(base):
+def test_tickets_and_patterns_for_a_64_bit_target(base):
     p = Project(base, files=inventory({"address": "0x0000000140001000"}))
     r = p.run("gen-tickets")
     expect(r.returncode == 0 and "u0001-140001000" in tickets_of(p), f"got {tickets_of(p)}", r)
@@ -586,7 +589,7 @@ def test_functions_sharing_an_address_need_keys(base):
     expect(r.returncode != 0 and "share the key" in r.stderr, "two functions at one address should stop", r)
 
 
-def test_keyed_functions_get_their_own_tickets_and_expected_files(base):
+def test_keyed_and_bank_addressed_functions_get_their_own_tickets(base):
     d = Path(base) / "keys"
     d.mkdir()
     p = Project(d, files=inventory({"address": "0x80101000", "key": "ovl1_80101000"},
@@ -683,7 +686,7 @@ def test_verify_accepts_clean_writer_branch(base):
     expect(ev.splitlines()[0].replace("\\", "/").endswith("/symbols.json"), f"evidence lacks the symbol map path: {ev}", r)
 
 
-def test_verify_accepts_the_category_none_a_matching_writer_reports(base):
+def test_verify_refuses_an_unknown_category_and_takes_none(base):
     p = Project(base, status="claimed")
     p.branch(f"w/{TID}", {SOURCE: CLEAN + "/* w */\n"})
     r = p.run("verify", TID, "--model", "m", "--category", "bogus")
@@ -904,7 +907,7 @@ def test_plain_revalidate_still_refuses_when_a_frozen_path_differs(base):
         expect(not (p.root / "ledger").exists(), "nothing should be recorded", r)
 
 
-def test_repair_ref_is_still_held_to_headers_and_the_symbol_map(base):
+def test_repair_ref_may_not_touch_a_frozen_path_and_only_a_candidate_may(base):
     p = started_project(base)
     p.branch("r/contract", {"DECOMP.md": "# contract, changed\n"})
     r = p.run("revalidate", "--ref", "r/contract")
@@ -1371,30 +1374,29 @@ def test_check_trusts_the_last_pass_until_a_watched_file_changes(base):
 
 
 def state_of(p):
+    """The state word `report` prints on its state line."""
     r = p.run("report")
-    lines = [l for l in r.stdout.splitlines() if l.startswith("state:")]
-    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one state line", r)
-    return lines[0]
+    return report_line(r, "state:").split()[0]
 
 
 def test_report_states_more_when_a_ticket_is_ready(base):
     p = started_project(base, status="integrated", files=second_ticket(status="open"))
-    expect(state_of(p).split()[1] == "more", "a ready ticket means more", p.run("report"))
+    expect(state_of(p) == "more", "a ready ticket means more", p.run("report"))
 
 
 def test_report_states_stuck_when_the_rest_are_blocked_or_regressed(base):
     p = started_project(base, status="regressed", files=second_ticket(status="blocked-reference"))
-    expect(state_of(p).split()[1] == "stuck", "nothing ready means stuck", p.run("report"))
+    expect(state_of(p) == "stuck", "nothing ready means stuck", p.run("report"))
 
 
 def test_report_states_finished_when_every_ticket_is_revalidated(base):
     p = started_project(base, status="revalidated", files=second_ticket(status="revalidated"))
-    expect(state_of(p).split()[1] == "finished", "all revalidated means finished", p.run("report"))
+    expect(state_of(p) == "finished", "all revalidated means finished", p.run("report"))
 
 
 def test_report_does_not_state_finished_for_integrated_tickets(base):
     p = started_project(base, status="revalidated", files=second_ticket(status="integrated"))
-    expect(state_of(p).split()[1] == "more", "integrated, not revalidated, is not finished", p.run("report"))
+    expect(state_of(p) == "more", "integrated, not revalidated, is not finished", p.run("report"))
 
 
 # ---- whole-binary link ----
@@ -1560,9 +1562,7 @@ def milestone_project(base, sizes, statuses=("integrated", "integrated", "open")
 
 def milestone_of(p):
     r = p.run("report")
-    lines = [l for l in r.stdout.splitlines() if l.startswith("milestone:")]
-    expect(r.returncode == 0 and len(lines) == 1, "report should print exactly one milestone line", r)
-    return lines[0].split(":", 1)[1].strip()
+    return report_line(r, "milestone:").strip()
 
 
 def test_milestone_is_due_at_five_percent_of_in_scope_bytes(base):
@@ -1622,7 +1622,7 @@ def test_scenario_reaches_each_late_status_through_the_cli(base):
         Project(d).advance(to)
 
 
-def test_audit_pass_records_the_match_once_even_when_run_twice(base):
+def test_second_audit_pass_on_a_matched_ticket_is_refused_and_keeps_one_record(base):
     p = Project(base)
     p.advance("matched")
     r = p.run("audit", TID, "pass", "--auditor", "a1")
@@ -1833,7 +1833,6 @@ def test_every_move_that_leaves_the_claim_frees_the_unit_for_another_ticket(base
 def test_a_regressed_ticket_shows_no_claimant(base):
     p = Project(base)
     p.advance("matched")
-    ticket = p.root / f"tickets/{UNIT}/{TID}.md"
     expect(p.claims() == {TID: "w1"}, "the matched ticket still names its claimant", p.claims())
     p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
     p.git("commit", "-aq", "-m", "break the match")

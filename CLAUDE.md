@@ -21,7 +21,7 @@ Invocation type: [.agents/invocation.md](./.agents/invocation.md). Install comma
 
 ## Tests
 
-Tests: `npm run check` runs the skills linter and script tests; `npm run test:decomp` takes minutes, so run it in the background, and `python scripts/test-decomp.py <filter>` runs only the cases whose names contain the filter.
+The test commands are stated in the [Checks section of `CONTRIBUTING.md`](./CONTRIBUTING.md#checks).
 
 ## Agent skills
 
