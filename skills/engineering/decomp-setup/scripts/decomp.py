@@ -597,7 +597,7 @@ EVENTS = {  # event: (statuses it may leave, the status it reaches, fields it wr
     "audit-fail": (("bytes-match",), "claimed", {}),
     "integrate": (("matched",), "integrated", UNCLAIMED),
     "revalidate-pass": (("integrated", "regressed"), "revalidated", {}),
-    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", {}),
+    "regress": (tuple(sorted(MATCHED)) + ("regressed",), "regressed", UNCLAIMED),
 }
 MOVES = {(s, e): to for e, (froms, to, _) in EVENTS.items() for s in froms}  # (status, event): new status
 
