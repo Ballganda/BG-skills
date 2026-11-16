@@ -1687,6 +1687,41 @@ def test_audit_fail_appends_an_attempt_returns_to_claimed_and_notes(base):
     expect(f"{TID}-a003" in r.stdout, "the next verify numbers after the failed audit", r)
 
 
+def test_audit_fail_whose_attempt_cannot_be_recorded_leaves_the_ticket_at_bytes_match(base):
+    p = Project(base)
+    p.advance("bytes-match")
+    ticket = p.root / f"tickets/{UNIT}/{TID}.md"
+    before = ticket.read_bytes()
+    ledger = p.root / "ledger" / "attempts.jsonl"
+    os.chmod(ledger, stat.S_IREAD)
+    try:
+        r = p.run("audit", TID, "fail", "--auditor", "a1")
+    finally:
+        os.chmod(ledger, stat.S_IREAD | stat.S_IWRITE)
+    expect(r.returncode != 0, "an unwritable attempt record should fail the audit", r)
+    expect(ticket.read_bytes() == before, "the ticket should be byte for byte as it was", r)
+    expect(p.status() == "bytes-match", "the ticket stays at bytes-match", r)
+
+
+def test_regressing_an_integrated_or_revalidated_ticket_leaves_its_claimant_fields_alone(base):
+    for d, status in each(base, ["integrated", "revalidated"]):
+        p = Project(d)
+        p.advance("integrated")
+        if status == "revalidated":
+            r = p.run("revalidate")
+            expect(r.returncode == 0 and p.status() == "revalidated", "the match revalidates", r)
+        ticket = p.root / f"tickets/{UNIT}/{TID}.md"
+        claimant = lambda: [l for l in ticket.read_text().splitlines() if l.startswith(("claimed_by", "claimed_at"))]
+        before = claimant()
+        expect(len(before) == 2 and p.claims() == {}, f"a {status} ticket names no claimant", p.claims())
+        p.write(SOURCE, MARK + "int f(void) { return 2; }\n")
+        p.git("commit", "-aq", "-m", "break the match")
+        r = p.run("revalidate")
+        expect(r.returncode == 5 and p.status() == "regressed", f"the {status} ticket regresses", r)
+        expect(claimant() == before, f"regressing a {status} ticket leaves its claimant fields unchanged", r)
+        expect(p.claims() == {}, f"the {status} ticket adds no claims line", p.claims())
+
+
 def test_audit_is_refused_unless_the_ticket_is_bytes_match(base):
     p = Project(base)
     p.advance("claimed")
