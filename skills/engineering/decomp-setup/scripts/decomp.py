@@ -883,7 +883,7 @@ def cmd_gen_specs(a):
             "| Ticket | Size | Tier |", "| --- | --- | --- |",
         ]
         for f in inn:
-            lines.append(f"| {u['id']}-{f['key']} | {f['size']} | {tier(f['size'])} |")
+            lines.append(f"| {f['id']} | {f['size']} | {tier(f['size'])} |")
         if out:
             lines += ["", "## Excluded", "", "| Address | Size | Scope | Evidence |", "| --- | --- | --- | --- |"]
             for f in out:
@@ -902,7 +902,7 @@ def cmd_gen_tickets(a):
         key = f["key"]
         if f["scope"] != "in":
             continue
-        tid = f"{f['unit']}-{key}"
+        tid = f["id"]
         plain = HEX.fullmatch(f["address"])
         fields = {
             "id": tid, "unit": f["unit"], "address": f"0x{int(f['address'], 16):08X}" if plain else f["address"],
@@ -1354,7 +1354,7 @@ def cmd_link(a):
         for unit, mine in sorted(source.items()):
             t = next(t for t in ts if t["unit"] == unit)
             obj = objdir / f"{unit}.obj"
-            b = adapter(CFG["build"], t, built_with.get(unit) or compiler_for(unit), str(obj), "", tree, env)
+            b = adapter(CFG["build"], t, built_with[unit], str(obj), "", tree, env)
             if b.returncode != 0:
                 why = f"unit {unit} did not build: {(b.stderr or b.stdout)[-2000:]}"
                 break
