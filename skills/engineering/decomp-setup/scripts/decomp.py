@@ -644,6 +644,9 @@ RECORDS = {  # event: what the move writes to the ledger
 }
 
 
+RECORD_FIRST = ("audit-pass",)  # events whose ledger record is written before the ticket moves
+
+
 def move(tid, event, by=None, **args):
     """Move ticket `tid` by `event`, the one writer of a ticket's status.
 
@@ -661,10 +664,12 @@ def move(tid, event, by=None, **args):
         fields.update(claimed_by=by, claimed_at=str(now()))
     fields["status"] = after
     fields.update(EVENTS[event][2])
+    if event in RECORD_FIRST:  # a failed write here leaves the ticket where it was
+        RECORDS[event](fields, **args)
     write_ticket(fields, body)
     if before in BUSY and after not in BUSY:
         lockfile(lock).unlink(missing_ok=True)
-    if event in RECORDS:
+    if event in RECORDS and event not in RECORD_FIRST:
         RECORDS[event](fields, **args)
     return after
 
