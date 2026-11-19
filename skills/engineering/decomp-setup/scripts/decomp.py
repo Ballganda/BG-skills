@@ -2446,6 +2446,37 @@ class Launcher:
                 kernel32().CloseHandle(job)
 
 
+def uses_wine():
+    """True on a host that runs the toolchain under Wine: not Windows, and toolchain.json names wine as a prerequisite here."""
+    return sys.platform != "win32" and any(h["name"] == "wine" for h in toolchain()["prerequisites"])
+
+
+@contextlib.contextmanager
+def persistent_wineserver(launcher):
+    """Keep one wineserver running for a block, so each compile skips Wine's startup. Does nothing off Wine.
+
+    The block starts it before the first compile and ends it after the last. A wineserver that cannot be
+    found or started leaves the block as it was: Wine starts its own per compile.
+    """
+    proc = None
+    found = shutil.which("wineserver", path=launcher.vars.get("PATH")) if uses_wine() else None
+    if found:
+        with contextlib.suppress(OSError):
+            proc = subprocess.Popen([found, "-f", "-p"], env=launcher.vars, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        yield proc
+    finally:
+        if proc:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                kill_tree(proc, None)
+                proc.wait()
+
+
 class Block:
     """One block's running state, shared by its workers under one lock: what was tried, and when to end.
 
@@ -3004,7 +3035,8 @@ def cmd_search(a):
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
         category = (trail(t["id"]) or [{}])[-1].get("category")
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
-        end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
+        with persistent_wineserver(launcher):
+            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
         save_cache(cache)
     finally:
