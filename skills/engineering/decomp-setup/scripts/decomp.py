@@ -2045,18 +2045,33 @@ def parse_template(text):
     return Template(parts + [text[at:]])
 
 
-def candidates(template):
+def candidates(template, boost=None):
     """The seeds a round tries after its opening one-change sweep, in order: the whole space, most likely first.
 
-    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
-    and no steering alternative the order is the seeds', baseline first.
+    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods,
+    no steering alternative and no history the order is the seeds', baseline first. boost maps a kind
+    to the times it fixed the ticket's category (see history): it raises the likelihood of that
+    kind's alternatives.
     """
-    if all(c.likelihoods is None and not any(c.steers) for c in template.choices):
+    boosted = any(boost.get(c.kind) for c in template.choices) if boost else False
+    if not boosted and all(c.likelihoods is None and not any(c.steers) for c in template.choices):
         return range(template.space())
-    return most_likely_first(template)
+    return most_likely_first(template, boost)
 
 
-def most_likely_first(template):
+def likelihoods(template, boost=None):
+    """Each choice point's likelihood per alternative: the writer's (1.0 where none was given), raised by history.
+
+    A change from the baseline (alternative 0) is what a kind fixed, so boost raises every other alternative.
+    """
+    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
+    for i, c in enumerate(template.choices):
+        if boost and boost.get(c.kind):
+            weights[i] = weights[i][:1] + [w * (1 + boost[c.kind]) for w in weights[i][1:]]
+    return weights
+
+
+def most_likely_first(template, boost=None):
     """Every seed, the likeliest candidate first, produced lazily so a large space costs nothing until it is read.
 
     Each choice point's alternatives are ranked by likelihood (a natural one before a steering one,
@@ -2064,7 +2079,7 @@ def most_likely_first(template):
     never raises the likelihood, and each vector is reached by one route, raising ranks left to right.
     At equal likelihood the candidate with fewer steering alternatives goes first.
     """
-    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
+    weights = likelihoods(template, boost)
     ranked = [sorted(range(len(w)), key=lambda i, w=w, c=c: (-w[i], steer(c, i) is not None, i))
               for w, c in zip(weights, template.choices)]
     cost = [[-math.log(w[i]) for i in order] for w, order in zip(weights, ranked)]
@@ -2082,15 +2097,14 @@ def most_likely_first(template):
                 heapq.heappush(heap, entry(ranks[:j] + (ranks[j] + 1,) + ranks[j + 1:], j))
 
 
-def one_change(template):
+def one_change(template, boost=None):
     """The seeds that open a round: the baseline, then each candidate with one choice point changed.
 
     The one-change candidates go most likely first. Where likelihoods tie or none was given, a natural
     alternative goes before a steering one, then template order decides.
     """
     changed = []
-    for i, c in enumerate(template.choices):
-        weights = c.likelihoods or [1.0] * len(c.alternatives)
+    for (i, c), weights in zip(enumerate(template.choices), likelihoods(template, boost)):
         for pick in range(1, len(c.alternatives)):
             vector = [0] * len(template.choices)
             vector[i] = pick
@@ -2236,11 +2250,11 @@ def window(report, first_differ=None):
     return lines[start:start + WINDOW_LINES]
 
 
-def run_round(template, score, report, fingerprint=lambda: None):
+def run_round(template, score, report, fingerprint=lambda: None, boost=None):
     """Try candidates until one matches or none is left. Returns (end reason, best, counts, results).
 
     score turns a candidate's source into a Score and leaves its diff report at report. fingerprint
-    returns a hash of the object the last score built, or None.
+    returns a hash of the object the last score built, or None. boost is the history's (see candidates).
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. A choice point whose alternatives all gave the baseline's object is inert:
     it stays at its first alternative from then on.
@@ -2278,12 +2292,12 @@ def run_round(template, score, report, fingerprint=lambda: None):
     def finish(end):
         return end, state["best"] or {"failure": state["failure"]}, counts, results
 
-    for seed in one_change(template):
+    for seed in one_change(template, boost):
         if attempt(seed):
             return finish("match")
     inert = inert_choices(template, results)
     frozen = {i for i, c in enumerate(template.choices) if c.label in inert}
-    for seed in candidates(template):
+    for seed in candidates(template, boost):
         if seed in tried or any(pick for i, pick in enumerate(template.vector(seed)) if i in frozen):
             continue
         if attempt(seed):
@@ -2352,9 +2366,11 @@ def insights(template, results, best):
     return out
 
 
-def summary(template, end, best, counts, winner, results=()):
+def summary(template, end, best, counts, winner, results=(), history_line=""):
     """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
     out = {"end": end, "best": None, "counts": counts}
+    if history_line:
+        out["history"] = history_line
     if "score" in best:
         out["best"] = {"code": template.code(template.vector(best["seed"])), "differ_bytes": best["score"].differ_bytes}
     if winner:
@@ -2555,6 +2571,43 @@ def record_round(t, template, best, results):
     append_trail(t["id"], "search", kept["result"], kept["differ_bytes"], category)
 
 
+def history(compiler):
+    """What template rounds fixed on this compiler, worked out from the attempts ledger: {category: {kind: [fixed, tried]}}.
+
+    A round is an attempt whose evidence holds a ROUND_EVIDENCE line. It counts once toward each kind
+    in that line, under the category it worked on; it fixed those kinds when the attempt is a
+    bytes-match. Read afresh at every round start, so no file holds it and a win another writer
+    recorded since the last round shows in this one.
+    """
+    out, units = {}, {}
+    for rec in records("attempts.jsonl"):
+        try:
+            tid = rec["ticket"]
+            if tid not in units:
+                units[tid] = read_ticket(tid)[0]["unit"] if ticket_path(tid).exists() else None
+            if units[tid] is None or compiler_for(units[tid]) != compiler:
+                continue
+            lines = (ROOT / rec["evidence"]).read_text(encoding="utf-8", errors="replace").splitlines()
+            held = [json.loads(x[len(ROUND_EVIDENCE):]) for x in lines if x.startswith(ROUND_EVIDENCE)]
+        except (OSError, ValueError, KeyError):
+            continue
+        for kept in held[-1:]:
+            for kind in set(kept.get("kinds") or []):
+                n = out.setdefault(kept.get("category") or "", {}).setdefault(kind, [0, 0])
+                n[0] += rec.get("result") == "bytes-match"
+                n[1] += 1
+    return out
+
+
+def history_line(past, category):
+    """The summary's one line of project history for the ticket's category, or '' when none applies."""
+    kinds = past.get(category or "", {})
+    if not kinds:
+        return ""
+    kind, (fixed, tried) = max(kinds.items(), key=lambda kv: (kv[1][0], -kv[1][1], kv[0]))
+    return f"{kind} fixed {category} {fixed} of {tried} times on this compiler"
+
+
 def kept_round(tid):
     """The ticket's last template round as `verify --template-round` records it. Stops when this machine keeps none."""
     try:
@@ -2595,7 +2648,10 @@ def cmd_search(a):
         baseline = template.render(template.vector(0))
         hashing = "object" if objects_repeat(worker, spare, baseline, cache, ctx) else "function"
         memo = Memo(worker, cache, ctx, hashing)
-        end, best, counts, results = run_round(template, memo, worker.report, lambda: memo.last)
+        past = history(compiler)  # at each round start, so a win recorded since the last round counts
+        category = (trail(t["id"]) or [{}])[-1].get("category")
+        boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
+        end, best, counts, results = run_round(template, memo, worker.report, lambda: memo.last, boost)
         counts["compiled"] -= memo.served
         counts.update(memo.counts())
         save_cache(cache)
@@ -2610,7 +2666,7 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    print(json.dumps(summary(template, end, best, counts, winner, results)))
+    print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category))))
 
 
 def search_detail(t, code):
