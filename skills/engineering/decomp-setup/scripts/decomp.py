@@ -903,8 +903,8 @@ def build_unit(environment, t, compiler, tree, source, objdir, report=""):
     return obj, ""
 
 
-def diff_unit(environment, t, compiler, tree, source, obj, report, fields=None):
-    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does.
+def diff_unit_first(environment, t, compiler, tree, source, obj, report, fields=None):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log, first_differ or None).
 
     A dict given as fields is filled with the adapter's whole JSON, for a caller that reads more of it.
     """
@@ -912,12 +912,19 @@ def diff_unit(environment, t, compiler, tree, source, obj, report, fields=None):
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}"
+        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}", None
     if fields is not None and isinstance(out, dict):
         fields.update(out)
+    first = out.get("first_differ")  # optional: the byte offset of the first difference
+    first = first if isinstance(first, int) and not isinstance(first, bool) and first >= 0 else None
     if out.get("match") is True and out.get("differ_bytes", 0) == 0:
-        return "bytes-match", 0, ""
-    return "differ", int(out.get("differ_bytes", -1)), ""
+        return "bytes-match", 0, "", first
+    return "differ", int(out.get("differ_bytes", -1)), "", first
+
+
+def diff_unit(environment, t, compiler, tree, source, obj, report):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does."""
+    return diff_unit_first(environment, t, compiler, tree, source, obj, report)[:3]
 
 
 def marker_count(text, tid):
@@ -1799,7 +1806,7 @@ STEER_TAG = re.compile(r"/\*\s*steer:(.*?)\*/\s*", re.S)  # leads a steering alt
 # natural; an empty tuple: all natural). A Reference is a later PERM_VAR(label): the same pick again.
 Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods steers", defaults=("other", None, ()))
 Reference = collections.namedtuple("Reference", "label")
-Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
+Score = collections.namedtuple("Score", "result differ_bytes log first_differ", defaults=(None,))  # first_differ: optional
 
 
 def steer(choice, pick):
@@ -2176,7 +2183,7 @@ class Worker:
 
     def diff(self, obj, fields=None):
         """Diff a built object. The diff report of this candidate is left in self.report."""
-        return Score(*diff_unit(*self.args(), obj, str(self.report), fields))
+        return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
 
     def args(self):
         return (self.environment, self.t, self.compiler, self.tree, str(self.source))
@@ -2196,16 +2203,37 @@ def rank(score):
     """A score's sort key, lower being closer to the original. None when the candidate gave no score."""
     if score.result not in ("bytes-match", "differ") or score.differ_bytes is None or score.differ_bytes < 0:
         return None
-    return (score.differ_bytes,)
+    if score.first_differ is None:
+        return (score.differ_bytes,)
+    return (score.differ_bytes, -score.first_differ)  # equal bytes: the later first difference is closer
 
 
-def window(report):
-    """The lines of a diff report the summary shows: its first ones, each cut to a fixed width."""
+OFFSET_TOKEN = re.compile(r"(?<![0-9A-Za-z])(?:0[xX])?([0-9A-Fa-f]+)(?![0-9A-Za-z])")
+
+
+def offset_line(lines, offset):
+    """Index of the first report line holding offset as a whole number, in hex (0x optional, zeros ignored) or decimal."""
+    want = {format(offset, "x"), str(offset)}
+    for i, line in enumerate(lines):
+        if any((m.group(1).lstrip("0") or "0").lower() in want for m in OFFSET_TOKEN.finditer(line)):
+            return i
+    return None
+
+
+def window(report, first_differ=None):
+    """The lines of a diff report the summary shows, each cut to a fixed width.
+
+    With first_differ, the window is centred on the line holding that offset, with WINDOW_LINES // 2 lines of
+    context each side. Without it, or when no line holds it, it is the report's first lines.
+    """
     try:
         with open(report, encoding="utf-8", errors="replace") as f:
-            return [line.rstrip("\n")[:WINDOW_WIDTH] for _, line in zip(range(WINDOW_LINES), f)]
+            lines = [line.rstrip("\n")[:WINDOW_WIDTH] for line in f]
     except OSError:
         return []
+    at = None if first_differ is None else offset_line(lines, first_differ)
+    start = 0 if at is None else max(0, at - WINDOW_LINES // 2)
+    return lines[start:start + WINDOW_LINES]
 
 
 def run_round(template, score, report, fingerprint=lambda: None):
@@ -2238,13 +2266,13 @@ def run_round(template, score, report, fingerprint=lambda: None):
         if rank(s) is None:
             state["failure"] = state["failure"] or s.log
         elif state["best"] is None or rank(s) < rank(state["best"]["score"]):
-            state["best"] = {"seed": seed, "score": s, "window": window(report)}
+            state["best"] = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
         if s.result != "bytes-match":
             return False
         if template.steering(vector):
             steered.append(seed)  # a match that needs steering: keep looking for a natural one
             return False
-        state["best"] = {"seed": seed, "score": s, "window": window(report)}
+        state["best"] = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
         return True
 
     def finish(end):
@@ -2451,7 +2479,7 @@ class Memo:
         self.last = e.get("o")
         if e.get("o"):
             self.objects.add(e["o"])
-        return Score(e["r"], e["d"], e.get("log", ""))
+        return Score(e["r"], e["d"], e.get("log", ""), e.get("f"))
 
     def __call__(self, text):
         skey = self.key("src", source_bytes(text))
@@ -2486,7 +2514,7 @@ class Memo:
                 return dict(self.cache["obj"][okey], o=okey)
         fields = {}
         s = w.diff(obj, fields)
-        e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report)}
+        e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report, s.first_differ), "f": s.first_differ}
         if self.hashing == "function" and isinstance(fields.get("function_sha256"), str):
             okey = self.key("fn", fields["function_sha256"].encode())
             if okey in self.cache["obj"]:
