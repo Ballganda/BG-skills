@@ -2007,7 +2007,8 @@ def test_search_without_a_match_returns_the_closest_candidate_as_exhausted(base)
     expect(r.returncode == 0 and out is not None, "search should print a summary", r)
     expect(out["end"] == "exhausted" and out["best"] == {"code": "A1 B0", "differ_bytes": 4},
            "the summary should name the candidate with the fewest differing bytes", r)
-    expect(out["counts"] == {"space": 4, "compiled": 4, "build_fail": 0, "guardrail": 0}, "every candidate is built", r)
+    expect({k: out["counts"][k] for k in ("space", "compiled", "build_fail", "guardrail")}
+           == {"space": 4, "compiled": 4, "build_fail": 0, "guardrail": 0}, "every candidate is built", r)
     expect("winner" not in out, "a round without a match writes no winner", r)
 
 
@@ -2056,9 +2057,111 @@ def test_search_detail_returns_one_candidates_source_and_score(base):
 
 
 def test_search_refuses_a_macro_it_does_not_read(base):
-    r, out = search(search_project(base), MATCHING + "PERM_LINESWAP(a; b;)\n")
-    expect(r.returncode == 1 and out is None and "PERM_LINESWAP" in r.stderr and "line 3" in r.stderr,
+    r, out = search(search_project(base), MATCHING + "PERM_RAND(a; b;)\n")
+    expect(r.returncode == 1 and out is None and "PERM_RAND" in r.stderr and "line 3" in r.stderr,
            "the refusal should name the macro and its line", r)
+
+
+ORDER_BUILD_PY = """import re, sys
+text = open(sys.argv[1]).read()
+open(LOG, "a").write(" ".join(re.findall(r"tag_\\w+", text)) + chr(10))
+if "SYNTAX_ERROR" in text:
+    sys.exit("error C2143: syntax error")
+open(sys.argv[2], "w").write(text)
+"""
+
+
+def in_function(body):
+    return MARK + "int f(void) {\n" + body + "\n}\n"
+
+
+def refused(base, body, *words):
+    r, out = search(search_project(sub(base, f"r{len(os.listdir(base))}")), in_function(body))
+    expect(r.returncode == 1 and out is None, "the template should be refused", r)
+    for w in words:
+        expect(w in r.stderr, f"the refusal should name {w!r}", r)
+
+
+def detail(p, body, code):
+    """The source of one candidate of a template, as `search --detail` prints it."""
+    search(p, in_function(body))
+    r = p.run("search", TID, "--detail", code)
+    expect(r.returncode == 0, "the detail should be given", r)
+    return r.stdout.partition("\n")[2]
+
+
+def test_search_perm_var_repeats_one_pick_at_every_reference(base):
+    src = detail(search_project(base), "PERM_VAR(@t temp-type, int, short) x = 1; PERM_VAR(t) y;", "t1")
+    expect("short x = 1; short y;" in src, f"the reference should repeat the pick: {src!r}")
+    refused(base, "PERM_VAR(t) y;", "PERM_VAR(t)", "defines it")
+
+
+def test_search_perm_lineswap_tries_every_order_of_its_lines(base):
+    p = search_project(base)
+    r, out = search(p, in_function("  PERM_LINESWAP(\n  a;\n  b;\n  c;\n  )"))
+    expect(out is not None and out["counts"]["space"] == 6, "three lines give six orders", r)
+    r = p.run("search", TID, "--detail", "A0")
+    expect(r.stdout.partition("\n")[2] == in_function("  \n  a;\n  b;\n  c;\n  "), "the first order is as written", r)
+    r = p.run("search", TID, "--detail", "A5")
+    expect("  c;\n  b;\n  a;\n" in r.stdout, "the last order reverses the lines", r)
+
+
+def test_search_perm_once_offers_nothing_or_one_alternative(base):
+    p = search_project(base)
+    expect(detail(p, "PERM_ONCE(a_stmt;, b_stmt;)", "A0") == in_function(""), "the baseline holds nothing")
+    expect("b_stmt;" in detail(p, "PERM_ONCE(a_stmt;, b_stmt;)", "A2"), "the last alternative can be picked")
+
+
+def test_search_perm_int_counts_through_its_range_and_ignore_passes_through(base):
+    p = search_project(base)
+    src = detail(p, "PERM_IGNORE(keep_me;) n = PERM_INT(3, 5);", "A2")
+    expect("keep_me; n = 5;" in src, f"PERM_INT(3, 5) offers 3 to 5: {src!r}")
+    r, out = search(p, in_function("PERM_IGNORE(keep_me;) n = PERM_INT(3, 5);"))
+    expect(out is not None and out["counts"]["space"] == 3, "PERM_IGNORE adds no choice point", r)
+
+
+def test_search_leaves_calling_convention_keywords_alone(base):
+    src = detail(search_project(base), "PERM_GENERAL(int __stdcall g(void);, int __fastcall g(void);) __cdecl __thiscall", "A1")
+    expect(src == in_function("int __fastcall g(void); __cdecl __thiscall"), f"the keywords should come through: {src!r}")
+
+
+def test_search_refuses_a_template_with_more_than_12_choice_points(base):
+    refused(base, "\n".join("PERM_GENERAL(a, b)" for _ in range(13)), "13 choice points", "limit is 12")
+    twelve = "\n".join("PERM_GENERAL(int right_%d;, int WRONG_%d;)" % (i, i) for i in range(12))
+    r, out = search(search_project(sub(base, "b")), in_function(twelve))
+    expect(out is not None and out["end"] == "match", "twelve choice points are allowed", r)
+
+
+def test_search_refuses_a_line_swap_over_5_lines(base):
+    refused(base, "PERM_LINESWAP(\na;\nb;\nc;\nd;\ne;\nf;\n)", "PERM_LINESWAP", "6 lines", "limit is 5")
+    r, out = search(search_project(base), in_function("PERM_LINESWAP(\nint right_a;\nb;\nc;\nd;\ne;\n)"))
+    expect(out is not None and out["end"] == "match" and out["counts"]["space"] == 120, "five lines are allowed", r)
+
+
+def test_search_refuses_a_malformed_choice_point(base):
+    refused(base, "PERM_GENERAL(@r mood, a, b)", "mood", "decl-order")
+    refused(base, "PERM_GENERAL(@r decl-order, a, b) PERM_GENERAL(@r decl-order, a, b)", "'r' is used twice")
+    refused(base, "PERM_GENERAL(a, %0 b)", "likelihood")
+
+
+def test_search_names_choice_codes_by_label(base):
+    r, out = search(search_project(base), in_function(
+        "PERM_GENERAL(@regs decl-order, int WRONG_a;, int right_a;) "
+        "PERM_GENERAL(@shape expression-shape, int WRONG_b;, int right_b;)"))
+    expect(out is not None and out["best"] == {"code": "regs1 shape1", "differ_bytes": 0},
+           "the summary should name each choice by its label", r)
+
+
+def test_search_compiles_higher_likelihood_combinations_first(base):
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    r, out = search(p, in_function(
+        "PERM_GENERAL(%0.2 tag_a0 WRONG_1, %0.5 tag_a1 WRONG_2, %0.3 tag_a2 WRONG_3) "
+        "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
+    expect(out is not None and out["counts"]["compiled"] == 6, "the whole space is built", r)
+    built = log.read_text().splitlines()[-6:]  # after the start-up builds that check the compiler repeats itself
+    expect(built == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b0", "tag_a1 tag_b1", "tag_a2 tag_b1", "tag_a0 tag_b1"],
+           f"candidates should build most likely first: {built}", r)
 
 
 def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
@@ -2107,6 +2210,66 @@ def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(bas
     expect(out is not None and out["best"] == {"code": "A0", "differ_bytes": 2},
            "with no first_differ the first of equal candidates stays the best", r)
     expect(out["window"][0].startswith("0000 mov eax"), "the window is the report's first lines", r)
+
+
+# A counting fake compiler: it logs every build to a file, and with STAMP it writes a changing timestamp
+# into each object. The matching fake diff reports the function's bytes (the object without comments,
+# white space, or the stamp) as `function_sha256`.
+COUNT_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src).read()
+open(log, "a").write("build" + chr(10))
+open(obj, "w").write(text + (chr(10) + "STAMP " + str(time.time_ns()) if "STAMP" in sys.argv[4:] else ""))
+"""
+COUNT_DIFF_PY = """import hashlib, json, re, sys
+body = re.sub(r"/[*].*?[*]/|STAMP .*", "", open(sys.argv[1]).read(), flags=re.S)
+body = "".join(body.split())
+n = body.count("WRONG")
+open(sys.argv[2], "w").write("report" + chr(10))
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+"""
+TWINS = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_a;) PERM_GENERAL(int WRONG_b;, int WRONG_c;) return 1; }\n"
+COMMENTED = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_a; /* the same bytes */) return 1; }\n"
+
+
+def counting_project(base, stamp=False):
+    log = Path(base) / "builds.log"
+    build = PY + f' "{{tools}}/count_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"' + (" STAMP" if stamp else "")
+    p = search_project(base, config={"build": build, "diff": PY + ' "{tools}/count_diff.py" "{obj}" "{report}"'},
+                       files={"tools/count_build.py": COUNT_BUILD_PY, "tools/count_diff.py": COUNT_DIFF_PY})
+    return p, lambda: len(log.read_text().splitlines()) if log.exists() else 0
+
+
+def test_search_compiles_alternatives_with_identical_source_once(base):
+    p, builds = counting_project(base)
+    r, out = search(p, TWINS)
+    expect(out is not None and out["counts"]["space"] == 4, "the template has four candidates", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 2,
+           f"two of the four share a source with another: {out['counts']}", r)
+    expect(out["counts"]["unique_objects"] == 2 and out["counts"]["hashing"] == "object", "two distinct objects", r)
+
+
+def test_search_serves_a_second_round_with_the_same_template_from_the_cache(base):
+    p, builds = counting_project(base)
+    r, first = search(p, TWINS)
+    built = builds()
+    r, again = search(p, TWINS)
+    expect(again is not None and again["counts"]["compiled"] == 0 and again["counts"]["cache_hits"] == 2,
+           f"the second round should build nothing: {again and again['counts']}", r)
+    expect(builds() == built, "no compiler ran in the second round, not even for the stability check", r)
+    expect(again["best"] == first["best"] and again["window"] == first["window"], "the cache keeps the result and window", r)
+    cache = p.root / ".decomp" / "search-cache.json"
+    expect(cache.exists() and p.git("status", "--porcelain") == "", "the cache sits under .decomp/ and is not committed", r)
+
+
+def test_search_hashes_function_bytes_when_the_compiler_stamps_its_objects(base):
+    p, builds = counting_project(base, stamp=True)
+    r, out = search(p, COMMENTED)
+    expect(out is not None and out["counts"]["hashing"] == "function", f"the stamp should be detected: {out}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["unique_objects"] == 1,
+           "two sources with the same function bytes are one object", r)
+    r, again = search(p, COMMENTED)
+    expect(again["counts"]["compiled"] == 0 and again["counts"]["hashing"] == "function", "and the cache still serves them", r)
 
 
 def rmtree(path):

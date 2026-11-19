@@ -10,7 +10,10 @@ import codecs
 import collections
 import contextlib
 import hashlib
+import heapq
+import itertools
 import json
+import math
 import os
 import re
 import shutil
@@ -900,13 +903,18 @@ def build_unit(environment, t, compiler, tree, source, objdir, report=""):
     return obj, ""
 
 
-def diff_unit_first(environment, t, compiler, tree, source, obj, report):
-    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log, first_differ or None)."""
+def diff_unit_first(environment, t, compiler, tree, source, obj, report, fields=None):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log, first_differ or None).
+
+    A dict given as fields is filled with the adapter's whole JSON, for a caller that reads more of it.
+    """
     d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment, source)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}", None
+    if fields is not None and isinstance(out, dict):
+        fields.update(out)
     first = out.get("first_differ")  # optional: the byte offset of the first difference
     first = first if isinstance(first, int) and not isinstance(first, bool) and first >= 0 else None
     if out.get("match") is True and out.get("differ_bytes", 0) == 0:
@@ -1721,8 +1729,18 @@ WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
 WINDOW_WIDTH = 120  # characters kept of each of those lines
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
-CHOICE_CODE = re.compile(r"([A-Z]+)(\d+)")
-Choice = collections.namedtuple("Choice", "label alternatives")
+CHOICE_CODE = re.compile(r"([A-Za-z_]+)(\d+)")
+MAX_CHOICES = 12  # choice points in one template
+MAX_LINESWAP_LINES = 5  # lines in one PERM_LINESWAP
+MAX_INT_VALUES = 64  # values in one PERM_INT range
+KINDS = ("decl-order", "stmt-order", "loop-form", "temp-type", "signedness", "width", "operator",
+         "expression-shape", "branch-order", "inlining", "other")  # the levers of decomp-match's MISMATCH.md
+HEAD = re.compile(r"@([A-Za-z_]+)(?:[ \t]+(\S+))?")  # a choice point's first argument: @label kind
+LIKELIHOOD = re.compile(r"%(\d+(?:\.\d*)?|\.\d+)(?:\s+|$)")  # an alternative's leading %0.7
+# A choice point: its label, its alternatives' source text, its kind, and one likelihood per alternative
+# (None: all alike). A Reference is a later PERM_VAR(label): the same pick again.
+Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods", defaults=("other", None))
+Reference = collections.namedtuple("Reference", "label")
 Score = collections.namedtuple("Score", "result differ_bytes log first_differ", defaults=(None,))  # first_differ: optional
 
 
@@ -1790,14 +1808,77 @@ class Template:
 
     def render(self, vector):
         """The candidate as plain source: each choice point replaced by its picked alternative."""
-        picks = iter(vector)
-        return "".join(p.alternatives[next(picks)] if isinstance(p, Choice) else p for p in self.parts)
+        return render_parts(self.parts, vector)
+
+
+def render_parts(parts, vector):
+    """Template.render, apart: each choice point replaced by its picked alternative, each reference by that pick again."""
+    picks, said, out = iter(vector), {}, []
+    for p in parts:
+        if isinstance(p, Choice):
+            said[p.label] = p.alternatives[next(picks)]
+            out.append(said[p.label])
+        else:
+            out.append(said[p.label] if isinstance(p, Reference) else p)
+    return "".join(out)
+
+
+def read_head(where, args, default_kind):
+    """A macro's arguments split into (label or None, kind, the rest). A first argument @label kind names the choice point."""
+    if not args or not args[0].startswith("@"):
+        return None, default_kind, args
+    m = HEAD.fullmatch(args[0])
+    if not m:
+        die(f"template {where}: a choice point's name looks like '@label kind' (label: letters and underscores)")
+    kind = m.group(2) or default_kind
+    if kind not in KINDS:
+        die(f"template {where}: '{kind}' is not a kind of choice; the kinds are {', '.join(KINDS)}")
+    return m.group(1), kind, args[1:]
+
+
+def read_likelihoods(where, alternatives):
+    """Each alternative's text without its leading likelihood, and the likelihoods (None when none was given)."""
+    texts, weights = [], []
+    for alt in alternatives:
+        weight = 1.0
+        if alt.startswith("%"):
+            m = LIKELIHOOD.match(alt)
+            if not m or float(m.group(1)) <= 0:
+                die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
+            weight, alt = float(m.group(1)), alt[m.end():]
+        texts.append(alt)
+        weights.append(weight)
+    return texts, weights if any(w != 1.0 for w in weights) else None
+
+
+def line_orders(where, body):
+    """The alternatives of a PERM_LINESWAP: its non-blank lines in every order, the written order first."""
+    nl = "\r\n" if "\r\n" in body else "\n"
+    lines = [x.strip() for x in body.split(nl) if x.strip()]
+    if len(lines) > MAX_LINESWAP_LINES:
+        die(f"template {where}: PERM_LINESWAP has {len(lines)} lines; the limit is {MAX_LINESWAP_LINES}")
+    if len(lines) < 2:
+        die(f"template {where}: PERM_LINESWAP needs two or more lines, one per line of source")
+    lead, trail = body[:len(body) - len(body.lstrip())], body[len(body.rstrip()):]
+    last = body.rstrip().split(nl)[-1]
+    indent = last[:len(last) - len(last.lstrip())]
+    return [lead + (nl + indent).join(order) + trail for order in itertools.permutations(lines)]
 
 
 def parse_template(text):
-    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template."""
+    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template.
+
+    The macros, each with an optional first argument '@label kind' naming its choice point, and each
+    alternative taking a leading '%0.7' likelihood:
+      PERM_GENERAL(a, b, ...)   one of the alternatives
+      PERM_VAR(@name, a, b ...) as PERM_GENERAL; a later PERM_VAR(name) repeats the pick
+      PERM_ONCE(a, b, ...)      nothing, or one of the alternatives
+      PERM_INT(lo, hi)          one integer from lo to hi
+      PERM_LINESWAP(lines)      the lines in every order (at most MAX_LINESWAP_LINES)
+      PERM_IGNORE(text)         the text itself: no choice, only a marked stretch to leave alone
+    """
     code, _ = lexed(text)
-    parts, at = [], 0
+    parts, choices, variables, at = [], [], set(), 0
 
     def where(i):
         return f"line {text.count(chr(10), 0, i) + 1}"
@@ -1805,23 +1886,94 @@ def parse_template(text):
     for m in PERM_MACRO.finditer(code):
         if m.start() < at:
             die(f"template {where(m.start())}: a choice point inside another is not supported")
-        if m.group() != "PERM_GENERAL":
-            die(f"template {where(m.start())}: {m.group()} is not supported; write PERM_GENERAL(a, b, ...)")
+        here, macro = where(m.start()), m.group()
+        if macro not in ("PERM_GENERAL", "PERM_VAR", "PERM_ONCE", "PERM_INT", "PERM_LINESWAP", "PERM_IGNORE"):
+            die(f"template {here}: {macro} is not supported; the macros are PERM_GENERAL, PERM_VAR, PERM_ONCE, "
+                "PERM_INT, PERM_LINESWAP, PERM_IGNORE")
         inner = parenthesised(code, text, m.end())
         if not inner:
-            die(f"template {where(m.start())}: PERM_GENERAL has no closing parenthesis")
+            die(f"template {here}: {macro} has no closing parenthesis")
         end = inner[1]
-        alternatives = split_alternatives(code, text, end - 1 - len(inner[0]), end - 1)
-        if len(alternatives) < 2:
-            die(f"template {where(m.start())}: a choice point needs two or more alternatives")
-        parts += [text[at:m.start()], Choice(choice_label(len(parts) // 2), alternatives)]
+        body_at = end - 1 - len(inner[0])
+        parts.append(text[at:m.start()])
         at = end
+        if macro == "PERM_IGNORE":
+            parts.append(inner[0])
+            continue
+        if macro == "PERM_LINESWAP":
+            first = inner[0].lstrip().startswith("@")
+            head, _, body = inner[0].partition("\n") if first else ("", "", inner[0])
+            label, kind, _ = read_head(here, [head.strip()] if first else [], "stmt-order")
+            alternatives, weights = line_orders(here, body), None
+        else:
+            args = split_alternatives(code, text, body_at, end - 1)
+            if macro == "PERM_VAR" and len(args) == 1 and re.fullmatch(r"[A-Za-z_]+", args[0]):
+                if args[0] not in variables:
+                    die(f"template {here}: PERM_VAR({args[0]}) comes before the PERM_VAR(@{args[0]}, ...) that defines it")
+                parts.append(Reference(args[0]))
+                continue
+            label, kind, args = read_head(here, args, "other")
+            if macro == "PERM_VAR" and label is None:
+                die(f"template {here}: PERM_VAR(@name, a, b, ...) defines a variable; PERM_VAR(name) repeats its pick")
+            if macro == "PERM_INT":
+                try:
+                    lo, hi = (int(x) for x in args)
+                except ValueError:
+                    die(f"template {here}: PERM_INT(lo, hi) takes two integers")
+                if not lo <= hi or hi - lo + 1 > MAX_INT_VALUES:
+                    die(f"template {here}: PERM_INT needs lo <= hi and at most {MAX_INT_VALUES} values")
+                args = [str(i) for i in range(lo, hi + 1)]
+            alternatives, weights = read_likelihoods(here, args)
+            if macro == "PERM_ONCE":
+                alternatives, weights = [""] + alternatives, weights and [1.0] + weights
+            if len(alternatives) < 2:
+                die(f"template {here}: a choice point needs two or more alternatives")
+        label = label or choice_label(len(choices))
+        if any(c.label == label for c in choices):
+            die(f"template {here}: the label '{label}' is used twice; labels are what choice codes name")
+        choice = Choice(label, alternatives, kind, weights)
+        choices.append(choice)
+        parts.append(choice)
+        if macro == "PERM_VAR":
+            variables.add(label)
+    if len(choices) > MAX_CHOICES:
+        die(f"template has {len(choices)} choice points; the limit is {MAX_CHOICES}")
     return Template(parts + [text[at:]])
 
 
 def candidates(template):
-    """The seeds a round tries, in order: the whole space, baseline first."""
-    return range(template.space())
+    """The seeds a round tries, in order: the whole space, most likely first.
+
+    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
+    given the order is the seeds', baseline first.
+    """
+    if all(c.likelihoods is None for c in template.choices):
+        return range(template.space())
+    return most_likely_first(template)
+
+
+def most_likely_first(template):
+    """Every seed, the likeliest candidate first, produced lazily so a large space costs nothing until it is read.
+
+    Each choice point's alternatives are ranked by likelihood (written order breaking ties). A heap
+    holds the frontier of rank vectors: raising one rank never raises the likelihood, and each vector
+    is reached by one route, raising ranks left to right.
+    """
+    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
+    ranked = [sorted(range(len(w)), key=lambda i, w=w: (-w[i], i)) for w in weights]
+    cost = [[-math.log(w[i]) for i in order] for w, order in zip(weights, ranked)]
+
+    def entry(ranks, last):
+        seed = template.seed([order[r] for order, r in zip(ranked, ranks)])
+        return (sum(k[r] for k, r in zip(cost, ranks)), seed, ranks, last)
+
+    heap = [entry((0,) * len(ranked), 0)]
+    while heap:
+        _, seed, ranks, last = heapq.heappop(heap)
+        yield seed
+        for j in range(last, len(ranks)):
+            if ranks[j] + 1 < len(ranked[j]):
+                heapq.heappush(heap, entry(ranks[:j] + (ranks[j] + 1,) + ranks[j + 1:], j))
 
 
 def beside(tree, source, text):
@@ -1875,21 +2027,38 @@ class Worker:
             shutil.copyfile(Path(tree) / rel, dest)
         self.source.parent.mkdir(parents=True, exist_ok=True)
 
-    def score(self, text):
-        """Build and diff one candidate's source. The diff report of this candidate is left in self.report."""
+    def refuse(self, text):
+        """The guardrail Score for a source that must not be built, or None."""
         marks = marker_count(text, self.t["id"])
         if marks != 1:
             return Score("guardrail", None, f"expected one '@decomp {self.t['id']}' marker comment, found {marks}")
         bad = scan(text)
         if bad:
             return Score("guardrail", None, "\n".join(bad))
+        return None
+
+    def build(self, text):
+        """Build one candidate's source. Returns (obj, failure log or '')."""
         self.source.write_bytes(source_bytes(text))
         self.report.unlink(missing_ok=True)
-        args = (self.environment, self.t, self.compiler, self.tree, str(self.source))
-        obj, failure = build_unit(*args, self.objdir, str(self.report))
+        return build_unit(*self.args(), self.objdir, str(self.report))
+
+    def diff(self, obj, fields=None):
+        """Diff a built object. The diff report of this candidate is left in self.report."""
+        return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
+
+    def args(self):
+        return (self.environment, self.t, self.compiler, self.tree, str(self.source))
+
+    def score(self, text):
+        """Build and diff one candidate's source. The diff report of this candidate is left in self.report."""
+        refused = self.refuse(text)
+        if refused:
+            return refused
+        obj, failure = self.build(text)
         if failure:
             return Score("build-fail", None, failure)
-        return Score(*diff_unit_first(*args, obj, str(self.report)))
+        return self.diff(obj)
 
 
 def rank(score):
@@ -1973,6 +2142,159 @@ def summary(template, end, best, counts, winner):
     return out
 
 
+CACHE_ENTRIES = 50000  # what the cache keeps of each kind of entry; the oldest go first
+CACHE_KINDS = ("stable", "src", "obj")
+
+
+def search_cache_path():
+    """The result cache: on this machine only, under .decomp/, shared by every worktree and never committed."""
+    return checkout_dir() / "search-cache.json"
+
+
+def load_cache():
+    """The cache as three maps: stable (is a compile's object repeatable), src (source hash to result), obj (object hash to result)."""
+    try:
+        data = json.loads(search_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return {k: data[k] if isinstance(data, dict) and isinstance(data.get(k), dict) else {} for k in CACHE_KINDS}
+
+
+def save_cache(cache):
+    """Write the cache, first merging what another search wrote since it was read."""
+    merged = load_cache()
+    for kind in CACHE_KINDS:
+        merged[kind].update(cache[kind])
+    for kind in ("src", "obj"):
+        while len(merged[kind]) > CACHE_ENTRIES:
+            del merged[kind][next(iter(merged[kind]))]
+    path = search_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(merged), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def search_context(t, compiler, tree, text):
+    """One hash of everything besides the candidate's source that a score depends on.
+
+    The compiler's manifest entry, the build and diff commands, the tree's tools folder (where the
+    wrappers and so the flags live), the expected bytes, the symbol map, and the headers beside the unit.
+    """
+    h = hashlib.sha256()
+
+    def put(*parts):
+        for part in parts:
+            h.update(str(part).encode("utf-8", errors="replace") + b"\0")
+
+    entry = next((x for x in toolchain()["tools"] if x["name"] == compiler), None)
+    put(t["id"], compiler, CFG["build"], CFG["diff"], json.dumps(entry, sort_keys=True))
+    for rel in [t["expected"], SYMBOLS] + beside(tree, t["source"], text):
+        f = Path(tree) / rel
+        put(rel, file_sha(f) if f.is_file() else "")
+    tools = Path(tree) / "tools"
+    for f in sorted(tools.rglob("*")) if tools.is_dir() else []:
+        if f.is_file() and "__pycache__" not in f.parts and f.stat().st_size <= 1 << 20:
+            put(f.relative_to(tools).as_posix(), file_sha(f))
+    return h.hexdigest()
+
+
+def objects_repeat(worker, spare, text, cache, ctx):
+    """Whether compiling one source twice, in two folders, gives the same object file.
+
+    COFF objects can carry a timestamp or the source's path. The answer is kept in the cache. The two
+    builds run a second apart, so that a timestamp in whole seconds shows. When the source cannot be
+    built there is no answer, and objects count as repeatable.
+    """
+    if ctx in cache["stable"]:
+        return cache["stable"][ctx]
+    hashes = []
+    for w in (worker, spare):
+        if hashes:
+            time.sleep(1.1)
+        obj, failure = w.build(text)
+        if failure or not os.path.exists(obj):
+            return True
+        hashes.append(file_sha(obj))
+    cache["stable"][ctx] = hashes[0] == hashes[1]
+    return cache["stable"][ctx]
+
+
+class Memo:
+    """Scores candidates through the dedupe layers, so a build or a diff runs only for what is unseen.
+
+    Order for one candidate: the source seen this round, the source in the cache, a refusal by the
+    guardrails, the build, the object known to the cache (with `function` hashing: the function's bytes
+    as the diff adapter reports them in `function_sha256`, known after the diff), and last the diff.
+    A call returns a Score and leaves the diff window of the result at the worker's report, as
+    Worker.score does.
+    """
+
+    def __init__(self, worker, cache, ctx, hashing):
+        self.worker, self.cache, self.ctx, self.hashing = worker, cache, ctx, hashing
+        self.seen, self.objects = {}, set()
+        self.src_hits = self.cache_hits = self.object_hits = self.served = 0
+
+    def key(self, kind, data):
+        h = hashlib.sha256(self.ctx.encode() + b"\0" + kind.encode() + b"\0")
+        h.update(data if isinstance(data, bytes) else data.encode())
+        return h.hexdigest()
+
+    def reply(self, e):
+        self.worker.report.write_text("\n".join(e.get("w", [])), encoding="utf-8")
+        if e.get("o"):
+            self.objects.add(e["o"])
+        return Score(e["r"], e["d"], e.get("log", ""), e.get("f"))
+
+    def __call__(self, text):
+        skey = self.key("src", source_bytes(text))
+        if skey in self.seen:
+            self.src_hits += 1
+            self.served += self.seen[skey]["r"] != "guardrail"
+            return self.reply(self.seen[skey])
+        if skey in self.cache["src"]:
+            self.cache_hits += 1
+            self.served += 1
+            self.seen[skey] = self.cache["src"][skey]
+            return self.reply(self.seen[skey])
+        e = self.fresh(text)
+        self.seen[skey] = e
+        if e["r"] in ("differ", "bytes-match"):
+            self.cache["src"][skey] = e
+        return self.reply(e)
+
+    def fresh(self, text):
+        w = self.worker
+        refused = w.refuse(text)
+        if refused:
+            return {"r": refused.result, "d": None, "log": refused.log}
+        obj, failure = w.build(text)
+        if failure:
+            return {"r": "build-fail", "d": None, "log": failure}
+        okey = None
+        if self.hashing == "object" and os.path.exists(obj):
+            okey = self.key("obj", file_sha(obj).encode())
+            if okey in self.cache["obj"]:
+                self.object_hits += 1
+                return dict(self.cache["obj"][okey], o=okey)
+        fields = {}
+        s = w.diff(obj, fields)
+        e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report, s.first_differ), "f": s.first_differ}
+        if self.hashing == "function" and isinstance(fields.get("function_sha256"), str):
+            okey = self.key("fn", fields["function_sha256"].encode())
+            if okey in self.cache["obj"]:
+                self.object_hits += 1
+        if okey and e["r"] in ("differ", "bytes-match"):
+            e["o"] = okey
+            self.cache["obj"][okey] = e
+        return e
+
+    def counts(self):
+        """What the layers did, for the summary."""
+        return {"src_dedupe_hits": self.src_hits, "cache_hits": self.cache_hits, "object_hits": self.object_hits,
+                "unique_objects": len(self.objects), "hashing": self.hashing}
+
+
 def search_dir(tid):
     """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
     return checkout_dir() / "search" / tid
@@ -1998,7 +2320,15 @@ def cmd_search(a):
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
         worker = Worker(Path(scratch) / "w0", environment, t, compiler, tree, text)
-        end, best, counts, results = run_round(template, worker.score, worker.report)
+        cache, ctx = load_cache(), search_context(t, compiler, tree, text)
+        spare = Worker(Path(scratch) / "w1", environment, t, compiler, tree, text) if ctx not in cache["stable"] else None
+        baseline = template.render(template.vector(0))
+        hashing = "object" if objects_repeat(worker, spare, baseline, cache, ctx) else "function"
+        memo = Memo(worker, cache, ctx, hashing)
+        end, best, counts, results = run_round(template, memo, worker.report)
+        counts["compiled"] -= memo.served
+        counts.update(memo.counts())
+        save_cache(cache)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     state = search_dir(t["id"])
