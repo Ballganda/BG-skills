@@ -2072,6 +2072,43 @@ def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
            "nothing tracked or frozen changed, and nothing new sits in the tree")
 
 
+# A fake diff that also reports `first_differ`: the offset of the first WRONG in the object.
+SEARCH_FIRST_DIFF_PY = """import json, sys
+text = open(sys.argv[1]).read()
+n = text.count("WRONG")
+open(sys.argv[2], "w").write("".join("%04d mov eax, %s" % (i, chr(10)) for i in range(400)))
+out = dict(match=n == 0, differ_bytes=2 * n)
+if n:
+    out["first_differ"] = text.index("WRONG")
+print(json.dumps(out))
+"""
+FIRST_CONFIG = {"diff": PY + ' "{tools}/search_diff.py" "{obj}" "{report}"'}
+FIRST_FILES = {"tools/search_diff.py": SEARCH_FIRST_DIFF_PY}
+SAME_BYTES = MARK + "int f(void) { PERM_GENERAL(int WRONG_a; int ok_b;, int ok_b; int WRONG_a;) return 1; }\n"
+
+
+def test_search_breaks_a_tie_by_the_later_first_difference(base):
+    r, out = search(search_project(base, files=FIRST_FILES), SAME_BYTES)
+    expect(out is not None and out["best"] == {"code": "A1", "differ_bytes": 2},
+           "of equal differ_bytes the later first difference should rank higher", r)
+
+
+def test_search_window_is_centred_on_the_first_difference_with_three_lines_of_context(base):
+    r, out = search(search_project(base, files=FIRST_FILES), SAME_BYTES)
+    first = int(out["window"][3].split()[0])
+    expect(len(out["window"]) == 7 and first > 3, "the window should hold 3 lines each side", r)
+    expect([int(w.split()[0]) for w in out["window"]] == list(range(first - 3, first + 4)),
+           f"the window should be consecutive report lines: {out['window']}", r)
+    expect(first > 20, "the centre is the offset of the first difference, not the report's start", r)
+
+
+def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(base):
+    r, out = search(search_project(base), SAME_BYTES)
+    expect(out is not None and out["best"] == {"code": "A0", "differ_bytes": 2},
+           "with no first_differ the first of equal candidates stays the best", r)
+    expect(out["window"][0].startswith("0000 mov eax"), "the window is the report's first lines", r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)

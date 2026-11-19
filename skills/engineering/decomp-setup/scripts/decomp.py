@@ -900,16 +900,23 @@ def build_unit(environment, t, compiler, tree, source, objdir, report=""):
     return obj, ""
 
 
-def diff_unit(environment, t, compiler, tree, source, obj, report):
-    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does."""
+def diff_unit_first(environment, t, compiler, tree, source, obj, report):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log, first_differ or None)."""
     d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment, source)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}"
+        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}", None
+    first = out.get("first_differ")  # optional: the byte offset of the first difference
+    first = first if isinstance(first, int) and not isinstance(first, bool) and first >= 0 else None
     if out.get("match") is True and out.get("differ_bytes", 0) == 0:
-        return "bytes-match", 0, ""
-    return "differ", int(out.get("differ_bytes", -1)), ""
+        return "bytes-match", 0, "", first
+    return "differ", int(out.get("differ_bytes", -1)), "", first
+
+
+def diff_unit(environment, t, compiler, tree, source, obj, report):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does."""
+    return diff_unit_first(environment, t, compiler, tree, source, obj, report)[:3]
 
 
 def marker_count(text, tid):
@@ -1716,7 +1723,7 @@ FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
 CHOICE_CODE = re.compile(r"([A-Z]+)(\d+)")
 Choice = collections.namedtuple("Choice", "label alternatives")
-Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
+Score = collections.namedtuple("Score", "result differ_bytes log first_differ", defaults=(None,))  # first_differ: optional
 
 
 def choice_label(n):
@@ -1882,23 +1889,44 @@ class Worker:
         obj, failure = build_unit(*args, self.objdir, str(self.report))
         if failure:
             return Score("build-fail", None, failure)
-        return Score(*diff_unit(*args, obj, str(self.report)))
+        return Score(*diff_unit_first(*args, obj, str(self.report)))
 
 
 def rank(score):
     """A score's sort key, lower being closer to the original. None when the candidate gave no score."""
     if score.result not in ("bytes-match", "differ") or score.differ_bytes is None or score.differ_bytes < 0:
         return None
-    return (score.differ_bytes,)
+    if score.first_differ is None:
+        return (score.differ_bytes,)
+    return (score.differ_bytes, -score.first_differ)  # equal bytes: the later first difference is closer
 
 
-def window(report):
-    """The lines of a diff report the summary shows: its first ones, each cut to a fixed width."""
+OFFSET_TOKEN = re.compile(r"(?<![0-9A-Za-z])(?:0[xX])?([0-9A-Fa-f]+)(?![0-9A-Za-z])")
+
+
+def offset_line(lines, offset):
+    """Index of the first report line holding offset as a whole number, in hex (0x optional, zeros ignored) or decimal."""
+    want = {format(offset, "x"), str(offset)}
+    for i, line in enumerate(lines):
+        if any((m.group(1).lstrip("0") or "0").lower() in want for m in OFFSET_TOKEN.finditer(line)):
+            return i
+    return None
+
+
+def window(report, first_differ=None):
+    """The lines of a diff report the summary shows, each cut to a fixed width.
+
+    With first_differ, the window is centred on the line holding that offset, with WINDOW_LINES // 2 lines of
+    context each side. Without it, or when no line holds it, it is the report's first lines.
+    """
     try:
         with open(report, encoding="utf-8", errors="replace") as f:
-            return [line.rstrip("\n")[:WINDOW_WIDTH] for _, line in zip(range(WINDOW_LINES), f)]
+            lines = [line.rstrip("\n")[:WINDOW_WIDTH] for line in f]
     except OSError:
         return []
+    at = None if first_differ is None else offset_line(lines, first_differ)
+    start = 0 if at is None else max(0, at - WINDOW_LINES // 2)
+    return lines[start:start + WINDOW_LINES]
 
 
 def run_round(template, score, report):
@@ -1919,7 +1947,7 @@ def run_round(template, score, report):
         if rank(s) is None:
             failure = failure or s.log
         elif best is None or rank(s) < rank(best["score"]):
-            best = {"seed": seed, "score": s, "window": window(report)}
+            best = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
         if s.result == "bytes-match":
             return "match", best, counts, results
     return "exhausted", best or {"failure": failure}, counts, results
