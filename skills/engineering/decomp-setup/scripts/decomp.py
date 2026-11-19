@@ -10,7 +10,10 @@ import codecs
 import collections
 import contextlib
 import hashlib
+import heapq
+import itertools
 import json
+import math
 import os
 import re
 import shutil
@@ -1714,8 +1717,18 @@ WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
 WINDOW_WIDTH = 120  # characters kept of each of those lines
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
-CHOICE_CODE = re.compile(r"([A-Z]+)(\d+)")
-Choice = collections.namedtuple("Choice", "label alternatives")
+CHOICE_CODE = re.compile(r"([A-Za-z_]+)(\d+)")
+MAX_CHOICES = 12  # choice points in one template
+MAX_LINESWAP_LINES = 5  # lines in one PERM_LINESWAP
+MAX_INT_VALUES = 64  # values in one PERM_INT range
+KINDS = ("decl-order", "stmt-order", "loop-form", "temp-type", "signedness", "width", "operator",
+         "expression-shape", "branch-order", "inlining", "other")  # the levers of decomp-match's MISMATCH.md
+HEAD = re.compile(r"@([A-Za-z_]+)(?:[ \t]+(\S+))?")  # a choice point's first argument: @label kind
+LIKELIHOOD = re.compile(r"%(\d+(?:\.\d*)?|\.\d+)(?:\s+|$)")  # an alternative's leading %0.7
+# A choice point: its label, its alternatives' source text, its kind, and one likelihood per alternative
+# (None: all alike). A Reference is a later PERM_VAR(label): the same pick again.
+Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods", defaults=("other", None))
+Reference = collections.namedtuple("Reference", "label")
 Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
 
 
@@ -1783,14 +1796,77 @@ class Template:
 
     def render(self, vector):
         """The candidate as plain source: each choice point replaced by its picked alternative."""
-        picks = iter(vector)
-        return "".join(p.alternatives[next(picks)] if isinstance(p, Choice) else p for p in self.parts)
+        return render_parts(self.parts, vector)
+
+
+def render_parts(parts, vector):
+    """Template.render, apart: each choice point replaced by its picked alternative, each reference by that pick again."""
+    picks, said, out = iter(vector), {}, []
+    for p in parts:
+        if isinstance(p, Choice):
+            said[p.label] = p.alternatives[next(picks)]
+            out.append(said[p.label])
+        else:
+            out.append(said[p.label] if isinstance(p, Reference) else p)
+    return "".join(out)
+
+
+def read_head(where, args, default_kind):
+    """A macro's arguments split into (label or None, kind, the rest). A first argument @label kind names the choice point."""
+    if not args or not args[0].startswith("@"):
+        return None, default_kind, args
+    m = HEAD.fullmatch(args[0])
+    if not m:
+        die(f"template {where}: a choice point's name looks like '@label kind' (label: letters and underscores)")
+    kind = m.group(2) or default_kind
+    if kind not in KINDS:
+        die(f"template {where}: '{kind}' is not a kind of choice; the kinds are {', '.join(KINDS)}")
+    return m.group(1), kind, args[1:]
+
+
+def read_likelihoods(where, alternatives):
+    """Each alternative's text without its leading likelihood, and the likelihoods (None when none was given)."""
+    texts, weights = [], []
+    for alt in alternatives:
+        weight = 1.0
+        if alt.startswith("%"):
+            m = LIKELIHOOD.match(alt)
+            if not m or float(m.group(1)) <= 0:
+                die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
+            weight, alt = float(m.group(1)), alt[m.end():]
+        texts.append(alt)
+        weights.append(weight)
+    return texts, weights if any(w != 1.0 for w in weights) else None
+
+
+def line_orders(where, body):
+    """The alternatives of a PERM_LINESWAP: its non-blank lines in every order, the written order first."""
+    nl = "\r\n" if "\r\n" in body else "\n"
+    lines = [x.strip() for x in body.split(nl) if x.strip()]
+    if len(lines) > MAX_LINESWAP_LINES:
+        die(f"template {where}: PERM_LINESWAP has {len(lines)} lines; the limit is {MAX_LINESWAP_LINES}")
+    if len(lines) < 2:
+        die(f"template {where}: PERM_LINESWAP needs two or more lines, one per line of source")
+    lead, trail = body[:len(body) - len(body.lstrip())], body[len(body.rstrip()):]
+    last = body.rstrip().split(nl)[-1]
+    indent = last[:len(last) - len(last.lstrip())]
+    return [lead + (nl + indent).join(order) + trail for order in itertools.permutations(lines)]
 
 
 def parse_template(text):
-    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template."""
+    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template.
+
+    The macros, each with an optional first argument '@label kind' naming its choice point, and each
+    alternative taking a leading '%0.7' likelihood:
+      PERM_GENERAL(a, b, ...)   one of the alternatives
+      PERM_VAR(@name, a, b ...) as PERM_GENERAL; a later PERM_VAR(name) repeats the pick
+      PERM_ONCE(a, b, ...)      nothing, or one of the alternatives
+      PERM_INT(lo, hi)          one integer from lo to hi
+      PERM_LINESWAP(lines)      the lines in every order (at most MAX_LINESWAP_LINES)
+      PERM_IGNORE(text)         the text itself: no choice, only a marked stretch to leave alone
+    """
     code, _ = lexed(text)
-    parts, at = [], 0
+    parts, choices, variables, at = [], [], set(), 0
 
     def where(i):
         return f"line {text.count(chr(10), 0, i) + 1}"
@@ -1798,23 +1874,94 @@ def parse_template(text):
     for m in PERM_MACRO.finditer(code):
         if m.start() < at:
             die(f"template {where(m.start())}: a choice point inside another is not supported")
-        if m.group() != "PERM_GENERAL":
-            die(f"template {where(m.start())}: {m.group()} is not supported; write PERM_GENERAL(a, b, ...)")
+        here, macro = where(m.start()), m.group()
+        if macro not in ("PERM_GENERAL", "PERM_VAR", "PERM_ONCE", "PERM_INT", "PERM_LINESWAP", "PERM_IGNORE"):
+            die(f"template {here}: {macro} is not supported; the macros are PERM_GENERAL, PERM_VAR, PERM_ONCE, "
+                "PERM_INT, PERM_LINESWAP, PERM_IGNORE")
         inner = parenthesised(code, text, m.end())
         if not inner:
-            die(f"template {where(m.start())}: PERM_GENERAL has no closing parenthesis")
+            die(f"template {here}: {macro} has no closing parenthesis")
         end = inner[1]
-        alternatives = split_alternatives(code, text, end - 1 - len(inner[0]), end - 1)
-        if len(alternatives) < 2:
-            die(f"template {where(m.start())}: a choice point needs two or more alternatives")
-        parts += [text[at:m.start()], Choice(choice_label(len(parts) // 2), alternatives)]
+        body_at = end - 1 - len(inner[0])
+        parts.append(text[at:m.start()])
         at = end
+        if macro == "PERM_IGNORE":
+            parts.append(inner[0])
+            continue
+        if macro == "PERM_LINESWAP":
+            first = inner[0].lstrip().startswith("@")
+            head, _, body = inner[0].partition("\n") if first else ("", "", inner[0])
+            label, kind, _ = read_head(here, [head.strip()] if first else [], "stmt-order")
+            alternatives, weights = line_orders(here, body), None
+        else:
+            args = split_alternatives(code, text, body_at, end - 1)
+            if macro == "PERM_VAR" and len(args) == 1 and re.fullmatch(r"[A-Za-z_]+", args[0]):
+                if args[0] not in variables:
+                    die(f"template {here}: PERM_VAR({args[0]}) comes before the PERM_VAR(@{args[0]}, ...) that defines it")
+                parts.append(Reference(args[0]))
+                continue
+            label, kind, args = read_head(here, args, "other")
+            if macro == "PERM_VAR" and label is None:
+                die(f"template {here}: PERM_VAR(@name, a, b, ...) defines a variable; PERM_VAR(name) repeats its pick")
+            if macro == "PERM_INT":
+                try:
+                    lo, hi = (int(x) for x in args)
+                except ValueError:
+                    die(f"template {here}: PERM_INT(lo, hi) takes two integers")
+                if not lo <= hi or hi - lo + 1 > MAX_INT_VALUES:
+                    die(f"template {here}: PERM_INT needs lo <= hi and at most {MAX_INT_VALUES} values")
+                args = [str(i) for i in range(lo, hi + 1)]
+            alternatives, weights = read_likelihoods(here, args)
+            if macro == "PERM_ONCE":
+                alternatives, weights = [""] + alternatives, weights and [1.0] + weights
+            if len(alternatives) < 2:
+                die(f"template {here}: a choice point needs two or more alternatives")
+        label = label or choice_label(len(choices))
+        if any(c.label == label for c in choices):
+            die(f"template {here}: the label '{label}' is used twice; labels are what choice codes name")
+        choice = Choice(label, alternatives, kind, weights)
+        choices.append(choice)
+        parts.append(choice)
+        if macro == "PERM_VAR":
+            variables.add(label)
+    if len(choices) > MAX_CHOICES:
+        die(f"template has {len(choices)} choice points; the limit is {MAX_CHOICES}")
     return Template(parts + [text[at:]])
 
 
 def candidates(template):
-    """The seeds a round tries, in order: the whole space, baseline first."""
-    return range(template.space())
+    """The seeds a round tries, in order: the whole space, most likely first.
+
+    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
+    given the order is the seeds', baseline first.
+    """
+    if all(c.likelihoods is None for c in template.choices):
+        return range(template.space())
+    return most_likely_first(template)
+
+
+def most_likely_first(template):
+    """Every seed, the likeliest candidate first, produced lazily so a large space costs nothing until it is read.
+
+    Each choice point's alternatives are ranked by likelihood (written order breaking ties). A heap
+    holds the frontier of rank vectors: raising one rank never raises the likelihood, and each vector
+    is reached by one route, raising ranks left to right.
+    """
+    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
+    ranked = [sorted(range(len(w)), key=lambda i, w=w: (-w[i], i)) for w in weights]
+    cost = [[-math.log(w[i]) for i in order] for w, order in zip(weights, ranked)]
+
+    def entry(ranks, last):
+        seed = template.seed([order[r] for order, r in zip(ranked, ranks)])
+        return (sum(k[r] for k, r in zip(cost, ranks)), seed, ranks, last)
+
+    heap = [entry((0,) * len(ranked), 0)]
+    while heap:
+        _, seed, ranks, last = heapq.heappop(heap)
+        yield seed
+        for j in range(last, len(ranks)):
+            if ranks[j] + 1 < len(ranked[j]):
+                heapq.heappush(heap, entry(ranks[:j] + (ranks[j] + 1,) + ranks[j + 1:], j))
 
 
 def beside(tree, source, text):
