@@ -1998,7 +1998,7 @@ def parse_template(text):
 
 
 def candidates(template):
-    """The seeds a round tries, in order: the whole space, most likely first.
+    """The seeds a round tries after its opening one-change sweep, in order: the whole space, most likely first.
 
     A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
     given the order is the seeds', baseline first.
@@ -2030,6 +2030,37 @@ def most_likely_first(template):
         for j in range(last, len(ranks)):
             if ranks[j] + 1 < len(ranked[j]):
                 heapq.heappush(heap, entry(ranks[:j] + (ranks[j] + 1,) + ranks[j + 1:], j))
+
+
+def one_change(template):
+    """The seeds that open a round: the baseline, then each candidate with one choice point changed.
+
+    The one-change candidates go most likely first, in template order where likelihoods tie or none was given.
+    """
+    changed = []
+    for i, c in enumerate(template.choices):
+        weights = c.likelihoods or [1.0] * len(c.alternatives)
+        for pick in range(1, len(c.alternatives)):
+            vector = [0] * len(template.choices)
+            vector[i] = pick
+            changed.append((-weights[pick] / weights[0], len(changed), template.seed(vector)))
+    return [0] + [seed for _, _, seed in sorted(changed)]
+
+
+def inert_choices(template, results):
+    """The labels of the choice points whose alternatives all gave the baseline's object, among results so far."""
+    by_seed = {r["seed"]: r for r in results}
+    base = by_seed.get(0, {}).get("object")
+    out = []
+    for i, c in enumerate(template.choices):
+        for pick in range(1, len(c.alternatives)):
+            vector = [0] * len(template.choices)
+            vector[i] = pick
+            if not base or by_seed.get(template.seed(vector), {}).get("object") != base:
+                break
+        else:
+            out.append(c.label)
+    return out
 
 
 def beside(tree, source, text):
@@ -2133,31 +2164,90 @@ def window(report):
         return []
 
 
-def run_round(template, score, report):
-    """Try each candidate until one matches or none is left. Returns (end reason, best, counts, results).
+def run_round(template, score, report, fingerprint=lambda: None):
+    """Try candidates until one matches or none is left. Returns (end reason, best, counts, results).
 
-    score turns a candidate's source into a Score and leaves its diff report at report.
+    score turns a candidate's source into a Score and leaves its diff report at report. fingerprint
+    returns a hash of the object the last score built, or None.
+    The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
+    group most likely first. A choice point whose alternatives all gave the baseline's object is inert:
+    it stays at its first alternative from then on.
     best is a dict: seed, score, and diff window of the closest candidate, or only the first failure
     log when no candidate was scored. results holds one record per candidate tried.
     """
     counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
-    best, results, failure = None, [], ""
-    for seed in candidates(template):
+    state = {"best": None, "failure": ""}
+    results, tried = [], set()
+
+    def attempt(seed):
+        tried.add(seed)
         vector = template.vector(seed)
         s = score(template.render(vector))
         counts["guardrail" if s.result == "guardrail" else "compiled"] += 1
         counts["build_fail"] += s.result == "build-fail"
-        results.append({"seed": seed, "code": template.code(vector), "result": s.result, "differ_bytes": s.differ_bytes})
+        results.append({"seed": seed, "code": template.code(vector), "result": s.result,
+                        "differ_bytes": s.differ_bytes, "object": fingerprint()})
         if rank(s) is None:
-            failure = failure or s.log
-        elif best is None or rank(s) < rank(best["score"]):
-            best = {"seed": seed, "score": s, "window": window(report)}
-        if s.result == "bytes-match":
-            return "match", best, counts, results
-    return "exhausted", best or {"failure": failure}, counts, results
+            state["failure"] = state["failure"] or s.log
+        elif state["best"] is None or rank(s) < rank(state["best"]["score"]):
+            state["best"] = {"seed": seed, "score": s, "window": window(report)}
+        return s.result == "bytes-match"
+
+    def finish(end):
+        return end, state["best"] or {"failure": state["failure"]}, counts, results
+
+    for seed in one_change(template):
+        if attempt(seed):
+            return finish("match")
+    inert = inert_choices(template, results)
+    frozen = {i for i, c in enumerate(template.choices) if c.label in inert}
+    for seed in candidates(template):
+        if seed in tried or any(pick for i, pick in enumerate(template.vector(seed)) if i in frozen):
+            continue
+        if attempt(seed):
+            return finish("match")
+    return finish("exhausted")
 
 
-def summary(template, end, best, counts, winner):
+EFFECT_ROWS = 8  # choice points the effect table lists
+NEXT_ROWS = 2  # runners-up the summary names
+
+
+def insights(template, results, best):
+    """What the round's results show: the effect table, the inert choice points, and the next two candidates.
+
+    The table lists each choice point that changes the score, with its alternatives' change in
+    differing bytes against the baseline, largest effect first. A runner-up is the best other
+    candidate, named by the choices where it departs from the best.
+    """
+    by_seed = {r["seed"]: r for r in results}
+    base = by_seed.get(0, {}).get("differ_bytes")
+    effects = []
+    for i, c in enumerate(template.choices):
+        deltas = {}
+        for pick in range(1, len(c.alternatives)):
+            vector = [0] * len(template.choices)
+            vector[i] = pick
+            got = by_seed.get(template.seed(vector), {}).get("differ_bytes")
+            if base is not None and got is not None and got != base:
+                deltas[f"{c.label}{pick}"] = got - base
+        if deltas:
+            effects.append((max(abs(d) for d in deltas.values()), c.label, deltas))
+    effects.sort(key=lambda e: (-e[0], e[1]))
+    out = {"effects": [{label: deltas} for _, label, deltas in effects[:EFFECT_ROWS]],
+           "inert": inert_choices(template, results)}
+    if "seed" in best:
+        top = template.vector(best["seed"])
+        scored = sorted((r for r in results if r["seed"] != best["seed"] and r["differ_bytes"] is not None
+                         and r["differ_bytes"] >= 0), key=lambda r: (r["differ_bytes"], r["seed"]))
+        out["next"] = [" ".join(w for w, a, b in zip(r["code"].split(), template.vector(r["seed"]), top) if a != b)
+                       + f": {r['differ_bytes']} bytes" for r in scored[:NEXT_ROWS]]
+    if template.choices and len(out["inert"]) == len(template.choices):
+        out["stop"] = "every choice point is inert: no alternative changes the object, so stop searching this template"
+    return out
+
+
+def summary(template, end, best, counts, winner, results=()):
     """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
     out = {"end": end, "best": None, "counts": counts}
     if "score" in best:
@@ -2168,9 +2258,12 @@ def summary(template, end, best, counts, winner):
         out["window"] = list(best["window"])
     else:
         out["failure"] = best["failure"][-FAILURE_CHARS:]
+    if results:
+        out.update(insights(template, results, best))
     cap = SUMMARY_TOKENS * TOKEN_CHARS
-    while len(json.dumps(out)) > cap and out.get("window"):
-        out["window"].pop()
+    for key in ("window", "next", "effects"):  # what the cap drops first, a row at a time
+        while len(json.dumps(out)) > cap and out.get(key):
+            out[key].pop()
     over = len(json.dumps(out)) - cap
     if over > 0 and out.get("failure"):
         out["failure"] = out["failure"][over:]
@@ -2268,6 +2361,7 @@ class Memo:
     def __init__(self, worker, cache, ctx, hashing):
         self.worker, self.cache, self.ctx, self.hashing = worker, cache, ctx, hashing
         self.seen, self.objects = {}, set()
+        self.last = None  # the object key of the last candidate scored, for the round's inert-choice check
         self.src_hits = self.cache_hits = self.object_hits = self.served = 0
 
     def key(self, kind, data):
@@ -2277,6 +2371,7 @@ class Memo:
 
     def reply(self, e):
         self.worker.report.write_text("\n".join(e.get("w", [])), encoding="utf-8")
+        self.last = e.get("o")
         if e.get("o"):
             self.objects.add(e["o"])
         return Score(e["r"], e["d"], e.get("log", ""))
@@ -2392,7 +2487,7 @@ def cmd_search(a):
         baseline = template.render(template.vector(0))
         hashing = "object" if objects_repeat(worker, spare, baseline, cache, ctx) else "function"
         memo = Memo(worker, cache, ctx, hashing)
-        end, best, counts, results = run_round(template, memo, worker.report)
+        end, best, counts, results = run_round(template, memo, worker.report, lambda: memo.last)
         counts["compiled"] -= memo.served
         counts.update(memo.counts())
         save_cache(cache)
@@ -2407,7 +2502,7 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    print(json.dumps(summary(template, end, best, counts, winner)))
+    print(json.dumps(summary(template, end, best, counts, winner, results)))
 
 
 def search_detail(t, code):
