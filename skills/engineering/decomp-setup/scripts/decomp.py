@@ -903,8 +903,8 @@ def build_unit(environment, t, compiler, tree, source, objdir, report=""):
     return obj, ""
 
 
-def diff_unit(environment, t, compiler, tree, source, obj, report, fields=None):
-    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does.
+def diff_unit_first(environment, t, compiler, tree, source, obj, report, fields=None):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log, first_differ or None).
 
     A dict given as fields is filled with the adapter's whole JSON, for a caller that reads more of it.
     """
@@ -912,12 +912,19 @@ def diff_unit(environment, t, compiler, tree, source, obj, report, fields=None):
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}"
+        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}", None
     if fields is not None and isinstance(out, dict):
         fields.update(out)
+    first = out.get("first_differ")  # optional: the byte offset of the first difference
+    first = first if isinstance(first, int) and not isinstance(first, bool) and first >= 0 else None
     if out.get("match") is True and out.get("differ_bytes", 0) == 0:
-        return "bytes-match", 0, ""
-    return "differ", int(out.get("differ_bytes", -1)), ""
+        return "bytes-match", 0, "", first
+    return "differ", int(out.get("differ_bytes", -1)), "", first
+
+
+def diff_unit(environment, t, compiler, tree, source, obj, report):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does."""
+    return diff_unit_first(environment, t, compiler, tree, source, obj, report)[:3]
 
 
 def marker_count(text, tid):
@@ -1793,11 +1800,31 @@ KINDS = ("decl-order", "stmt-order", "loop-form", "temp-type", "signedness", "wi
          "expression-shape", "branch-order", "inlining", "other")  # the levers of decomp-match's MISMATCH.md
 HEAD = re.compile(r"@([A-Za-z_]+)(?:[ \t]+(\S+))?")  # a choice point's first argument: @label kind
 LIKELIHOOD = re.compile(r"%(\d+(?:\.\d*)?|\.\d+)(?:\s+|$)")  # an alternative's leading %0.7
-# A choice point: its label, its alternatives' source text, its kind, and one likelihood per alternative
-# (None: all alike). A Reference is a later PERM_VAR(label): the same pick again.
-Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods", defaults=("other", None))
+STEER_TAG = re.compile(r"/\*\s*steer:(.*?)\*/\s*", re.S)  # leads a steering alternative: /* steer: <reason> */
+# A choice point: its label, its alternatives' source text, its kind, one likelihood per alternative
+# (None: all alike), and per alternative the reason it steers the compiler (None: the alternative is
+# natural; an empty tuple: all natural). A Reference is a later PERM_VAR(label): the same pick again.
+Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods steers", defaults=("other", None, ()))
 Reference = collections.namedtuple("Reference", "label")
-Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
+Score = collections.namedtuple("Score", "result differ_bytes log first_differ", defaults=(None,))  # first_differ: optional
+
+
+def steer(choice, pick):
+    """The reason one alternative of a choice point steers the compiler, or None when it is natural."""
+    return choice.steers[pick] if choice.steers else None
+
+
+def picked(self, pick):
+    """The source one alternative of a choice point stands for."""
+    why = steer(self, pick)
+    text = self.alternatives[pick]
+    if why is None:
+        return text
+    note = f" /* fakematch: {why} */"
+    return "\n".join(line + note if line.strip() else line for line in text.split("\n"))
+
+
+Choice.picked = picked
 
 
 def choice_label(n):
@@ -1862,8 +1889,16 @@ class Template:
             picks[choice.label] = int(m.group(2))
         return [picks.get(c.label, 0) for c in self.choices]
 
+    def steering(self, vector):
+        """The choice points whose pick steers the compiler, as (index into choices, reason) pairs."""
+        return [(i, steer(c, pick)) for i, (c, pick) in enumerate(zip(self.choices, vector))
+                if steer(c, pick) is not None]
+
     def render(self, vector):
-        """The candidate as plain source: each choice point replaced by its picked alternative."""
+        """The candidate as plain source: each choice point replaced by its picked alternative.
+
+        A steering alternative's tag becomes a `fakematch: <why>` comment on each of its lines.
+        """
         return render_parts(self.parts, vector)
 
 
@@ -1872,7 +1907,7 @@ def render_parts(parts, vector):
     picks, said, out = iter(vector), {}, []
     for p in parts:
         if isinstance(p, Choice):
-            said[p.label] = p.alternatives[next(picks)]
+            said[p.label] = p.picked(next(picks))
             out.append(said[p.label])
         else:
             out.append(said[p.label] if isinstance(p, Reference) else p)
@@ -1892,19 +1927,32 @@ def read_head(where, args, default_kind):
     return m.group(1), kind, args[1:]
 
 
-def read_likelihoods(where, alternatives):
-    """Each alternative's text without its leading likelihood, and the likelihoods (None when none was given)."""
-    texts, weights = [], []
+def read_alternatives(where, alternatives):
+    """Each alternative's text without its leading likelihood and steering tag, which come in either order.
+
+    Returns (texts, likelihoods or None when none was given, per alternative its steering reason or None).
+    """
+    texts, weights, steers = [], [], []
     for alt in alternatives:
-        weight = 1.0
-        if alt.startswith("%"):
-            m = LIKELIHOOD.match(alt)
-            if not m or float(m.group(1)) <= 0:
-                die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
-            weight, alt = float(m.group(1)), alt[m.end():]
+        weight = why = None
+        while True:
+            tag = STEER_TAG.match(alt) if why is None else None
+            if tag:
+                why = " ".join(tag.group(1).split())
+                if not why:
+                    die(f"template {where}: a steering tag needs a reason: /* steer: <why> */")
+                alt = alt[tag.end():].strip()
+            elif weight is None and alt.startswith("%"):
+                m = LIKELIHOOD.match(alt)
+                if not m or float(m.group(1)) <= 0:
+                    die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
+                weight, alt = float(m.group(1)), alt[m.end():]
+            else:
+                break
         texts.append(alt)
-        weights.append(weight)
-    return texts, weights if any(w != 1.0 for w in weights) else None
+        weights.append(1.0 if weight is None else weight)
+        steers.append(why)
+    return texts, weights if any(w != 1.0 for w in weights) else None, tuple(steers)
 
 
 def line_orders(where, body):
@@ -1960,7 +2008,7 @@ def parse_template(text):
             first = inner[0].lstrip().startswith("@")
             head, _, body = inner[0].partition("\n") if first else ("", "", inner[0])
             label, kind, _ = read_head(here, [head.strip()] if first else [], "stmt-order")
-            alternatives, weights = line_orders(here, body), None
+            alternatives, weights, steers = line_orders(here, body), None, ()
         else:
             args = split_alternatives(code, text, body_at, end - 1)
             if macro == "PERM_VAR" and len(args) == 1 and re.fullmatch(r"[A-Za-z_]+", args[0]):
@@ -1979,15 +2027,15 @@ def parse_template(text):
                 if not lo <= hi or hi - lo + 1 > MAX_INT_VALUES:
                     die(f"template {here}: PERM_INT needs lo <= hi and at most {MAX_INT_VALUES} values")
                 args = [str(i) for i in range(lo, hi + 1)]
-            alternatives, weights = read_likelihoods(here, args)
+            alternatives, weights, steers = read_alternatives(here, args)
             if macro == "PERM_ONCE":
-                alternatives, weights = [""] + alternatives, weights and [1.0] + weights
+                alternatives, weights, steers = [""] + alternatives, weights and [1.0] + weights, (None,) + steers
             if len(alternatives) < 2:
                 die(f"template {here}: a choice point needs two or more alternatives")
         label = label or choice_label(len(choices))
         if any(c.label == label for c in choices):
             die(f"template {here}: the label '{label}' is used twice; labels are what choice codes name")
-        choice = Choice(label, alternatives, kind, weights)
+        choice = Choice(label, alternatives, kind, weights, steers)
         choices.append(choice)
         parts.append(choice)
         if macro == "PERM_VAR":
@@ -1998,43 +2046,86 @@ def parse_template(text):
 
 
 def candidates(template, boost=None):
-    """The seeds a round tries, in order: the whole space, most likely first.
+    """The seeds a round tries after its opening one-change sweep, in order: the whole space, most likely first.
 
-    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
-    given the order is the seeds', baseline first. boost maps a kind to the times it fixed the
-    ticket's category (see history): it raises the likelihood of that kind's alternatives.
+    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods,
+    no steering alternative and no history the order is the seeds', baseline first. boost maps a kind
+    to the times it fixed the ticket's category (see history): it raises the likelihood of that
+    kind's alternatives.
     """
     boosted = any(boost.get(c.kind) for c in template.choices) if boost else False
-    if not boosted and all(c.likelihoods is None for c in template.choices):
+    if not boosted and all(c.likelihoods is None and not any(c.steers) for c in template.choices):
         return range(template.space())
     return most_likely_first(template, boost)
+
+
+def likelihoods(template, boost=None):
+    """Each choice point's likelihood per alternative: the writer's (1.0 where none was given), raised by history.
+
+    A change from the baseline (alternative 0) is what a kind fixed, so boost raises every other alternative.
+    """
+    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
+    for i, c in enumerate(template.choices):
+        if boost and boost.get(c.kind):
+            weights[i] = weights[i][:1] + [w * (1 + boost[c.kind]) for w in weights[i][1:]]
+    return weights
 
 
 def most_likely_first(template, boost=None):
     """Every seed, the likeliest candidate first, produced lazily so a large space costs nothing until it is read.
 
-    Each choice point's alternatives are ranked by likelihood (written order breaking ties). A heap
-    holds the frontier of rank vectors: raising one rank never raises the likelihood, and each vector
-    is reached by one route, raising ranks left to right.
+    Each choice point's alternatives are ranked by likelihood (a natural one before a steering one,
+    then written order, breaking ties). A heap holds the frontier of rank vectors: raising one rank
+    never raises the likelihood, and each vector is reached by one route, raising ranks left to right.
+    At equal likelihood the candidate with fewer steering alternatives goes first.
     """
-    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
-    for i, c in enumerate(template.choices):  # a change from the baseline (alternative 0) is what a kind fixed
-        if boost and boost.get(c.kind):
-            weights[i] = weights[i][:1] + [w * (1 + boost[c.kind]) for w in weights[i][1:]]
-    ranked = [sorted(range(len(w)), key=lambda i, w=w: (-w[i], i)) for w in weights]
+    weights = likelihoods(template, boost)
+    ranked = [sorted(range(len(w)), key=lambda i, w=w, c=c: (-w[i], steer(c, i) is not None, i))
+              for w, c in zip(weights, template.choices)]
     cost = [[-math.log(w[i]) for i in order] for w, order in zip(weights, ranked)]
 
     def entry(ranks, last):
-        seed = template.seed([order[r] for order, r in zip(ranked, ranks)])
-        return (sum(k[r] for k, r in zip(cost, ranks)), seed, ranks, last)
+        vector = [order[r] for order, r in zip(ranked, ranks)]
+        return (sum(k[r] for k, r in zip(cost, ranks)), len(template.steering(vector)), template.seed(vector), ranks, last)
 
     heap = [entry((0,) * len(ranked), 0)]
     while heap:
-        _, seed, ranks, last = heapq.heappop(heap)
+        _, _, seed, ranks, last = heapq.heappop(heap)
         yield seed
         for j in range(last, len(ranks)):
             if ranks[j] + 1 < len(ranked[j]):
                 heapq.heappush(heap, entry(ranks[:j] + (ranks[j] + 1,) + ranks[j + 1:], j))
+
+
+def one_change(template, boost=None):
+    """The seeds that open a round: the baseline, then each candidate with one choice point changed.
+
+    The one-change candidates go most likely first. Where likelihoods tie or none was given, a natural
+    alternative goes before a steering one, then template order decides.
+    """
+    changed = []
+    for (i, c), weights in zip(enumerate(template.choices), likelihoods(template, boost)):
+        for pick in range(1, len(c.alternatives)):
+            vector = [0] * len(template.choices)
+            vector[i] = pick
+            changed.append((-weights[pick] / weights[0], steer(c, pick) is not None, len(changed), template.seed(vector)))
+    return [0] + [seed for *_, seed in sorted(changed)]
+
+
+def inert_choices(template, results):
+    """The labels of the choice points whose alternatives all gave the baseline's object, among results so far."""
+    by_seed = {r["seed"]: r for r in results}
+    base = by_seed.get(0, {}).get("object")
+    out = []
+    for i, c in enumerate(template.choices):
+        for pick in range(1, len(c.alternatives)):
+            vector = [0] * len(template.choices)
+            vector[i] = pick
+            if not base or by_seed.get(template.seed(vector), {}).get("object") != base:
+                break
+        else:
+            out.append(c.label)
+    return out
 
 
 def beside(tree, source, text):
@@ -2106,7 +2197,7 @@ class Worker:
 
     def diff(self, obj, fields=None):
         """Diff a built object. The diff report of this candidate is left in self.report."""
-        return Score(*diff_unit(*self.args(), obj, str(self.report), fields))
+        return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
 
     def args(self):
         return (self.environment, self.t, self.compiler, self.tree, str(self.source))
@@ -2126,43 +2217,156 @@ def rank(score):
     """A score's sort key, lower being closer to the original. None when the candidate gave no score."""
     if score.result not in ("bytes-match", "differ") or score.differ_bytes is None or score.differ_bytes < 0:
         return None
-    return (score.differ_bytes,)
+    if score.first_differ is None:
+        return (score.differ_bytes,)
+    return (score.differ_bytes, -score.first_differ)  # equal bytes: the later first difference is closer
 
 
-def window(report):
-    """The lines of a diff report the summary shows: its first ones, each cut to a fixed width."""
+OFFSET_TOKEN = re.compile(r"(?<![0-9A-Za-z])(?:0[xX])?([0-9A-Fa-f]+)(?![0-9A-Za-z])")
+
+
+def offset_line(lines, offset):
+    """Index of the first report line holding offset as a whole number, in hex (0x optional, zeros ignored) or decimal."""
+    want = {format(offset, "x"), str(offset)}
+    for i, line in enumerate(lines):
+        if any((m.group(1).lstrip("0") or "0").lower() in want for m in OFFSET_TOKEN.finditer(line)):
+            return i
+    return None
+
+
+def window(report, first_differ=None):
+    """The lines of a diff report the summary shows, each cut to a fixed width.
+
+    With first_differ, the window is centred on the line holding that offset, with WINDOW_LINES // 2 lines of
+    context each side. Without it, or when no line holds it, it is the report's first lines.
+    """
     try:
         with open(report, encoding="utf-8", errors="replace") as f:
-            return [line.rstrip("\n")[:WINDOW_WIDTH] for _, line in zip(range(WINDOW_LINES), f)]
+            lines = [line.rstrip("\n")[:WINDOW_WIDTH] for line in f]
     except OSError:
         return []
+    at = None if first_differ is None else offset_line(lines, first_differ)
+    start = 0 if at is None else max(0, at - WINDOW_LINES // 2)
+    return lines[start:start + WINDOW_LINES]
 
 
-def run_round(template, score, report, boost=None):
-    """Try each candidate until one matches or none is left. Returns (end reason, best, counts, results).
+def run_round(template, score, report, fingerprint=lambda: None, boost=None):
+    """Try candidates until one matches or none is left. Returns (end reason, best, counts, results).
 
-    score turns a candidate's source into a Score and leaves its diff report at report.
+    score turns a candidate's source into a Score and leaves its diff report at report. fingerprint
+    returns a hash of the object the last score built, or None. boost is the history's (see candidates).
+    The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
+    group most likely first. A choice point whose alternatives all gave the baseline's object is inert:
+    it stays at its first alternative from then on.
+    A natural match ends the round at once. A match that needs steering is kept while the rest is tried
+    for a natural one; when none turns up, the steered match is reduced to the steering it needs.
     best is a dict: seed, score, and diff window of the closest candidate, or only the first failure
     log when no candidate was scored. results holds one record per candidate tried.
     """
     counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
-    best, results, failure = None, [], ""
-    for seed in candidates(template, boost):
+    state = {"best": None, "failure": ""}
+    results, tried = [], set()
+    scored, steered = {}, []  # scored: seed to its Score. steered: seeds that match only through steering
+
+    def attempt(seed):
+        """Score one candidate. True when it is a natural match, which ends the round."""
+        tried.add(seed)
         vector = template.vector(seed)
-        s = score(template.render(vector))
+        s = scored[seed] = score(template.render(vector))
         counts["guardrail" if s.result == "guardrail" else "compiled"] += 1
         counts["build_fail"] += s.result == "build-fail"
-        results.append({"seed": seed, "code": template.code(vector), "result": s.result, "differ_bytes": s.differ_bytes})
+        results.append({"seed": seed, "code": template.code(vector), "result": s.result,
+                        "differ_bytes": s.differ_bytes, "object": fingerprint()})
         if rank(s) is None:
-            failure = failure or s.log
-        elif best is None or rank(s) < rank(best["score"]):
-            best = {"seed": seed, "score": s, "window": window(report)}
-        if s.result == "bytes-match":
-            return "match", best, counts, results
-    return "exhausted", best or {"failure": failure}, counts, results
+            state["failure"] = state["failure"] or s.log
+        elif state["best"] is None or rank(s) < rank(state["best"]["score"]):
+            state["best"] = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
+        if s.result != "bytes-match":
+            return False
+        if template.steering(vector):
+            steered.append(seed)  # a match that needs steering: keep looking for a natural one
+            return False
+        state["best"] = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
+        return True
+
+    def finish(end):
+        return end, state["best"] or {"failure": state["failure"]}, counts, results
+
+    for seed in one_change(template, boost):
+        if attempt(seed):
+            return finish("match")
+    inert = inert_choices(template, results)
+    frozen = {i for i, c in enumerate(template.choices) if c.label in inert}
+    for seed in candidates(template, boost):
+        if seed in tried or any(pick for i, pick in enumerate(template.vector(seed)) if i in frozen):
+            continue
+        if attempt(seed):
+            return finish("match")
+    if steered:
+        seed = reduce_steering(template, steered, scored, attempt)
+        state["best"] = {"seed": seed, "score": scored[seed], "window": []}
+        return finish("match")
+    return finish("exhausted")
 
 
-def summary(template, end, best, counts, winner, history_line=""):
+def reduce_steering(template, seeds, scored, attempt):
+    """The seed of the steered match that keeps the fewest steer choices, each flipped to a natural alternative where
+    the match survives it. Candidates already scored are not built again."""
+    seed = min(seeds, key=lambda s: len(template.steering(template.vector(s))))
+    vector = template.vector(seed)
+    for i, _ in template.steering(vector):
+        for pick in range(len(template.choices[i].alternatives)):
+            if steer(template.choices[i], pick) is not None:
+                continue
+            flipped = vector[:i] + [pick] + vector[i + 1:]
+            at = template.seed(flipped)
+            if at not in scored:
+                attempt(at)
+            if scored[at].result == "bytes-match":
+                vector = flipped
+                break
+    return template.seed(vector)
+
+
+EFFECT_ROWS = 8  # choice points the effect table lists
+NEXT_ROWS = 2  # runners-up the summary names
+
+
+def insights(template, results, best):
+    """What the round's results show: the effect table, the inert choice points, and the next two candidates.
+
+    The table lists each choice point that changes the score, with its alternatives' change in
+    differing bytes against the baseline, largest effect first. A runner-up is the best other
+    candidate, named by the choices where it departs from the best.
+    """
+    by_seed = {r["seed"]: r for r in results}
+    base = by_seed.get(0, {}).get("differ_bytes")
+    effects = []
+    for i, c in enumerate(template.choices):
+        deltas = {}
+        for pick in range(1, len(c.alternatives)):
+            vector = [0] * len(template.choices)
+            vector[i] = pick
+            got = by_seed.get(template.seed(vector), {}).get("differ_bytes")
+            if base is not None and got is not None and got != base:
+                deltas[f"{c.label}{pick}"] = got - base
+        if deltas:
+            effects.append((max(abs(d) for d in deltas.values()), c.label, deltas))
+    effects.sort(key=lambda e: (-e[0], e[1]))
+    out = {"effects": [{label: deltas} for _, label, deltas in effects[:EFFECT_ROWS]],
+           "inert": inert_choices(template, results)}
+    if "seed" in best:
+        top = template.vector(best["seed"])
+        scored = sorted((r for r in results if r["seed"] != best["seed"] and r["differ_bytes"] is not None
+                         and r["differ_bytes"] >= 0), key=lambda r: (r["differ_bytes"], r["seed"]))
+        out["next"] = [" ".join(w for w, a, b in zip(r["code"].split(), template.vector(r["seed"]), top) if a != b)
+                       + f": {r['differ_bytes']} bytes" for r in scored[:NEXT_ROWS]]
+    if template.choices and len(out["inert"]) == len(template.choices):
+        out["stop"] = "every choice point is inert: no alternative changes the object, so stop searching this template"
+    return out
+
+
+def summary(template, end, best, counts, winner, results=(), history_line=""):
     """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
     out = {"end": end, "best": None, "counts": counts}
     if history_line:
@@ -2175,9 +2379,12 @@ def summary(template, end, best, counts, winner, history_line=""):
         out["window"] = list(best["window"])
     else:
         out["failure"] = best["failure"][-FAILURE_CHARS:]
+    if results:
+        out.update(insights(template, results, best))
     cap = SUMMARY_TOKENS * TOKEN_CHARS
-    while len(json.dumps(out)) > cap and out.get("window"):
-        out["window"].pop()
+    for key in ("window", "next", "effects"):  # what the cap drops first, a row at a time
+        while len(json.dumps(out)) > cap and out.get(key):
+            out[key].pop()
     over = len(json.dumps(out)) - cap
     if over > 0 and out.get("failure"):
         out["failure"] = out["failure"][over:]
@@ -2275,6 +2482,7 @@ class Memo:
     def __init__(self, worker, cache, ctx, hashing):
         self.worker, self.cache, self.ctx, self.hashing = worker, cache, ctx, hashing
         self.seen, self.objects = {}, set()
+        self.last = None  # the object key of the last candidate scored, for the round's inert-choice check
         self.src_hits = self.cache_hits = self.object_hits = self.served = 0
 
     def key(self, kind, data):
@@ -2284,9 +2492,10 @@ class Memo:
 
     def reply(self, e):
         self.worker.report.write_text("\n".join(e.get("w", [])), encoding="utf-8")
+        self.last = e.get("o")
         if e.get("o"):
             self.objects.add(e["o"])
-        return Score(e["r"], e["d"], e.get("log", ""))
+        return Score(e["r"], e["d"], e.get("log", ""), e.get("f"))
 
     def __call__(self, text):
         skey = self.key("src", source_bytes(text))
@@ -2321,7 +2530,7 @@ class Memo:
                 return dict(self.cache["obj"][okey], o=okey)
         fields = {}
         s = w.diff(obj, fields)
-        e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report)}
+        e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report, s.first_differ), "f": s.first_differ}
         if self.hashing == "function" and isinstance(fields.get("function_sha256"), str):
             okey = self.key("fn", fields["function_sha256"].encode())
             if okey in self.cache["obj"]:
@@ -2427,6 +2636,9 @@ def cmd_search(a):
         die(f"cannot read the template: {e}")
     text = source_text(data)
     template = parse_template(text)
+    if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
+        die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
+            "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
@@ -2439,7 +2651,7 @@ def cmd_search(a):
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
         category = (trail(t["id"]) or [{}])[-1].get("category")
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
-        end, best, counts, results = run_round(template, memo, worker.report, boost)
+        end, best, counts, results = run_round(template, memo, worker.report, lambda: memo.last, boost)
         counts["compiled"] -= memo.served
         counts.update(memo.counts())
         save_cache(cache)
@@ -2454,7 +2666,7 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    print(json.dumps(summary(template, end, best, counts, winner, history_line(past, category))))
+    print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category))))
 
 
 def search_detail(t, code):

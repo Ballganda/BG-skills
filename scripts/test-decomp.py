@@ -2165,8 +2165,10 @@ def test_search_compiles_higher_likelihood_combinations_first(base):
         "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
     expect(out is not None and out["counts"]["compiled"] == 6, "the whole space is built", r)
     built = log.read_text().splitlines()[-6:]  # after the start-up builds that check the compiler repeats itself
-    expect(built == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b0", "tag_a1 tag_b1", "tag_a2 tag_b1", "tag_a0 tag_b1"],
-           f"candidates should build most likely first: {built}", r)
+    expect(built[0] == "tag_a0 tag_b0", f"the baseline builds first: {built}", r)
+    expect(built[1:4] == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b1"],
+           f"the one-change candidates should build next, most likely first: {built}", r)
+    expect(built[4:] == ["tag_a1 tag_b1", "tag_a2 tag_b1"], f"the rest should build most likely first: {built}", r)
 
 
 def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
@@ -2178,6 +2180,147 @@ def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
     expect(not (p.root / "ledger").exists(), "search records nothing in the ledger")
     expect(p.git("status", "--porcelain") == "" and p.git("diff", "--name-only", "decomp-setup") == "",
            "nothing tracked or frozen changed, and nothing new sits in the tree")
+
+
+# A fake diff that also reports `first_differ`: the offset of the first WRONG in the object.
+SEARCH_FIRST_DIFF_PY = """import json, sys
+text = open(sys.argv[1]).read()
+n = text.count("WRONG")
+open(sys.argv[2], "w").write("".join("%04d mov eax, %s" % (i, chr(10)) for i in range(400)))
+out = dict(match=n == 0, differ_bytes=2 * n)
+if n:
+    out["first_differ"] = text.index("WRONG")
+print(json.dumps(out))
+"""
+FIRST_CONFIG = {"diff": PY + ' "{tools}/search_diff.py" "{obj}" "{report}"'}
+FIRST_FILES = {"tools/search_diff.py": SEARCH_FIRST_DIFF_PY}
+SAME_BYTES = MARK + "int f(void) { PERM_GENERAL(int WRONG_a; int ok_b;, int ok_b; int WRONG_a;) return 1; }\n"
+
+
+def test_search_breaks_a_tie_by_the_later_first_difference(base):
+    r, out = search(search_project(base, files=FIRST_FILES), SAME_BYTES)
+    expect(out is not None and out["best"] == {"code": "A1", "differ_bytes": 2},
+           "of equal differ_bytes the later first difference should rank higher", r)
+
+
+def test_search_window_is_centred_on_the_first_difference_with_three_lines_of_context(base):
+    r, out = search(search_project(base, files=FIRST_FILES), SAME_BYTES)
+    first = int(out["window"][3].split()[0])
+    expect(len(out["window"]) == 7 and first > 3, "the window should hold 3 lines each side", r)
+    expect([int(w.split()[0]) for w in out["window"]] == list(range(first - 3, first + 4)),
+           f"the window should be consecutive report lines: {out['window']}", r)
+    expect(first > 20, "the centre is the offset of the first difference, not the report's start", r)
+
+
+def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(base):
+    r, out = search(search_project(base), SAME_BYTES)
+    expect(out is not None and out["best"] == {"code": "A0", "differ_bytes": 2},
+           "with no first_differ the first of equal candidates stays the best", r)
+    expect(out["window"][0].startswith("0000 mov eax"), "the window is the report's first lines", r)
+
+
+# A steering alternative leads with /* steer: <why> */. The fake diff only counts WRONG, so these templates
+# match whenever no WRONG is left: A1 steers, A2 is natural, and B1 steers where B0 is natural.
+STEERED = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: keep a, in a register */ int right_a;) "
+                  "PERM_GENERAL(int right_b;, /* steer: not needed */ int right_c;) return 1; }\n")
+STEER_AND_NATURAL = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: pin it */ int right_a;, int fine_a;) "
+                            "return 1; }\n")
+ALLOWED = {"config": {"fakematch": "allowed"}}
+
+
+def test_search_refuses_a_steering_alternative_when_fakematch_is_forbidden(base):
+    r, out = search(search_project(base), STEERED)
+    expect(r.returncode == 1 and out is None and "fakematch" in r.stderr and "steer" in r.stderr,
+           "the refusal should name the rule", r)
+    expect("Nothing was built" in r.stderr, "nothing should be built", r)
+    r, out = search(search_project(sub(base, "n")), MATCHING)
+    expect(out is not None and out["end"] == "match", "natural alternatives are still searched", r)
+
+
+def test_search_prefers_a_natural_match_over_a_steering_one(base):
+    r, out = search(search_project(base, **ALLOWED), STEER_AND_NATURAL)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "A2", "the natural match should win", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == MARK + "int f(void) { int fine_a; return 1; }\n" and "fakematch" not in text,
+           f"the winner should hold no steering: {text!r}", r)
+
+
+def test_search_drops_a_steer_choice_the_match_does_not_need(base):
+    r, out = search(search_project(base, **ALLOWED), STEERED)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "A1 B0",
+           "the match without the unneeded steer choice should win", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == MARK + "int f(void) { int right_a; /* fakematch: keep a, in a register */ int right_b; return 1; }\n",
+           f"the winner should carry the tag's reason on its steering line only: {text!r}", r)
+
+
+def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
+    r, out = search(search_project(base, **ALLOWED), in_function(
+        "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: pin it */ int right_a;, /* steer: other */ %0.2 int right_b;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "r1",
+           "the likelier steering match should win, the tag and the likelihood in either order", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == in_function("int right_a; /* fakematch: pin it */"), f"the winner should carry the reason: {text!r}", r)
+
+
+# A fake compiler that logs each compile's WRONG_ tags in order, and ignores every IGNORED_ tag.
+SWEEP_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "order.log")
+open(log, "a").write(" ".join(re.findall(r"WRONG_([a-z0-9]+)", text)) + chr(10))
+text = re.sub(r"IGNORED_[a-z0-9]+", "", text)
+out[0] = text
+open(obj, "w")''')
+
+
+def sweep_project(base):
+    return search_project(base, files={"tools/search_build.py": SWEEP_BUILD_PY})
+
+
+def test_search_compiles_the_baseline_and_each_one_change_candidate_first(base):
+    p = sweep_project(base)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a0;, int WRONG_a1;) "
+                       "PERM_GENERAL(int WRONG_b0;, int WRONG_b1;) "
+                       "PERM_GENERAL(int WRONG_c0;, int WRONG_c1;, int WRONG_c2;) return 1; }\n")
+    log = p.root / "tools" / "order.log"
+    before = len(log.read_text().splitlines())  # the check that opened the gate built the unit
+    r, out = search(p, template)
+    order = log.read_text().splitlines()[before:]
+    expect(order[:2] == ["a0 b0 c0"] * 2, f"the baseline is first built twice, to see whether objects repeat: {order}", r)
+    order = order[2:]  # those two builds are not candidate builds
+    expect(out is not None and out["counts"]["compiled"] == 12 and len(order) == 12 and len(set(order)) == 12,
+           f"every candidate is built once: {order}", r)
+    expect(order[:5] == ["a0 b0 c0", "a1 b0 c0", "a0 b1 c0", "a0 b0 c1", "a0 b0 c2"],
+           f"the baseline and the one-change candidates come first: {order}", r)
+
+
+def test_search_freezes_a_choice_the_compiler_ignores(base):
+    p = sweep_project(base)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_b2;) "
+                       "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["inert"] == ["B"], f"the ignored choice should be inert: {out}", r)
+    expect(out["counts"]["compiled"] == 4, "the inert choice is not varied after the one-change candidates", r)
+    expect(out["effects"] == [{"A": {"A1": 2}}], f"the effect table lists only choices that change the score: {out['effects']}", r)
+    expect("stop" not in out, "a search with a live choice carries no stop advice", r)
+
+
+def test_search_advises_stopping_when_every_choice_is_inert(base):
+    template = MARK + "int f(void) { int WRONG_k; PERM_GENERAL(int IGNORED_x;, int IGNORED_y;) return 1; }\n"
+    r, out = search(sweep_project(base), template)
+    expect(out is not None and out["inert"] == ["A"] and out["effects"] == [], f"every choice is inert: {out}", r)
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 2 and "stop searching" in out["stop"],
+           "the summary should carry stop advice", r)
+
+
+def test_search_effect_table_lists_at_most_eight_choices_and_names_the_next_two(base):
+    others = " ".join(f"PERM_GENERAL(int ok_{i};, int WRONG_{i};)" for i in range(8))
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int right_a;) "
+                       "PERM_GENERAL(int WRONG_b;, int right_b;) " + others + " return 1; }\n")
+    r, out = search(search_project(base), template)
+    expect(out is not None and out["end"] == "match", "the pair of changes matches", r)
+    expect(len(out["effects"]) == 8 and out["inert"] == [], f"the table is cut to 8 choices: {out['effects']}", r)
+    expect(len(out["next"]) == 2 and all(": " in line and line.endswith(" bytes") for line in out["next"]),
+           f"two runners-up are named: {out['next']}", r)
+    expect(len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
 
 
 # A counting fake compiler: it logs every build to a file, and with STAMP it writes a changing timestamp
@@ -2212,8 +2355,8 @@ def test_search_compiles_alternatives_with_identical_source_once(base):
     p, builds = counting_project(base)
     r, out = search(p, TWINS)
     expect(out is not None and out["counts"]["space"] == 4, "the template has four candidates", r)
-    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 2,
-           f"two of the four share a source with another: {out['counts']}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 1,
+           f"the twin is seen once, and the freeze of its inert choice skips the fourth: {out['counts']}", r)
     expect(out["counts"]["unique_objects"] == 2 and out["counts"]["hashing"] == "object", "two distinct objects", r)
 
 
@@ -2450,12 +2593,12 @@ def test_a_kind_with_more_history_compiles_its_alternatives_earlier(base):
     p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
     template = in_function("PERM_GENERAL(@regs decl-order, tag_a0 WRONG_1, tag_a1 WRONG_2) "
                            "PERM_GENERAL(@shape expression-shape, tag_b0 WRONG_3, tag_b1 WRONG_4)")
-    second_writer(p, 1, ["decl-order"])
-    second_writer(p, 2, ["decl-order"])
+    second_writer(p, 1, ["expression-shape"])
+    second_writer(p, 2, ["expression-shape"])
     r, out = search(p, template)
     after = log.read_text().splitlines()[-4:]
-    expect(after[:2] == ["tag_a1 tag_b0", "tag_a1 tag_b1"] and len(after) == 4,
-           f"the kind with a win history should compile its alternatives first: {after}", r)
+    expect(after == ["tag_a0 tag_b0", "tag_a0 tag_b1", "tag_a1 tag_b0", "tag_a1 tag_b1"],
+           f"after the baseline, the kind with a win history should compile its alternative first: {after}", r)
 
 
 def test_a_search_writes_no_priors_file(base):
