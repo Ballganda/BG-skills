@@ -805,19 +805,51 @@ def scan(text):
     return bad
 
 
-def fill(template, t, compiler, obj, report, tree):
+def fill(template, t, compiler, obj, report, tree, source=None):
     return expand(
-        template, id=t["id"], unit=t["unit"], source=t["source"], expected=t["expected"],
+        template, id=t["id"], unit=t["unit"], source=source or t["source"], expected=t["expected"],
         address=t["address"], obj=obj, report=report,
         symbols=Path(tree) / SYMBOLS, compiler=compiler,
         tools=Path(tree) / "tools", python=sys.executable,
     )
 
 
-def adapter(template, t, compiler, obj, report, tree, environment):
-    """Run one adapter command. A tool's output is in the tool's encoding, never assumed to be this system's."""
-    return subprocess.run(fill(template, t, compiler, obj, report, tree), shell=True, cwd=tree, env=environment.vars,
+def launch(command, cwd, environment, capture=True):
+    """The one place an adapter runs: through the host shell, in cwd, with the tools' environment.
+
+    Captured output is in the tool's encoding, never assumed to be this system's. With capture off, it goes
+    straight through to the caller.
+    """
+    if not capture:
+        return subprocess.run(command, shell=True, cwd=cwd, env=environment.vars)
+    return subprocess.run(command, shell=True, cwd=cwd, env=environment.vars,
                           capture_output=True, text=True, errors="replace")
+
+
+def adapter(template, t, compiler, obj, report, tree, environment, source=None):
+    """Run one filled build or diff adapter command."""
+    return launch(fill(template, t, compiler, obj, report, tree, source), tree, environment)
+
+
+def build_unit(environment, t, compiler, tree, source, objdir, report=""):
+    """Run the build adapter on source (as the template should see it) into objdir. Returns (obj, failure log or '')."""
+    obj = str(Path(objdir) / f"{t['unit']}.obj")
+    b = adapter(CFG["build"], t, compiler, obj, report, tree, environment, source)
+    if b.returncode != 0:
+        return obj, (b.stderr or b.stdout)[-4000:]
+    return obj, ""
+
+
+def diff_unit(environment, t, compiler, tree, source, obj, report):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does."""
+    d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment, source)
+    try:
+        out = json.loads(d.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}"
+    if out.get("match") is True and out.get("differ_bytes", 0) == 0:
+        return "bytes-match", 0, ""
+    return "differ", int(out.get("differ_bytes", -1)), ""
 
 
 def marker_count(text, tid):
@@ -841,18 +873,11 @@ def build_and_diff(environment, t, compiler, tree, report):
         bad += [f"{rel}: {v}" for v in scan((Path(tree) / rel).read_text(encoding="utf-8", errors="replace"))]
     if bad:
         return "guardrail", None, "\n".join(bad)
-    obj = str(Path(tempfile.mkdtemp(prefix="decomp-obj-")) / f"{t['unit']}.obj")
-    b = adapter(CFG["build"], t, compiler, obj, report, tree, environment)
-    if b.returncode != 0:
-        return "build-fail", None, (b.stderr or b.stdout)[-4000:]
-    d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment)
-    try:
-        out = json.loads(d.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}"
-    if out.get("match") is True and out.get("differ_bytes", 0) == 0:
-        return "bytes-match", 0, ""
-    return "differ", int(out.get("differ_bytes", -1)), ""
+    with tempfile.TemporaryDirectory(prefix="decomp-obj-") as objdir:
+        obj, failure = build_unit(environment, t, compiler, tree, t["source"], objdir, report)
+        if failure:
+            return "build-fail", None, failure
+        return diff_unit(environment, t, compiler, tree, t["source"], obj, report)
 
 
 def frozen_check():
@@ -1002,7 +1027,7 @@ def run_adapter(name, environment, **values):
     """
     if not CFG.get(name):
         die(f"decomp.json has no `{name}` adapter command; run /decomp-setup")
-    code = subprocess.run(tool_command(CFG[name], **values), shell=True, cwd=ROOT, env=environment.vars).returncode
+    code = launch(tool_command(CFG[name], **values), ROOT, environment, capture=False).returncode
     if code:
         die(f"the {name} adapter failed (exit {code})")
 
@@ -1380,8 +1405,7 @@ def cmd_link(a):
             plan = objdir / "plan.json"
             plan.write_text(json.dumps({"objects": objects, "blocks": blocks, "output": str(out)}, indent=1),
                             encoding="utf-8")
-            r = subprocess.run(tool_command(CFG["link"], plan=plan, out=out), shell=True, cwd=tree, env=environment.vars,
-                               capture_output=True, text=True, errors="replace")
+            r = launch(tool_command(CFG["link"], plan=plan, out=out), tree, environment)
             if r.returncode != 0 or not out.is_file():
                 why = f"the link adapter failed (exit {r.returncode}): {(r.stderr or r.stdout)[-2000:]}"
     share = f"{from_source} / {in_scope} in-scope code B from source ({100 * from_source / in_scope:.2f}%)" \
