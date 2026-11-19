@@ -21,7 +21,7 @@ The leading word is **byte-for-byte**: the original binary is the authority, the
 | Size tiers | TINY (25 B or less), SMALL (to 256 B), MEDIUM (to 511 B), LARGE (512 B or more); the contract maps each to a model and an attempt budget |
 | Mismatch categories | One tag per failed attempt, for the category that best explains the first differing instruction |
 | Commits | Every commit a decomp skill makes ends with the harness's attribution lines. This covers the coordinator's ledger commits, writers' source commits, and `decomp-reference`'s repair commits. |
-| [Layout](../../skills/engineering/decomp-standards/LAYOUT.md) | Every project file and who writes it, ticket statuses, ledger records, tool commands, the change flow, and the default relocation policy |
+| [Layout](../../skills/engineering/decomp-standards/LAYOUT.md) | Every project file and who writes it, ticket statuses, ledger records, tool commands, the template-search grammar and gate, the change flow, and the default relocation policy |
 
 The guardrails, in short:
 
@@ -33,6 +33,12 @@ The guardrails, in short:
 - Only the project tool records a match.
 - Any construct written only to steer the compiler is declared with a `fakematch:` comment, within the contract's rule.
 - Scope, compiler and flags change only through `/decomp-setup`, recorded in an ADR.
+
+## Template search
+
+A **template** is a unit's source with choice points, each listing alternative spellings of the text at that place. The layout documents its grammar: the macros (`PERM_GENERAL`, `PERM_VAR`, `PERM_ONCE`, `PERM_INT`, `PERM_LINESWAP`, `PERM_IGNORE`), a label and kind per choice point, a likelihood per alternative, and the limits the tool enforces. A **gate**, computed from the ticket's size tier and its check trail, decides when a writer may start one.
+
+A search result is never a match claim: a winner still passes `check`, `verify`, and the audit. A template round counts as one attempt against the tier's budget.
 
 ## Common questions
 

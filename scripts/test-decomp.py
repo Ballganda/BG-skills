@@ -2165,8 +2165,10 @@ def test_search_compiles_higher_likelihood_combinations_first(base):
         "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
     expect(out is not None and out["counts"]["compiled"] == 6, "the whole space is built", r)
     built = log.read_text().splitlines()[-6:]  # after the start-up builds that check the compiler repeats itself
-    expect(built == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b0", "tag_a1 tag_b1", "tag_a2 tag_b1", "tag_a0 tag_b1"],
-           f"candidates should build most likely first: {built}", r)
+    expect(built[0] == "tag_a0 tag_b0", f"the baseline builds first: {built}", r)
+    expect(built[1:4] == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b1"],
+           f"the one-change candidates should build next, most likely first: {built}", r)
+    expect(built[4:] == ["tag_a1 tag_b1", "tag_a2 tag_b1"], f"the rest should build most likely first: {built}", r)
 
 
 def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
@@ -2197,11 +2199,14 @@ def test_search_compiles_the_baseline_and_each_one_change_candidate_first(base):
     template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a0;, int WRONG_a1;) "
                        "PERM_GENERAL(int WRONG_b0;, int WRONG_b1;) "
                        "PERM_GENERAL(int WRONG_c0;, int WRONG_c1;, int WRONG_c2;) return 1; }\n")
+    log = p.root / "tools" / "order.log"
+    before = len(log.read_text().splitlines())  # the check that opened the gate built the unit
     r, out = search(p, template)
-    order = (p.root / "tools" / "order.log").read_text().splitlines()
-    expect(out is not None and out["counts"]["compiled"] == 12 and len(set(order)) == 12, "every candidate is built once", r)
-    while order[:2] == ["a0 b0 c0"] * 2:  # the baseline is also built twice to see whether objects repeat
-        order.pop(0)
+    order = log.read_text().splitlines()[before:]
+    expect(order[:2] == ["a0 b0 c0"] * 2, f"the baseline is first built twice, to see whether objects repeat: {order}", r)
+    order = order[2:]  # those two builds are not candidate builds
+    expect(out is not None and out["counts"]["compiled"] == 12 and len(order) == 12 and len(set(order)) == 12,
+           f"every candidate is built once: {order}", r)
     expect(order[:5] == ["a0 b0 c0", "a1 b0 c0", "a0 b1 c0", "a0 b0 c1", "a0 b0 c2"],
            f"the baseline and the one-change candidates come first: {order}", r)
 
@@ -2235,6 +2240,8 @@ def test_search_effect_table_lists_at_most_eight_choices_and_names_the_next_two(
     expect(len(out["next"]) == 2 and all(": " in line and line.endswith(" bytes") for line in out["next"]),
            f"two runners-up are named: {out['next']}", r)
     expect(len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+
+
 # A counting fake compiler: it logs every build to a file, and with STAMP it writes a changing timestamp
 # into each object. The matching fake diff reports the function's bytes (the object without comments,
 # white space, or the stamp) as `function_sha256`.

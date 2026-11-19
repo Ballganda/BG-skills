@@ -1998,7 +1998,7 @@ def parse_template(text):
 
 
 def candidates(template):
-    """The seeds a round tries, in order: the whole space, most likely first.
+    """The seeds a round tries after its opening one-change sweep, in order: the whole space, most likely first.
 
     A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
     given the order is the seeds', baseline first.
@@ -2033,14 +2033,18 @@ def most_likely_first(template):
 
 
 def one_change(template):
-    """The seeds that open a round: the baseline, then each candidate with one choice point changed."""
-    seeds = [0]
+    """The seeds that open a round: the baseline, then each candidate with one choice point changed.
+
+    The one-change candidates go most likely first, in template order where likelihoods tie or none was given.
+    """
+    changed = []
     for i, c in enumerate(template.choices):
+        weights = c.likelihoods or [1.0] * len(c.alternatives)
         for pick in range(1, len(c.alternatives)):
             vector = [0] * len(template.choices)
             vector[i] = pick
-            seeds.append(template.seed(vector))
-    return seeds
+            changed.append((-weights[pick] / weights[0], len(changed), template.seed(vector)))
+    return [0] + [seed for _, _, seed in sorted(changed)]
 
 
 def inert_choices(template, results):
@@ -2165,8 +2169,9 @@ def run_round(template, score, report, fingerprint=lambda: None):
 
     score turns a candidate's source into a Score and leaves its diff report at report. fingerprint
     returns a hash of the object the last score built, or None.
-    The baseline and every one-choice-changed candidate go first. A choice point whose alternatives
-    all gave the baseline's object is inert: it stays at its first alternative from then on.
+    The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
+    group most likely first. A choice point whose alternatives all gave the baseline's object is inert:
+    it stays at its first alternative from then on.
     best is a dict: seed, score, and diff window of the closest candidate, or only the first failure
     log when no candidate was scored. results holds one record per candidate tried.
     """
