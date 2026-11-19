@@ -1715,8 +1715,23 @@ WINDOW_WIDTH = 120  # characters kept of each of those lines
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
 CHOICE_CODE = re.compile(r"([A-Z]+)(\d+)")
-Choice = collections.namedtuple("Choice", "label alternatives")
+STEER_TAG = re.compile(r"/\*\s*steer:(.*?)\*/\s*", re.S)  # leads a steering alternative: /* steer: <reason> */
+# steers holds, per alternative, the reason it steers the compiler, or None when the alternative is natural.
+Choice = collections.namedtuple("Choice", "label alternatives steers", defaults=[()])
 Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
+
+
+def picked(self, pick):
+    """The source one alternative of a choice point stands for."""
+    why = self.steers[pick] if self.steers else None
+    text = self.alternatives[pick]
+    if why is None:
+        return text
+    note = f" /* fakematch: {why} */"
+    return "\n".join(line + note if line.strip() else line for line in text.split("\n"))
+
+
+Choice.picked = picked
 
 
 def choice_label(n):
@@ -1781,10 +1796,18 @@ class Template:
             picks[choice.label] = int(m.group(2))
         return [picks.get(c.label, 0) for c in self.choices]
 
+    def steering(self, vector):
+        """The choice points whose pick steers the compiler, as (index into choices, reason) pairs."""
+        return [(i, c.steers[pick]) for i, (c, pick) in enumerate(zip(self.choices, vector))
+                if c.steers and c.steers[pick] is not None]
+
     def render(self, vector):
-        """The candidate as plain source: each choice point replaced by its picked alternative."""
+        """The candidate as plain source: each choice point replaced by its picked alternative.
+
+        A steering alternative's tag becomes a `fakematch: <why>` comment on each of its lines.
+        """
         picks = iter(vector)
-        return "".join(p.alternatives[next(picks)] if isinstance(p, Choice) else p for p in self.parts)
+        return "".join(p.picked(next(picks)) if isinstance(p, Choice) else p for p in self.parts)
 
 
 def parse_template(text):
@@ -1807,7 +1830,15 @@ def parse_template(text):
         alternatives = split_alternatives(code, text, end - 1 - len(inner[0]), end - 1)
         if len(alternatives) < 2:
             die(f"template {where(m.start())}: a choice point needs two or more alternatives")
-        parts += [text[at:m.start()], Choice(choice_label(len(parts) // 2), alternatives)]
+        steers = []
+        for k, alt in enumerate(alternatives):
+            tag = STEER_TAG.match(alt)
+            why = tag and " ".join(tag.group(1).split())
+            if tag and not why:
+                die(f"template {where(m.start())}: a steering tag needs a reason: /* steer: <why> */")
+            steers.append(why)
+            alternatives[k] = alt[tag.end():].strip() if tag else alt
+        parts += [text[at:m.start()], Choice(choice_label(len(parts) // 2), alternatives, tuple(steers))]
         at = end
     return Template(parts + [text[at:]])
 
@@ -1910,19 +1941,49 @@ def run_round(template, score, report):
     """
     counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
     best, results, failure = None, [], ""
-    for seed in candidates(template):
+    scored, steered = {}, []  # scored: seed to its Score. steered: seeds that match only through steering
+
+    def try_seed(seed):
         vector = template.vector(seed)
-        s = score(template.render(vector))
+        s = scored[seed] = score(template.render(vector))
         counts["guardrail" if s.result == "guardrail" else "compiled"] += 1
         counts["build_fail"] += s.result == "build-fail"
         results.append({"seed": seed, "code": template.code(vector), "result": s.result, "differ_bytes": s.differ_bytes})
+        return vector, s
+
+    for seed in candidates(template):
+        vector, s = try_seed(seed)
         if rank(s) is None:
             failure = failure or s.log
         elif best is None or rank(s) < rank(best["score"]):
             best = {"seed": seed, "score": s, "window": window(report)}
         if s.result == "bytes-match":
-            return "match", best, counts, results
+            if not template.steering(vector):
+                return "match", {"seed": seed, "score": s, "window": window(report)}, counts, results
+            steered.append(seed)  # a match that needs steering: keep looking for a natural one
+    if steered:
+        seed = reduce_steering(template, steered, scored, try_seed)
+        return "match", {"seed": seed, "score": scored[seed], "window": []}, counts, results
     return "exhausted", best or {"failure": failure}, counts, results
+
+
+def reduce_steering(template, seeds, scored, try_seed):
+    """The seed of the steered match that keeps the fewest steer choices, each flipped to a natural alternative where
+    the match survives it. Candidates already scored are not built again."""
+    seed = min(seeds, key=lambda s: len(template.steering(template.vector(s))))
+    vector = template.vector(seed)
+    for i, _ in template.steering(vector):
+        choice = template.choices[i]
+        for pick, why in enumerate(choice.steers):
+            if why is not None:
+                continue
+            flipped = vector[:i] + [pick] + vector[i + 1:]
+            at = template.seed(flipped)
+            s = scored[at] if at in scored else try_seed(at)[1]
+            if s.result == "bytes-match":
+                vector = flipped
+                break
+    return template.seed(vector)
 
 
 def summary(template, end, best, counts, winner):
@@ -1966,6 +2027,9 @@ def cmd_search(a):
         die(f"cannot read the template: {e}")
     text = source_text(data)
     template = parse_template(text)
+    if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
+        die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
+            "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:

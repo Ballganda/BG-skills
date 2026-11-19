@@ -2072,6 +2072,41 @@ def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
            "nothing tracked or frozen changed, and nothing new sits in the tree")
 
 
+# A steering alternative leads with /* steer: <why> */. The fake diff only counts WRONG, so these templates
+# match whenever no WRONG is left: A1 steers, A2 is natural, and B1 steers where B0 is natural.
+STEERED = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: keep a, in a register */ int right_a;) "
+                  "PERM_GENERAL(int right_b;, /* steer: not needed */ int right_c;) return 1; }\n")
+STEER_AND_NATURAL = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: pin it */ int right_a;, int fine_a;) "
+                            "return 1; }\n")
+ALLOWED = {"config": {"fakematch": "allowed"}}
+
+
+def test_search_refuses_a_steering_alternative_when_fakematch_is_forbidden(base):
+    r, out = search(search_project(base), STEERED)
+    expect(r.returncode == 1 and out is None and "fakematch" in r.stderr and "steer" in r.stderr,
+           "the refusal should name the rule", r)
+    expect("Nothing was built" in r.stderr, "nothing should be built", r)
+    r, out = search(search_project(sub(base, "n")), MATCHING)
+    expect(out is not None and out["end"] == "match", "natural alternatives are still searched", r)
+
+
+def test_search_prefers_a_natural_match_over_a_steering_one(base):
+    r, out = search(search_project(base, **ALLOWED), STEER_AND_NATURAL)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "A2", "the natural match should win", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == MARK + "int f(void) { int fine_a; return 1; }\n" and "fakematch" not in text,
+           f"the winner should hold no steering: {text!r}", r)
+
+
+def test_search_drops_a_steer_choice_the_match_does_not_need(base):
+    r, out = search(search_project(base, **ALLOWED), STEERED)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "A1 B0",
+           "the match without the unneeded steer choice should win", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == MARK + "int f(void) { int right_a; /* fakematch: keep a, in a register */ int right_b; return 1; }\n",
+           f"the winner should carry the tag's reason on its steering line only: {text!r}", r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
