@@ -2159,7 +2159,7 @@ def test_search_compiles_higher_likelihood_combinations_first(base):
         "PERM_GENERAL(%0.2 tag_a0 WRONG_1, %0.5 tag_a1 WRONG_2, %0.3 tag_a2 WRONG_3) "
         "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
     expect(out is not None and out["counts"]["compiled"] == 6, "the whole space is built", r)
-    built = log.read_text().splitlines()
+    built = log.read_text().splitlines()[-6:]  # after the start-up builds that check the compiler repeats itself
     expect(built == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b0", "tag_a1 tag_b1", "tag_a2 tag_b1", "tag_a0 tag_b1"],
            f"candidates should build most likely first: {built}", r)
 
