@@ -900,13 +900,18 @@ def build_unit(environment, t, compiler, tree, source, objdir, report=""):
     return obj, ""
 
 
-def diff_unit(environment, t, compiler, tree, source, obj, report):
-    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does."""
+def diff_unit(environment, t, compiler, tree, source, obj, report, fields=None):
+    """Run the diff adapter on a built obj. Returns (result, differ_bytes, log) as build_and_diff does.
+
+    A dict given as fields is filled with the adapter's whole JSON, for a caller that reads more of it.
+    """
     d = adapter(CFG["diff"], t, compiler, obj, report, tree, environment, source)
     try:
         out = json.loads(d.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return "build-fail", None, f"diff adapter gave no JSON: {d.stderr[-2000:]}"
+    if fields is not None and isinstance(out, dict):
+        fields.update(out)
     if out.get("match") is True and out.get("differ_bytes", 0) == 0:
         return "bytes-match", 0, ""
     return "differ", int(out.get("differ_bytes", -1)), ""
@@ -1868,21 +1873,38 @@ class Worker:
             shutil.copyfile(Path(tree) / rel, dest)
         self.source.parent.mkdir(parents=True, exist_ok=True)
 
-    def score(self, text):
-        """Build and diff one candidate's source. The diff report of this candidate is left in self.report."""
+    def refuse(self, text):
+        """The guardrail Score for a source that must not be built, or None."""
         marks = marker_count(text, self.t["id"])
         if marks != 1:
             return Score("guardrail", None, f"expected one '@decomp {self.t['id']}' marker comment, found {marks}")
         bad = scan(text)
         if bad:
             return Score("guardrail", None, "\n".join(bad))
+        return None
+
+    def build(self, text):
+        """Build one candidate's source. Returns (obj, failure log or '')."""
         self.source.write_bytes(source_bytes(text))
         self.report.unlink(missing_ok=True)
-        args = (self.environment, self.t, self.compiler, self.tree, str(self.source))
-        obj, failure = build_unit(*args, self.objdir, str(self.report))
+        return build_unit(*self.args(), self.objdir, str(self.report))
+
+    def diff(self, obj, fields=None):
+        """Diff a built object. The diff report of this candidate is left in self.report."""
+        return Score(*diff_unit(*self.args(), obj, str(self.report), fields))
+
+    def args(self):
+        return (self.environment, self.t, self.compiler, self.tree, str(self.source))
+
+    def score(self, text):
+        """Build and diff one candidate's source. The diff report of this candidate is left in self.report."""
+        refused = self.refuse(text)
+        if refused:
+            return refused
+        obj, failure = self.build(text)
         if failure:
             return Score("build-fail", None, failure)
-        return Score(*diff_unit(*args, obj, str(self.report)))
+        return self.diff(obj)
 
 
 def rank(score):
@@ -1945,6 +1967,159 @@ def summary(template, end, best, counts, winner):
     return out
 
 
+CACHE_ENTRIES = 50000  # what the cache keeps of each kind of entry; the oldest go first
+CACHE_KINDS = ("stable", "src", "obj")
+
+
+def search_cache_path():
+    """The result cache: on this machine only, under .decomp/, shared by every worktree and never committed."""
+    return checkout_dir() / "search-cache.json"
+
+
+def load_cache():
+    """The cache as three maps: stable (is a compile's object repeatable), src (source hash to result), obj (object hash to result)."""
+    try:
+        data = json.loads(search_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return {k: data[k] if isinstance(data, dict) and isinstance(data.get(k), dict) else {} for k in CACHE_KINDS}
+
+
+def save_cache(cache):
+    """Write the cache, first merging what another search wrote since it was read."""
+    merged = load_cache()
+    for kind in CACHE_KINDS:
+        merged[kind].update(cache[kind])
+    for kind in ("src", "obj"):
+        while len(merged[kind]) > CACHE_ENTRIES:
+            del merged[kind][next(iter(merged[kind]))]
+    path = search_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(merged), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def search_context(t, compiler, tree, text):
+    """One hash of everything besides the candidate's source that a score depends on.
+
+    The compiler's manifest entry, the build and diff commands, the tree's tools folder (where the
+    wrappers and so the flags live), the expected bytes, the symbol map, and the headers beside the unit.
+    """
+    h = hashlib.sha256()
+
+    def put(*parts):
+        for part in parts:
+            h.update(str(part).encode("utf-8", errors="replace") + b"\0")
+
+    entry = next((x for x in toolchain()["tools"] if x["name"] == compiler), None)
+    put(t["id"], compiler, CFG["build"], CFG["diff"], json.dumps(entry, sort_keys=True))
+    for rel in [t["expected"], SYMBOLS] + beside(tree, t["source"], text):
+        f = Path(tree) / rel
+        put(rel, file_sha(f) if f.is_file() else "")
+    tools = Path(tree) / "tools"
+    for f in sorted(tools.rglob("*")) if tools.is_dir() else []:
+        if f.is_file() and "__pycache__" not in f.parts and f.stat().st_size <= 1 << 20:
+            put(f.relative_to(tools).as_posix(), file_sha(f))
+    return h.hexdigest()
+
+
+def objects_repeat(worker, spare, text, cache, ctx):
+    """Whether compiling one source twice, in two folders, gives the same object file.
+
+    COFF objects can carry a timestamp or the source's path. The answer is kept in the cache. The two
+    builds run a second apart, so that a timestamp in whole seconds shows. When the source cannot be
+    built there is no answer, and objects count as repeatable.
+    """
+    if ctx in cache["stable"]:
+        return cache["stable"][ctx]
+    hashes = []
+    for w in (worker, spare):
+        if hashes:
+            time.sleep(1.1)
+        obj, failure = w.build(text)
+        if failure or not os.path.exists(obj):
+            return True
+        hashes.append(file_sha(obj))
+    cache["stable"][ctx] = hashes[0] == hashes[1]
+    return cache["stable"][ctx]
+
+
+class Memo:
+    """Scores candidates through the dedupe layers, so a build or a diff runs only for what is unseen.
+
+    Order for one candidate: the source seen this round, the source in the cache, a refusal by the
+    guardrails, the build, the object known to the cache (with `function` hashing: the function's bytes
+    as the diff adapter reports them in `function_sha256`, known after the diff), and last the diff.
+    A call returns a Score and leaves the diff window of the result at the worker's report, as
+    Worker.score does.
+    """
+
+    def __init__(self, worker, cache, ctx, hashing):
+        self.worker, self.cache, self.ctx, self.hashing = worker, cache, ctx, hashing
+        self.seen, self.objects = {}, set()
+        self.src_hits = self.cache_hits = self.object_hits = self.served = 0
+
+    def key(self, kind, data):
+        h = hashlib.sha256(self.ctx.encode() + b"\0" + kind.encode() + b"\0")
+        h.update(data if isinstance(data, bytes) else data.encode())
+        return h.hexdigest()
+
+    def reply(self, e):
+        self.worker.report.write_text("\n".join(e.get("w", [])), encoding="utf-8")
+        if e.get("o"):
+            self.objects.add(e["o"])
+        return Score(e["r"], e["d"], e.get("log", ""))
+
+    def __call__(self, text):
+        skey = self.key("src", source_bytes(text))
+        if skey in self.seen:
+            self.src_hits += 1
+            self.served += self.seen[skey]["r"] != "guardrail"
+            return self.reply(self.seen[skey])
+        if skey in self.cache["src"]:
+            self.cache_hits += 1
+            self.served += 1
+            self.seen[skey] = self.cache["src"][skey]
+            return self.reply(self.seen[skey])
+        e = self.fresh(text)
+        self.seen[skey] = e
+        if e["r"] in ("differ", "bytes-match"):
+            self.cache["src"][skey] = e
+        return self.reply(e)
+
+    def fresh(self, text):
+        w = self.worker
+        refused = w.refuse(text)
+        if refused:
+            return {"r": refused.result, "d": None, "log": refused.log}
+        obj, failure = w.build(text)
+        if failure:
+            return {"r": "build-fail", "d": None, "log": failure}
+        okey = None
+        if self.hashing == "object" and os.path.exists(obj):
+            okey = self.key("obj", file_sha(obj).encode())
+            if okey in self.cache["obj"]:
+                self.object_hits += 1
+                return dict(self.cache["obj"][okey], o=okey)
+        fields = {}
+        s = w.diff(obj, fields)
+        e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report)}
+        if self.hashing == "function" and isinstance(fields.get("function_sha256"), str):
+            okey = self.key("fn", fields["function_sha256"].encode())
+            if okey in self.cache["obj"]:
+                self.object_hits += 1
+        if okey and e["r"] in ("differ", "bytes-match"):
+            e["o"] = okey
+            self.cache["obj"][okey] = e
+        return e
+
+    def counts(self):
+        """What the layers did, for the summary."""
+        return {"src_dedupe_hits": self.src_hits, "cache_hits": self.cache_hits, "object_hits": self.object_hits,
+                "unique_objects": len(self.objects), "hashing": self.hashing}
+
+
 def search_dir(tid):
     """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
     return checkout_dir() / "search" / tid
@@ -1970,7 +2145,15 @@ def cmd_search(a):
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
         worker = Worker(Path(scratch) / "w0", environment, t, compiler, tree, text)
-        end, best, counts, results = run_round(template, worker.score, worker.report)
+        cache, ctx = load_cache(), search_context(t, compiler, tree, text)
+        spare = Worker(Path(scratch) / "w1", environment, t, compiler, tree, text) if ctx not in cache["stable"] else None
+        baseline = template.render(template.vector(0))
+        hashing = "object" if objects_repeat(worker, spare, baseline, cache, ctx) else "function"
+        memo = Memo(worker, cache, ctx, hashing)
+        end, best, counts, results = run_round(template, memo, worker.report)
+        counts["compiled"] -= memo.served
+        counts.update(memo.counts())
+        save_cache(cache)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     state = search_dir(t["id"])
