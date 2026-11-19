@@ -45,7 +45,7 @@ Each heading carries one tag. `[needs IDENTIFY]` means its answers depend on the
 - Symbol map: what `inventory` seeds it with for this format, and the relocation types the `diff` adapter resolves.
 - Marker comment form: `// @decomp <id>`, or `/* @decomp <id> */` where the language has no line comment.
 - Fakematch rule: `forbidden`, or `allowed with a fakematch: comment` (ADR).
-- Permuter: allowed or not, and if allowed, its output is fakematch-governed.
+- Template search: allowed or not. Allowed covers natural choices, plus steering only where the fakematch rule allows it. `decomp.json`'s `template_search` (true or false) and `fakematch` (`forbidden` or `allowed`) mirror this line and the fakematch line, so the tool can enforce them.
 
 ## Models [independent]
 | Tier | Writer model | Attempt budget |

@@ -5,7 +5,7 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | Path | Holds | Written by |
 | --- | --- | --- |
 | `DECOMP.md` | The contract: target, compiler, flags, scope, policies, model roster | `/decomp-setup` only |
-| `decomp.json` | The contract's machine-readable part (commands, guarded paths, the pragma and attribute allowlists, the default compiler and each unit that names its own, `link_milestone` (see below), and `link_unavailable` when the target cannot be linked whole) | `/decomp-setup` only |
+| `decomp.json` | The contract's machine-readable part (commands, guarded paths, the pragma and attribute allowlists, `template_search` and `fakematch` (the contract's template-search and fakematch rules, which `doctor` prints and stops without), the default compiler and each unit that names its own, `link_milestone` (see below), and `link_unavailable` when the target cannot be linked whole) | `/decomp-setup` only |
 | `toolchain.json` | The accepted target editions (hashes, probes, the functions each holds differently), the known-wrong editions, host prerequisites, and each required tool (per host, where hosts differ): version banner, required files, source, size, hash, unpack steps | `/decomp-setup` only |
 | `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary) | `/decomp-setup`, `decomp.py` |
 | `IDENTIFY.md` | The compiler investigation: facts, inferences, ranked candidates, toolchain requirements | `decomp-identify` |
@@ -83,7 +83,8 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 
 | Command | Does |
 | --- | --- |
-| `doctor` | Check this machine against `toolchain.json`: which edition the target is, each host prerequisite's version, each tool's required files and version banner. Prints the recognised edition. Exit 6 on any difference |
+| `doctor` | Check this machine against `toolchain.json`: which edition the target is, each host prerequisite's version, each tool's required files and version banner. Prints the recognised edition, then the contract's rules from `decomp.json`: `template search: allowed` or `not allowed`, and `fakematch: forbidden` or `allowed`. Exit 6 on any difference; exit 1, naming the skill upgrade, when `decomp.json` lacks a valid `template_search` or `fakematch` |
+| `contract-keys` | For the skill upgrade: read `DECOMP.md` and print the `decomp.json` keys its lines give, as one JSON line (`template_search`, `fakematch`). An old "Permuter:" line is read as the "Template search:" line. Stops when a line is missing or unclear |
 | `provision [--tool <name>] [--force]` | Download each tool that has a source, compare size and SHA-256, then unpack it under `.decomp/toolchain/`. Checks the host prerequisites first. A file already in `.decomp/downloads/` is compared, and replaced only with `--force`. Never installs a host prerequisite |
 | `inventory [--redo]` | Run the `inventory` adapter, after the full `doctor` checks. Once the `decomp-start` tag exists it refuses, naming the redo flow, unless `--redo` is passed. Pass `--redo` only with the user's go-ahead for an inventory redo, or in a throwaway clone, where it writes nothing to the project |
 | `disasm <id>` | Print the original function's disassembly: run the `disasm` adapter with the ticket's expected file and address |
