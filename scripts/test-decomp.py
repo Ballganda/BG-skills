@@ -2844,6 +2844,55 @@ def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
     expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
 
 
+# A fake `wineserver` that logs each start and then idles until it is killed. Linux and macOS only: Windows
+# has no Wine and no `sh` to run it.
+FAKE_WINESERVER = "#!/bin/sh" + chr(10) + 'echo "$@" >> "$WINESERVER_LOG"' + chr(10) + "exec sleep 60" + chr(10)
+
+
+def wine_project(base, wine=True):
+    """A search project on a host that runs its toolchain under Wine, with a fake wineserver first on PATH."""
+    m = legacy_manifest()
+    if wine:
+        m["prerequisites"] = [{"name": "wine", "version_cmd": "echo wine-8", "version": "wine-8", "hosts": HERE}]
+    p = search_project(base, manifest=m)
+    fake = Path(base) / "fake-wine"
+    fake.mkdir()
+    (fake / "wineserver").write_text(FAKE_WINESERVER, encoding="utf-8")
+    (fake / "wineserver").chmod(0o755)
+    log = Path(base) / "wineserver.log"
+    p.env = {"PATH": str(fake) + os.pathsep + os.environ["PATH"], "WINESERVER_LOG": str(log)}
+    return p, log
+
+
+def search_with_env(p, template):
+    path = p.base / "template.c"
+    path.write_text(template, encoding="utf-8")
+    r = p.run("search", TID, str(path), env=p.env)
+    return r, json.loads(r.stdout.splitlines()[0])
+
+
+def test_search_starts_one_wineserver_per_block_not_per_candidate(base):
+    if sys.platform == "win32":
+        print("SKIP: Windows runs the tools natively and has no wineserver, so the Wine path cannot run here")
+        return
+    p, log = wine_project(base)
+    r, out = search_with_env(p, MATCHING)
+    expect(out["counts"]["compiled"] > 1, f"the block should compile several candidates: {out}", r)
+    started = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    expect(started == ["-f -p"], f"one persistent wineserver per block, not per candidate: {started}", r)
+    r, out = search_with_env(p, MATCHING)
+    expect(len(log.read_text(encoding="utf-8").splitlines()) == 2, "a second block starts its own wineserver", r)
+
+
+def test_search_starts_no_wineserver_when_the_toolchain_does_not_use_wine(base):
+    if sys.platform == "win32":
+        print("SKIP: Windows runs the tools natively and has no wineserver, so the Wine path cannot run here")
+        return
+    p, log = wine_project(base, wine=False)
+    r, out = search_with_env(p, MATCHING)
+    expect(out["end"] == "match" and not log.exists(), "no wine prerequisite, no wineserver", r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
