@@ -2264,6 +2264,22 @@ def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
     expect(text == in_function("int right_a; /* fakematch: pin it */"), f"the winner should carry the reason: {text!r}", r)
 
 
+# A fake compiler that takes longer over a source holding a SLOW_ tag, so that candidate's result comes in last.
+SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
+    import time
+    time.sleep(1)
+open(obj, "w")''')
+
+
+def test_search_picks_the_likelier_steering_match_whichever_build_ends_first(base):
+    p = search_project(base, files={"tools/search_build.py": SLOW_BUILD_PY}, **ALLOWED)
+    tune(p, workers=3)  # the three candidates build at once, the likelier match the slowest
+    r, out = search(p, in_function(
+        "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: likely */ int SLOW_a;, %0.2 /* steer: other */ int right_b;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "r1",
+           "the likelier steering match should win, though its build ended last", r)
+
+
 # A fake compiler that logs each compile's WRONG_ tags in order, and ignores every IGNORED_ tag.
 SWEEP_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "order.log")
 open(log, "a").write(" ".join(re.findall(r"WRONG_([a-z0-9]+)", text)) + chr(10))
