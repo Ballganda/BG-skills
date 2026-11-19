@@ -118,12 +118,16 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 
 - **Alternatives.** They are split at the commas that sit inside no bracket, so an alternative holding a bare comma (`int a, b;`) is written another way. Surrounding white space is dropped, and an empty alternative is allowed. A choice point inside a comment or a literal is not read. A choice point inside another, and any other `PERM_` macro, is refused.
 - **Choice code.** Choice points are labelled `A`, `B`, and on, in file order, and alternatives are numbered from 0. A candidate is one alternative per choice point, named by its choice code: `A1 B0`. All zeros is the baseline.
-- **A round.** `search` needs `template_search` to be true in `decomp.json` and refuses, with the reason, when it is false. It builds each candidate in a scratch copy of the unit's folder layout (the candidate at the unit's own path, with the headers the template includes beside itself), runs the adapters from the current worktree as `check` does, and scores each candidate with the `diff` adapter's `differ_bytes`. A candidate the guardrail scan refuses, or with no single marker, is not built. The round stops at the first exact match.
+- **A round.** `search` needs `template_search` to be true in `decomp.json` and refuses, with the reason, when it is false. It builds each candidate in a scratch copy of the unit's folder layout (the candidate at the unit's own path, with the headers the template includes beside itself), runs the adapters from the current worktree as `check` does, and scores each candidate with the `diff` adapter's `differ_bytes`. A candidate the guardrail scan refuses, or with no single marker, is not built. A round tries the baseline and every one-choice-changed candidate first, then the rest of the space. A choice point whose alternatives all give the baseline's object is **inert**: it is frozen at its first alternative and not varied afterwards. The round stops at the first exact match.
 - **Summary.** One JSON line, capped at about 600 tokens, that never holds candidate source:
   - `end`: `match`, or `exhausted` when every candidate was tried without one.
   - `best`: the closest candidate's `code` and `differ_bytes`, or `null` when none was scored.
   - `window`: the first lines of the best candidate's diff report (no match only).
   - `failure`: the end of the first failure log (only when none was scored).
+  - `effects`: the choice points that change the score, at most 8, largest first, each with its alternatives' change in differing bytes against the baseline (`{"B": {"B1": -2}}`).
+  - `inert`: the labels of the frozen choice points.
+  - `next`: the next two closest candidates, each as the choices where it differs from the best, then its `differ_bytes`.
+  - `stop`: only when every choice point is inert; advice to stop searching this template.
   - `counts`: `space` (candidates in the template), `compiled`, `build_fail`, `guardrail`.
   - `winner`: on a match, the path of the matching candidate as plain C with no macros, in a temporary folder outside the tree.
 - **Not a match claim.** A `match` is a search result. The writer copies the winner into the unit and still passes `check`, `verify`, and the audit.

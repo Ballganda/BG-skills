@@ -2072,6 +2072,61 @@ def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
            "nothing tracked or frozen changed, and nothing new sits in the tree")
 
 
+# A fake compiler that logs each compile's WRONG_ tags in order, and ignores every IGNORED_ tag.
+SWEEP_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "order.log")
+open(log, "a").write(" ".join(re.findall(r"WRONG_([a-z0-9]+)", text)) + chr(10))
+text = re.sub(r"IGNORED_[a-z0-9]+", "", text)
+out[0] = text
+open(obj, "w")''')
+
+
+def sweep_project(base):
+    return search_project(base, files={"tools/search_build.py": SWEEP_BUILD_PY})
+
+
+def test_search_compiles_the_baseline_and_each_one_change_candidate_first(base):
+    p = sweep_project(base)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a0;, int WRONG_a1;) "
+                       "PERM_GENERAL(int WRONG_b0;, int WRONG_b1;) "
+                       "PERM_GENERAL(int WRONG_c0;, int WRONG_c1;, int WRONG_c2;) return 1; }\n")
+    r, out = search(p, template)
+    order = (p.root / "tools" / "order.log").read_text().splitlines()
+    expect(out is not None and out["counts"]["compiled"] == 12 and len(set(order)) == 12, "every candidate is built once", r)
+    expect(order[:5] == ["a0 b0 c0", "a1 b0 c0", "a0 b1 c0", "a0 b0 c1", "a0 b0 c2"],
+           f"the baseline and the one-change candidates come first: {order}", r)
+
+
+def test_search_freezes_a_choice_the_compiler_ignores(base):
+    p = sweep_project(base)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_b2;) "
+                       "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["inert"] == ["B"], f"the ignored choice should be inert: {out}", r)
+    expect(out["counts"]["compiled"] == 4, "the inert choice is not varied after the one-change candidates", r)
+    expect(out["effects"] == [{"A": {"A1": 2}}], f"the effect table lists only choices that change the score: {out['effects']}", r)
+    expect("stop" not in out, "a search with a live choice carries no stop advice", r)
+
+
+def test_search_advises_stopping_when_every_choice_is_inert(base):
+    template = MARK + "int f(void) { int WRONG_k; PERM_GENERAL(int IGNORED_x;, int IGNORED_y;) return 1; }\n"
+    r, out = search(sweep_project(base), template)
+    expect(out is not None and out["inert"] == ["A"] and out["effects"] == [], f"every choice is inert: {out}", r)
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 2 and "stop searching" in out["stop"],
+           "the summary should carry stop advice", r)
+
+
+def test_search_effect_table_lists_at_most_eight_choices_and_names_the_next_two(base):
+    others = " ".join(f"PERM_GENERAL(int ok_{i};, int WRONG_{i};)" for i in range(8))
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int right_a;) "
+                       "PERM_GENERAL(int WRONG_b;, int right_b;) " + others + " return 1; }\n")
+    r, out = search(search_project(base), template)
+    expect(out is not None and out["end"] == "match", "the pair of changes matches", r)
+    expect(len(out["effects"]) == 8 and out["inert"] == [], f"the table is cut to 8 choices: {out['effects']}", r)
+    expect(len(out["next"]) == 2 and all(": " in line and line.endswith(" bytes") for line in out["next"]),
+           f"two runners-up are named: {out['next']}", r)
+    expect(len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
