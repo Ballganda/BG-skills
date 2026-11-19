@@ -7,7 +7,7 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | `DECOMP.md` | The contract: target, compiler, flags, scope, policies, model roster | `/decomp-setup` only |
 | `decomp.json` | The contract's machine-readable part (commands, guarded paths, the pragma and attribute allowlists, `template_search` and `fakematch` (the contract's template-search and fakematch rules, which `doctor` prints and stops without), the default compiler and each unit that names its own, `link_milestone` (see below), and `link_unavailable` when the target cannot be linked whole) | `/decomp-setup` only |
 | `toolchain.json` | The accepted target editions (hashes, probes, the functions each holds differently), the known-wrong editions, host prerequisites, and each required tool (per host, where hosts differ): version banner, required files, source, size, hash, unpack steps | `/decomp-setup` only |
-| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary), `search/<ticket id>/` (the ticket's last template round: its template and each candidate's score) | `/decomp-setup`, `decomp.py` |
+| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary), `trail.jsonl` (the [check trail](#check-trail)), `search/<ticket id>/` (the ticket's last template round: its template, each candidate's score, and what `verify --template-round` records) | `/decomp-setup`, `decomp.py` |
 | `IDENTIFY.md` | The compiler investigation: facts, inferences, ranked candidates, toolchain requirements | `decomp-identify` |
 | `docs/adr/` | Hard-to-reverse decisions (scope, relocation policy, fakematch rule, an accepted edition) | `domain-modeling` |
 | `tools/` | `decomp.py` plus the project's adapters, the tool wrapper, and any unpack scripts | `/decomp-setup` only |
@@ -91,10 +91,10 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `gen-specs`, `gen-tickets` | Write unit specs and tickets from `inventory.json`; existing status and notes survive |
 | `next [--n N] [--first ID --reason TEXT]` | List ready tickets smallest first (tier, then size, then address). `--first` lists that ready ticket first and records an `out-of-order` event |
 | `claim <id> --by <name>` / `release <id> [--to <status>]` | Take or give back a ticket |
-| `check <id>` | Writer's loop: build and diff in the current worktree, record nothing |
-| `search <id> <template file>` | One template round: try every candidate of a template and report the closest. See [Template search](#template-search). Records nothing and writes nothing in the tree |
+| `check <id> [--category <c>]` | Writer's loop: build and diff in the current worktree. Records nothing in the ledger, and appends one record to the [check trail](#check-trail). `--category` is the writer's reading of the first difference, one of the mismatch categories (any other is refused before anything runs). Prints one JSON line: `result`, `differ_bytes`, `report`, `search_open` (whether [the gate](#the-gate) is open for this ticket), and `search_reason` |
+| `search <id> <template file>` | One template round: try every candidate of a template and report the closest. See [Template search](#template-search). Refuses, with the reason, while [the gate](#the-gate) is closed. A round that ran is one attempt in the check trail. Records nothing in the ledger and writes nothing in the tree |
 | `search <id> --detail '<choice code>'` | Print one candidate of the ticket's last round: a JSON line (`code`, `result`, `differ_bytes`), then its source as plain C. `result` is `not-tried` for a candidate the round did not reach |
-| `verify <id> --model <m> [--category <c>]` | Rebuild the writer's branch in a clean worktree, compare bytes, record the attempt |
+| `verify <id> --model <m> [--category <c>] [--template-round]` | Rebuild the writer's branch in a clean worktree, compare bytes, record the attempt. `--template-round` marks the attempt as a template round: its evidence file gains one line, `template-round: ` then JSON holding the ticket's last round on this machine (`best`, the best candidate's choice code; `result`; `differ_bytes`; `kinds`, the kinds of the choice points where that candidate leaves the baseline; `category`, the trail's category the round worked on; `unix`). The fields of `attempts.jsonl` are unchanged. It refuses, recording nothing, when this machine keeps no round for the ticket |
 | `audit <id> pass\|fail --auditor <m>` | Record the auditor's verdict; `pass` records the match |
 | `integrate <id>` | Mark a merged match integrated |
 | `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref (with `--header`, only those that include that header, directly or through another); nonzero exit on any regression. A repair ref may touch only `include/` and `symbols.json` |
@@ -114,11 +114,22 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 
 ## Template search
 
-A **template** is the unit's whole source file, `@decomp` marker included, with **choice points**: `PERM_GENERAL(a, b, ...)`, each listing two or more alternative spellings of the text at that place. Keep the template file outside the project tree.
+A **template** is the unit's whole source file, `@decomp` marker included, with **choice points**, each listing alternative spellings of the text at that place. Keep the template file outside the project tree. The tool only combines alternatives the writer wrote.
 
-- **Alternatives.** They are split at the commas that sit inside no bracket, so an alternative holding a bare comma (`int a, b;`) is written another way. Surrounding white space is dropped, and an empty alternative is allowed. A choice point inside a comment or a literal is not read. A choice point inside another, and any other `PERM_` macro, is refused.
-- **Choice code.** Choice points are labelled `A`, `B`, and on, in file order, and alternatives are numbered from 0. A candidate is one alternative per choice point, named by its choice code: `A1 B0`. All zeros is the baseline.
-- **A round.** `search` needs `template_search` to be true in `decomp.json` and refuses, with the reason, when it is false. It builds each candidate in a scratch copy of the unit's folder layout (the candidate at the unit's own path, with the headers the template includes beside itself), runs the adapters from the current worktree as `check` does, and scores each candidate with the `diff` adapter's `differ_bytes`. A candidate the guardrail scan refuses, or with no single marker, is not built.
+| Macro | The choice point is |
+| --- | --- |
+| `PERM_GENERAL(a, b, ...)` | One of the alternatives |
+| `PERM_VAR(@name, a, b, ...)` | As `PERM_GENERAL`; a later `PERM_VAR(name)` repeats the same pick |
+| `PERM_ONCE(a, b, ...)` | Nothing, or one of the alternatives |
+| `PERM_INT(lo, hi)` | One integer from `lo` to `hi` (at most 64 values) |
+| `PERM_LINESWAP(lines)` | Its lines in every order (at most 5 lines) |
+| `PERM_IGNORE(text)` | The text itself: no choice, a stretch the tool leaves alone |
+
+- **Alternatives.** They are split at the commas that sit inside no bracket, so an alternative holding a bare comma (`int a, b;`) is written another way. Surrounding white space is dropped, and an empty alternative is allowed. A choice point inside a comment or a literal is not read. A choice point inside another, and any other `PERM_` macro, is refused. A template may hold at most 12 choice points.
+- **Label and kind.** The first argument may be `@label kind` (for `PERM_LINESWAP`, a first line). The label names the choice point and must be unique; it defaults to `A`, `B`, and on, in file order. The kind is one of `decl-order`, `stmt-order`, `loop-form`, `temp-type`, `signedness`, `width`, `operator`, `expression-shape`, `branch-order`, `inlining`, `other` (default `other`, `stmt-order` for `PERM_LINESWAP`).
+- **Likelihood.** An alternative may start with `%0.7`: the writer's likelihood that it is right. Without likelihoods, all alternatives are alike.
+- **Choice code.** Alternatives are numbered from 0. A candidate is one alternative per choice point, named by its choice code: `A1 B0`. All zeros is the baseline.
+- **A round.** `search` needs `template_search` to be true in `decomp.json` and [the gate](#the-gate) open, and refuses, with the reason, otherwise. It builds each candidate in a scratch copy of the unit's folder layout (the candidate at the unit's own path, with the headers the template includes beside itself), runs the adapters from the current worktree as `check` does, and scores each candidate with the `diff` adapter's `differ_bytes`. A candidate the guardrail scan refuses, or with no single marker, is not built.
 - **A block.** A round runs its candidates as one block, on worker threads. Each worker drives one adapter process at a time in its own scratch folder, whose file names are fixed and overwritten per candidate (an overwrite retries briefly on a file another process still holds), and takes its next candidate only when it is free. `search` starts the `build` and `diff` adapters without the host's shell, and falls back to the shell for a command that needs it: a character the shell reads (`%VAR%`, `&&`, a redirection), or a program that is no executable file (a `.cmd` or `.bat` tool, a shell builtin). `check`, `verify`, and `link` keep the shell. An adapter run that takes longer than 10 times the median compile time is killed with every process it started, and counts as a build-fail.
 - **How a block ends.** On the first of these that holds:
   - `match`: a candidate matches exactly.
@@ -136,6 +147,27 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
   - `winner`: on a match, the path of the matching candidate as plain C with no macros, in a temporary folder outside the tree.
 - **Result cache.** Scores are kept in `.decomp/search-cache.json`, on this machine only and never committed, across rounds and sessions. A key covers the compiler, the build and diff commands, the tree's `tools/`, the expected bytes, the symbol map, the headers beside the unit, and the candidate's source or object hash. At the start of a round with no kept answer, the tool compiles the baseline twice in two folders, a second apart, and when the objects differ (a timestamp or a path) it hashes the function's bytes instead: the `diff` adapter may print `function_sha256` (a hash of the function's bytes under the relocation policy) beside `match` and `differ_bytes`, and without it only the source layers dedupe.
 - **Not a match claim.** A `match` is a search result. The writer copies the winner into the unit and still passes `check`, `verify`, and the audit.
+
+### Check trail
+
+`.decomp/trail.jsonl` holds one JSON line per `check` run and per template round, for this machine only: it is never committed, and every worktree of the checkout shares it. The committed ledger still gets one record per writer return, through `verify`.
+
+- Fields: `unix`, `ticket`, `by` (`check` or `search`), `result`, `differ_bytes`, `category`.
+- A `check` records the `--category` it was given, `build-fail` when the build failed and none was given, and no category on a match.
+- A template round records its best candidate's `result` and `differ_bytes`, and the category of the attempt before it.
+- A run that exits 6, and a refused `check` or `search`, add nothing.
+
+### The gate
+
+`decomp.py` decides from the ticket's tier and its check trail whether template search is open. `check` reports it as `search_open`, with `search_reason`, and `search` refuses with that reason while it is closed. The first rule below that applies decides:
+
+1. Closed when `template_search` is false in `decomp.json`.
+2. Closed for a TINY ticket.
+3. Closed before the ticket's first `check` on this machine, and when the latest `check` matched.
+4. Closed when the latest trail record's category is `reference-gap`, `data-layout`, `calling-convention`, `optimization`, `unit-order`, or `build-fail`: these need a stop or a report, which no template fixes.
+5. Open when that category is `register-allocation`, `statement-order`, or `expression-shape`.
+6. Open after 3 attempts with no fall in `differ_bytes`: none of the ticket's last 3 trail records is lower than the first of them, and the latest holds a count.
+7. Closed otherwise.
 
 ## Change flow
 

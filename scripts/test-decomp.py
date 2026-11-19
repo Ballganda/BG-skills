@@ -1973,11 +1973,15 @@ NEVER = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a; int WRONG_b;, int WRONG
                 "PERM_GENERAL(int WRONG_d;, int WRONG_e; int WRONG_f; int WRONG_g;) return 1; }\n")
 
 
-def search_project(base, **kw):
+def search_project(base, gate="register-allocation", **kw):
+    """A project with the search fakes. A `check` with the category `gate` opens template search; None runs none."""
     kw["config"] = dict(SEARCH_CONFIG, **kw.get("config", {}))
     kw["files"] = dict(SEARCH_FILES, **kw.get("files", {}))
     kw.setdefault("source", STUCK)
-    return Project(base, **kw)
+    p = Project(base, **kw)
+    if gate:
+        p.run("check", TID, "--category", gate)
+    return p
 
 
 def search(p, template, *more):
@@ -2058,9 +2062,112 @@ def test_search_detail_returns_one_candidates_source_and_score(base):
 
 
 def test_search_refuses_a_macro_it_does_not_read(base):
-    r, out = search(search_project(base), MATCHING + "PERM_LINESWAP(a; b;)\n")
-    expect(r.returncode == 1 and out is None and "PERM_LINESWAP" in r.stderr and "line 3" in r.stderr,
+    r, out = search(search_project(base), MATCHING + "PERM_RAND(a; b;)\n")
+    expect(r.returncode == 1 and out is None and "PERM_RAND" in r.stderr and "line 3" in r.stderr,
            "the refusal should name the macro and its line", r)
+
+
+ORDER_BUILD_PY = """import re, sys
+text = open(sys.argv[1]).read()
+open(LOG, "a").write(" ".join(re.findall(r"tag_\\w+", text)) + chr(10))
+if "SYNTAX_ERROR" in text:
+    sys.exit("error C2143: syntax error")
+open(sys.argv[2], "w").write(text)
+"""
+
+
+def in_function(body):
+    return MARK + "int f(void) {\n" + body + "\n}\n"
+
+
+def refused(base, body, *words):
+    r, out = search(search_project(sub(base, f"r{len(os.listdir(base))}")), in_function(body))
+    expect(r.returncode == 1 and out is None, "the template should be refused", r)
+    for w in words:
+        expect(w in r.stderr, f"the refusal should name {w!r}", r)
+
+
+def detail(p, body, code):
+    """The source of one candidate of a template, as `search --detail` prints it."""
+    search(p, in_function(body))
+    r = p.run("search", TID, "--detail", code)
+    expect(r.returncode == 0, "the detail should be given", r)
+    return r.stdout.partition("\n")[2]
+
+
+def test_search_perm_var_repeats_one_pick_at_every_reference(base):
+    src = detail(search_project(base), "PERM_VAR(@t temp-type, int, short) x = 1; PERM_VAR(t) y;", "t1")
+    expect("short x = 1; short y;" in src, f"the reference should repeat the pick: {src!r}")
+    refused(base, "PERM_VAR(t) y;", "PERM_VAR(t)", "defines it")
+
+
+def test_search_perm_lineswap_tries_every_order_of_its_lines(base):
+    p = search_project(base)
+    r, out = search(p, in_function("  PERM_LINESWAP(\n  a;\n  b;\n  c;\n  )"))
+    expect(out is not None and out["counts"]["space"] == 6, "three lines give six orders", r)
+    r = p.run("search", TID, "--detail", "A0")
+    expect(r.stdout.partition("\n")[2] == in_function("  \n  a;\n  b;\n  c;\n  "), "the first order is as written", r)
+    r = p.run("search", TID, "--detail", "A5")
+    expect("  c;\n  b;\n  a;\n" in r.stdout, "the last order reverses the lines", r)
+
+
+def test_search_perm_once_offers_nothing_or_one_alternative(base):
+    p = search_project(base)
+    expect(detail(p, "PERM_ONCE(a_stmt;, b_stmt;)", "A0") == in_function(""), "the baseline holds nothing")
+    expect("b_stmt;" in detail(p, "PERM_ONCE(a_stmt;, b_stmt;)", "A2"), "the last alternative can be picked")
+
+
+def test_search_perm_int_counts_through_its_range_and_ignore_passes_through(base):
+    p = search_project(base)
+    src = detail(p, "PERM_IGNORE(keep_me;) n = PERM_INT(3, 5);", "A2")
+    expect("keep_me; n = 5;" in src, f"PERM_INT(3, 5) offers 3 to 5: {src!r}")
+    r, out = search(p, in_function("PERM_IGNORE(keep_me;) n = PERM_INT(3, 5);"))
+    expect(out is not None and out["counts"]["space"] == 3, "PERM_IGNORE adds no choice point", r)
+
+
+def test_search_leaves_calling_convention_keywords_alone(base):
+    src = detail(search_project(base), "PERM_GENERAL(int __stdcall g(void);, int __fastcall g(void);) __cdecl __thiscall", "A1")
+    expect(src == in_function("int __fastcall g(void); __cdecl __thiscall"), f"the keywords should come through: {src!r}")
+
+
+def test_search_refuses_a_template_with_more_than_12_choice_points(base):
+    refused(base, "\n".join("PERM_GENERAL(a, b)" for _ in range(13)), "13 choice points", "limit is 12")
+    twelve = "\n".join("PERM_GENERAL(int right_%d;, int WRONG_%d;)" % (i, i) for i in range(12))
+    r, out = search(search_project(sub(base, "b")), in_function(twelve))
+    expect(out is not None and out["end"] == "match", "twelve choice points are allowed", r)
+
+
+def test_search_refuses_a_line_swap_over_5_lines(base):
+    refused(base, "PERM_LINESWAP(\na;\nb;\nc;\nd;\ne;\nf;\n)", "PERM_LINESWAP", "6 lines", "limit is 5")
+    r, out = search(search_project(base), in_function("PERM_LINESWAP(\nint right_a;\nb;\nc;\nd;\ne;\n)"))
+    expect(out is not None and out["end"] == "match" and out["counts"]["space"] == 120, "five lines are allowed", r)
+
+
+def test_search_refuses_a_malformed_choice_point(base):
+    refused(base, "PERM_GENERAL(@r mood, a, b)", "mood", "decl-order")
+    refused(base, "PERM_GENERAL(@r decl-order, a, b) PERM_GENERAL(@r decl-order, a, b)", "'r' is used twice")
+    refused(base, "PERM_GENERAL(a, %0 b)", "likelihood")
+
+
+def test_search_names_choice_codes_by_label(base):
+    r, out = search(search_project(base), in_function(
+        "PERM_GENERAL(@regs decl-order, int WRONG_a;, int right_a;) "
+        "PERM_GENERAL(@shape expression-shape, int WRONG_b;, int right_b;)"))
+    expect(out is not None and out["best"] == {"code": "regs1 shape1", "differ_bytes": 0},
+           "the summary should name each choice by its label", r)
+
+
+def test_search_compiles_higher_likelihood_combinations_first(base):
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    tune(p, workers=1)  # one worker builds in the order the candidates come
+    r, out = search(p, in_function(
+        "PERM_GENERAL(%0.2 tag_a0 WRONG_1, %0.5 tag_a1 WRONG_2, %0.3 tag_a2 WRONG_3) "
+        "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
+    expect(out is not None and out["counts"]["compiled"] == 6, "the whole space is built", r)
+    built = log.read_text().splitlines()[-6:]  # after the start-up builds that check the compiler repeats itself
+    expect(built == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b0", "tag_a1 tag_b1", "tag_a2 tag_b1", "tag_a0 tag_b1"],
+           f"candidates should build most likely first: {built}", r)
 
 
 def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
@@ -2132,6 +2239,162 @@ def test_search_hashes_function_bytes_when_the_compiler_stamps_its_objects(base)
            "two sources with the same function bytes are one object", r)
     r, again = search(p, COMMENTED)
     expect(again["counts"]["compiled"] == 0 and again["counts"]["hashing"] == "function", "and the cache still serves them", r)
+
+
+# ---------- check trail and the template-search gate ----------
+
+GATE_OPENS = ("register-allocation", "statement-order", "expression-shape")
+GATE_CLOSES = ("reference-gap", "data-layout", "calling-convention", "optimization", "unit-order", "build-fail")
+ATTEMPT_FIELDS = {"id", "ticket", "unix", "model", "tier", "result", "category", "differ_bytes", "evidence", "source_sha256"}
+
+
+def trail(p):
+    f = p.root / ".decomp" / "trail.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def check_with(p, wrong, *args):
+    """Run `check` on a unit the search fake scores at 2 * wrong differing bytes. Returns its parsed JSON line."""
+    p.write(SOURCE, MARK + "int f(void) { " + "int WRONG; " * wrong + "return 1; }\n")
+    r = p.run("check", TID, *args)
+    expect(r.returncode == 0, "check should run", r)
+    return json.loads(r.stdout.splitlines()[0])
+
+
+def set_tier(p, tier):
+    ticket = p.root / "tickets" / UNIT / f"{TID}.md"
+    ticket.write_text(ticket.read_text().replace("tier: SMALL", f"tier: {tier}"))
+
+
+def test_check_appends_one_trail_record_per_run_outside_the_commit(base):
+    p = search_project(base, gate=None)
+    before = time.time()
+    check_with(p, 2, "--category", "signedness")
+    check_with(p, 0)
+    got = trail(p)
+    expect([(e["ticket"], e["result"], e["differ_bytes"], e["category"]) for e in got] ==
+           [(TID, "differ", 4, "signedness"), (TID, "bytes-match", 0, "")], f"the trail should hold both runs: {got}")
+    expect(all(before - 1 <= e["unix"] <= time.time() + 1 for e in got), f"each record holds its time: {got}")
+    p.write(SOURCE, STUCK)
+    expect(p.git("status", "--porcelain") == "", "the trail is never something git would commit")
+    expect(not (p.root / "ledger").exists(), "check records nothing in the ledger")
+
+
+def test_check_refuses_a_category_outside_the_mismatch_list(base):
+    p = search_project(base, gate=None)
+    r = p.run("check", TID, "--category", "bogus")
+    expect(r.returncode == 1 and "unknown category bogus" in r.stderr and "register-allocation" in r.stderr,
+           "check should refuse the category and list the real ones", r)
+    expect(trail(p) == [], "a refused check leaves no trail record")
+
+
+def test_gate_opens_on_a_latest_category_that_small_variations_fix(base):
+    p = search_project(base, gate=None)
+    for category in GATE_OPENS:
+        out = check_with(p, 1, "--category", category)
+        expect(out["search_open"] is True and category in out["search_reason"], f"{category} should open the gate: {out}")
+    out = check_with(p, 0, "--category", "signedness")
+    expect(out["search_open"] is False, f"another category as the latest closes it again: {out}")
+    out = check_with(p, 1, "--category", "statement-order")
+    expect(out["search_open"] is True, f"the gate follows the latest category: {out}")
+    out = check_with(p, 0, "--category", "statement-order")
+    expect(out["search_open"] is False, f"a match leaves nothing to search for: {out}")
+
+
+def test_gate_opens_after_three_attempts_with_no_fall_in_differ_bytes(base):
+    p = search_project(base, gate=None)
+    opened = [check_with(p, wrong, "--category", "signedness")["search_open"] for wrong in (3, 2, 2, 3, 1, 1, 2)]
+    #         6      4      4      6 (none below 4)  2 (a fall)  2      4 (none below 2)
+    expect(opened == [False, False, False, True, False, False, True], f"the gate should open only on a stall: {opened}")
+
+
+def test_gate_stays_closed_for_tiny_tickets_and_stop_or_report_categories(base):
+    p = search_project(base, gate=None)
+    for category in GATE_CLOSES:
+        for _ in range(3):
+            out = check_with(p, 1, "--category", category)
+        expect(out["search_open"] is False and category in out["search_reason"],
+               f"{category} should keep the gate closed through a stall: {out}")
+    set_tier(p, "TINY")
+    out = check_with(p, 1, "--category", "register-allocation")
+    expect(out["search_open"] is False and "TINY" in out["search_reason"], f"a TINY ticket stays closed: {out}")
+    r, _ = search(p, MATCHING)
+    expect(r.returncode == 1 and "TINY" in r.stderr, "search should refuse a TINY ticket with the reason", r)
+
+
+def test_a_build_failure_keeps_the_gate_closed_without_a_category(base):
+    p = search_project(base, gate=None)
+    for _ in range(3):
+        p.write(SOURCE, MARK + "SYNTAX_ERROR\n")
+        r = p.run("check", TID)
+        out = json.loads(r.stdout.splitlines()[0])
+    expect(out["result"] == "build-fail" and out["search_open"] is False and "build-fail" in out["search_reason"],
+           f"three build failures should not open the gate: {out}")
+    expect(trail(p)[-1]["category"] == "build-fail", "the trail records the failure's category")
+
+
+def test_search_is_refused_with_the_reason_while_the_gate_is_closed(base):
+    p = search_project(base, gate=None)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "closed" in r.stderr and "no check has run" in r.stderr,
+           "search should refuse before any check", r)
+    check_with(p, 1, "--category", "data-layout")
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "data-layout" in r.stderr, "the refusal should give the reason", r)
+    expect(len(trail(p)) == 1 and not (p.root / ".decomp" / "search").exists(), "a refused search is not an attempt")
+
+
+def test_gate_is_reported_closed_when_the_contract_disallows_template_search(base):
+    p = search_project(base, gate=None, config={"template_search": False})
+    out = check_with(p, 1, "--category", "register-allocation")
+    expect(out["search_open"] is False and "contract" in out["search_reason"], f"check should say why: {out}")
+
+
+def test_a_search_round_adds_one_attempt_to_the_trail(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and out["end"] == "exhausted", "the round should run", r)
+    got = trail(p)
+    expect(len(got) == 2 and (got[1]["by"], got[1]["result"], got[1]["differ_bytes"]) == ("search", "differ", 4),
+           f"the round is one trail record holding its best score: {got}")
+    expect(got[1]["category"] == "register-allocation", "the round keeps the category it worked on")
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and len(trail(p)) == 3, "each round is one more attempt", r)
+
+
+def test_verify_records_a_template_round_in_the_evidence_and_leaves_the_ledger_fields(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match", "the round should match", r)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 0 and '"result": "bytes-match"' in r.stdout, "verify should record bytes-match", r)
+    lines = (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text().splitlines()
+    marked = [l for l in lines if l.startswith("template-round: ")]
+    expect(len(marked) == 1, f"the evidence should mark the attempt as a template round: {lines[-3:]}", r)
+    got = json.loads(marked[0][len("template-round: "):])
+    expect((got["best"], got["differ_bytes"], got["kinds"], got["category"]) == ("A1 B2", 0, [], "register-allocation"),
+           f"the evidence should hold the round's best candidate, its kinds, and its category: {got}")
+    attempts = p.lines("attempts.jsonl")
+    expect(len(attempts) == 1 and set(attempts[0]) == ATTEMPT_FIELDS, f"the ledger's fields are unchanged: {attempts}")
+
+
+def test_verify_without_the_flag_marks_no_template_round(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, MATCHING)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 0, "verify should pass", r)
+    expect("template-round" not in (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text(),
+           "an attempt is a template round only when the flag says so")
+
+
+def test_verify_refuses_the_template_round_flag_when_no_round_is_kept(base):
+    p = search_project(base, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 1 and "no template round is kept" in r.stderr, "verify should refuse", r)
+    expect(p.lines("attempts.jsonl") == [] and p.status() == "claimed", "the refusal records nothing")
 
 
 # ---------- template search: parallel blocks ----------
