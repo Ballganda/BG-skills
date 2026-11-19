@@ -2201,17 +2201,25 @@ class Worker:
     def build(self, text):
         """Build one candidate's source. Returns (obj, failure log or ''). A build that passes is timed."""
         wait = self.environment.settings["lock_retry_s"]
+        began = time.perf_counter()
         retrying(lambda: self.source.write_bytes(source_bytes(text)), wait)
         retrying(lambda: self.report.unlink(missing_ok=True), wait)
         start = time.perf_counter()
+        self.environment.add("write", start - began)
         obj, failure = build_unit(*self.args(), self.objdir, str(self.report))
+        took = time.perf_counter() - start
+        self.environment.add("compile", took)
         if not failure:
-            self.environment.sample(time.perf_counter() - start)
+            self.environment.sample(took)
         return obj, failure
 
     def diff(self, obj, fields=None):
         """Diff a built object. The diff report of this candidate is left in self.report."""
-        return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
+        start = time.perf_counter()
+        try:
+            return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
+        finally:
+            self.environment.add("compare", time.perf_counter() - start)
 
     def args(self):
         return (self.environment, self.t, self.compiler, self.tree, str(self.source))
@@ -2371,11 +2379,23 @@ class Launcher:
         self.lock = threading.Lock()
         self.times, self.programs = [], {}
         self.killed = self.shell = 0
+        self.samples, self.stage = [], dict.fromkeys(("write", "compile", "compare"), 0.0)  # the performance log's
 
     def sample(self, seconds):
         """Note the time one passing compile took."""
         with self.lock:
             self.times.append(seconds)
+            self.samples.append(seconds)
+
+    def add(self, stage, seconds):
+        """Add to the time a stage of the block has taken (write, compile, compare), across its workers."""
+        with self.lock:
+            self.stage[stage] += seconds
+
+    def restart_timing(self):
+        """Begin the performance log's counts anew; the hang limit keeps its compile times."""
+        with self.lock:
+            self.samples, self.stage = [], dict.fromkeys(self.stage, 0.0)
 
     def limit(self):
         """Seconds a run may take before it counts as hung."""
@@ -2477,6 +2497,7 @@ class Block:
         self.early = []  # the first 2 x workers builds: whether each failed
         self.recent = collections.deque(maxlen=max(1, int(settings["repeat_window"])))  # per candidate: was it a repeat
         self.scored = self.since_gain = 0
+        self.stage, self.busy, self.expanded, self.best_at = {"expand": 0.0, "score": 0.0}, 0.0, 0, None  # the performance log's
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -2544,6 +2565,8 @@ class Block:
                 self.failure = self.failure or score.log
             elif self.best is None or (rank(score), seed) < (rank(self.best["score"]), self.best["seed"]):
                 gain = gain or self.best is None or rank(score) < rank(self.best["score"])
+                if gain and (self.best is None or rank(score) < rank(self.best["score"])):
+                    self.best_at = self.elapsed()
                 self.best = {"seed": seed, "score": score, "window": e.get("w", [])}
             if score.result == "bytes-match" and self.template.steering(vector):
                 self.steered.append(seed)  # a match that needs steering: keep looking for a natural one
@@ -2567,12 +2590,21 @@ class Block:
 
     def attempt(self, seed, memo, worker):
         """Score one candidate in the worker's own folder and record it."""
+        began = time.perf_counter()
         text = self.template.render(self.template.vector(seed))
+        expanded = time.perf_counter()
         try:
             found = memo.entry(text, worker)
         except OSError as err:  # a file of the worker's stayed locked: this candidate is lost, not the block
             found = {"r": "build-fail", "d": None, "log": str(err)}, "built", False
+        scoring = time.perf_counter()
         self.record(seed, *found)
+        done = time.perf_counter()
+        with self.lock:
+            self.stage["expand"] += expanded - began
+            self.stage["score"] += done - scoring
+            self.busy += done - began
+            self.expanded += 1
 
     def result(self, seed, memo, worker):
         """A candidate's result, scored now when the block did not try it."""
@@ -2593,7 +2625,7 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-def run_block(template, memo, workers, settings, ceiling, boost=None):
+def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
 
     Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
@@ -2603,6 +2635,7 @@ def run_block(template, memo, workers, settings, ceiling, boost=None):
     per candidate tried, by seed.
     A block that ends with no natural match but with one that needs steering ends as a match: the
     steered match, reduced to the steering it needs.
+    A dict given as perf is filled with the block's timings for the performance log.
     """
     block = Block(template, settings, len(workers), ceiling, boost)
     threads = [threading.Thread(target=block.work, args=(memo, w), daemon=True) for w in workers]
@@ -2620,7 +2653,10 @@ def run_block(template, memo, workers, settings, ceiling, boost=None):
     elif block.steered:
         seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]))
         end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
-    block.counts.update(workers=len(workers), wall_s=round(block.elapsed(), 2))
+    wall = block.elapsed()
+    block.counts.update(workers=len(workers), wall_s=round(wall, 2))
+    if perf is not None:
+        perf.update(wall=wall, busy=block.busy, expanded=block.expanded, stage=dict(block.stage), best_at=block.best_at)
     return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
 
 
@@ -2678,11 +2714,13 @@ def insights(template, results, best):
     return out
 
 
-def summary(template, end, best, counts, winner, results=(), history_line=""):
+def summary(template, end, best, counts, winner, results=(), history_line="", notices=()):
     """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
     out = {"end": end, "best": None, "counts": counts}
     if history_line:
         out["history"] = history_line
+    if notices:
+        out["notice"] = list(notices)  # for the user; the cap never drops it
     if "score" in best:
         out["best"] = {"code": template.code(template.vector(best["seed"])), "differ_bytes": best["score"].differ_bytes}
     if winner:
@@ -2879,6 +2917,141 @@ class Memo:
                 "unique_objects": len(self.objects), "hashing": self.hashing}
 
 
+PERF = "perf.jsonl"  # the performance log: this machine only, never committed, shared by every worktree
+PERF_WINDOW = 20  # blocks of the same compiler a flag is compared with
+PERF_MIN = 3  # blocks a median needs before it can raise a flag
+PERF_COMPILES = 2  # compiles per worker a block needs before it says anything about speed
+PERF_STREAK = 3  # blocks in a row a flag is raised before the user is told
+PERF_DROP = 0.3  # a fall this large in compiles per worker-second against the median raises slow-compile
+PERF_SHARE = 0.2  # idle share of the workers, or scoring share of the stage time, above which a flag is raised
+PERF_JITTER = 3.0  # p95 compile time, in median compile times, above which io-jitter is raised
+FLAG_FIXES = {  # the fix only the user can make, where there is one
+    "slow-compile": "exclude the project folder and the system temp folder from antivirus scanning, stop other "
+                    "CPU-heavy programs and check the power plan for throttling, or move the temp folder (TEMP) to a RAM disk",
+    "io-jitter": "exclude the project folder and the system temp folder from antivirus scanning and the file indexer, "
+                 "or move the temp folder (TEMP) to a RAM disk",
+}
+
+
+def perf_records(compiler=None):
+    """The performance log's records, oldest first, those of one compiler when it is given. A damaged line is skipped."""
+    p = checkout_dir() / PERF
+    out = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and (compiler is None or rec.get("compiler") == compiler):
+            out.append(rec)
+    return out
+
+
+def append_perf(rec):
+    """Add one record to the performance log. A log that cannot be written never stops a search."""
+    p = checkout_dir() / PERF
+    with contextlib.suppress(OSError):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def block_rate(rec):
+    """Compiles per worker-second of a block record, or None when it holds no rate."""
+    try:
+        rate = rec["compiled"] / (rec["workers_end"] * rec["wall_s"])
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
+
+
+def perf_flags(rec, past):
+    """The flags a block record raises: {flag: its measured cost as a sentence}.
+
+    past is the log's earlier records of the same compiler, oldest first. slow-compile and io-jitter
+    compare with the median of the last PERF_WINDOW blocks of them, once PERF_MIN exist.
+    expander-starved and scorer-bound are shares of this block's own time. A block that built fewer
+    than PERF_COMPILES per worker raises nothing.
+    """
+    past = [r for r in past if r.get("kind") == "block"][-PERF_WINDOW:]
+    flags = {}
+    if rec["compiled"] < PERF_COMPILES * rec["workers_end"]:  # served by the cache or ended at once: nothing to measure
+        return flags
+    rate = block_rate(rec)
+    rates = [x for x in map(block_rate, past) if x is not None]
+    if rate is not None and len(rates) >= PERF_MIN:
+        median = statistics.median(rates)
+        if rate <= (1 - PERF_DROP) * median:
+            flags["slow-compile"] = (f"each worker built {rate:.1f} compiles a second, {round(100 * (1 - rate / median))} "
+                                     f"percent fewer than the median of {median:.1f} over the last {len(rates)} blocks")
+    idle = rec.get("idle_frac")
+    if isinstance(idle, (int, float)) and idle > PERF_SHARE:
+        flags["expander-starved"] = f"the workers sat idle {round(100 * idle)} percent of the block, waiting for candidates"
+    stage = rec.get("stage_ms") or {}
+    total = sum(v for v in stage.values() if isinstance(v, (int, float)))
+    if total > 0 and stage.get("score", 0) / total > PERF_SHARE:
+        flags["scorer-bound"] = f"scoring took {round(100 * stage['score'] / total)} percent of the block's stage time"
+    p95 = rec.get("t_compile_p95_ms")
+    p50s = [r["t_compile_p50_ms"] for r in past if isinstance(r.get("t_compile_p50_ms"), (int, float))]
+    base = statistics.median(p50s) if len(p50s) >= PERF_MIN else rec.get("t_compile_p50_ms")
+    if isinstance(p95, (int, float)) and isinstance(base, (int, float)) and base > 0 and p95 > PERF_JITTER * base:
+        flags["io-jitter"] = (f"the slowest compiles took {p95:.0f} ms, {p95 / base:.1f} times the median compile "
+                              f"of {base:.0f} ms")
+    return flags
+
+
+def perf_notices(flags, past):
+    """What to tell the user now: the sentence for each flag raised in PERF_STREAK blocks in a row, once per streak.
+
+    past is the log's earlier records of the same compiler, oldest first; each block record holds the
+    flags it raised and those it showed. Returns {flag: sentence}.
+    """
+    out = {}
+    for flag, cost in flags.items():
+        streak, shown = 1, False
+        for r in reversed([r for r in past if r.get("kind") == "block"]):
+            if flag not in (r.get("flags") or []):
+                break
+            streak += 1
+            shown = shown or flag in (r.get("shown") or [])
+        if streak >= PERF_STREAK and not shown:
+            fix = FLAG_FIXES.get(flag)
+            out[flag] = f"{flag} in {streak} blocks in a row: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
+    return out
+
+
+def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no):
+    """The performance log's record of one finished block."""
+    ms = sorted(round(x * 1000, 2) for x in launcher.samples)
+    workers, wall = counts["workers"], perf["wall"]
+    stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
+    final = best["score"].differ_bytes if "score" in best else None
+    return {
+        "kind": "block", "unix": now(), "ticket": t["id"], "compiler": compiler, "round": round_no, "block": block_no,
+        "wall_s": round(wall, 3), "workers_min": workers, "workers_max": workers, "workers_end": workers,
+        "expanded": perf["expanded"], "compiled": counts["compiled"], "unique_objects": memo_counts["unique_objects"],
+        "build_fail": counts["build_fail"], "killed": launcher.killed, "src_dedupe_hits": memo_counts["src_dedupe_hits"],
+        "t_compile_p50_ms": statistics.median(ms) if ms else None,
+        "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
+        "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None,
+        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / (workers * wall)), 3) if wall > 0 else 0.0,
+        "best_score_start": start_best, "best_score_end": final,
+        "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
+        "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
+        "writers_active": 1,  # this writer: the tool cannot see the others
+    }
+
+
+def log_block(compiler, rec):
+    """Flag the block record against the log, append it, and return the sentences to tell the user."""
+    past = perf_records(compiler)
+    flags = perf_flags(rec, past)
+    notices = perf_notices(flags, past)
+    rec.update(flags=sorted(flags), shown=sorted(notices))
+    append_perf(rec)
+    return list(notices.values())
+
+
 def search_dir(tid):
     """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
     return checkout_dir() / "search" / tid
@@ -2999,14 +3172,26 @@ def cmd_search(a):
         if ctx not in cache["stable"]:
             spare = workers[1] if count > 1 else Worker(Path(scratch) / "spare", launcher, t, compiler, tree, text)
         baseline = template.render(template.vector(0))
+        calibrating, began = spare is not None, time.perf_counter()
         hashing = "object" if objects_repeat(workers[0], spare, baseline, cache, ctx) else "function"
+        if calibrating:
+            append_perf({"kind": "calibration", "unix": now(), "ticket": t["id"], "compiler": compiler,
+                         "wall_s": round(time.perf_counter() - began, 3),
+                         "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None})
+        launcher.restart_timing()
         memo = Memo(cache, ctx, hashing)
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
         category = (trail(t["id"]) or [{}])[-1].get("category")
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
-        end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
+        trailed = trail(t["id"])
+        timing = {}
+        end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
         save_cache(cache)
+        mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
+        notices = log_block(compiler, block_record(
+            t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
+            trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     state.mkdir(parents=True, exist_ok=True)
@@ -3017,7 +3202,7 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category))))
+    print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category), notices)))
     (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
 

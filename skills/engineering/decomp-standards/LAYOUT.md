@@ -7,7 +7,7 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | `DECOMP.md` | The contract: target, compiler, flags, scope, policies, model roster | `/decomp-setup` only |
 | `decomp.json` | The contract's machine-readable part (commands, guarded paths, the pragma and attribute allowlists, `template_search` and `fakematch` (the contract's template-search and fakematch rules, which `doctor` prints and stops without), the default compiler and each unit that names its own, `link_milestone` (see below), and `link_unavailable` when the target cannot be linked whole) | `/decomp-setup` only |
 | `toolchain.json` | The accepted target editions (hashes, probes, the functions each holds differently), the known-wrong editions, host prerequisites, and each required tool (per host, where hosts differ): version banner, required files, source, size, hash, unpack steps | `/decomp-setup` only |
-| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary), `trail.jsonl` (the [check trail](#check-trail)), `search/<ticket id>/` (the ticket's last template round: its template, each candidate's score, and what `verify --template-round` records) | `/decomp-setup`, `decomp.py` |
+| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary), `trail.jsonl` (the [check trail](#check-trail)), `perf.jsonl` (the [performance log](#performance-log)), `search/<ticket id>/` (the ticket's last template round: its template, each candidate's score, and what `verify --template-round` records) | `/decomp-setup`, `decomp.py` |
 | `IDENTIFY.md` | The compiler investigation: facts, inferences, ranked candidates, toolchain requirements | `decomp-identify` |
 | `docs/adr/` | Hard-to-reverse decisions (scope, relocation policy, fakematch rule, an accepted edition) | `domain-modeling` |
 | `tools/` | `decomp.py` plus the project's adapters, the tool wrapper, and any unpack scripts | `/decomp-setup` only |
@@ -162,6 +162,15 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - A `check` records the `--category` it was given, `build-fail` when the build failed and none was given, and no category on a match.
 - A template round records its best candidate's `result` and `differ_bytes`, and the category of the attempt before it.
 - A run that exits 6, and a refused `check` or `search`, add nothing.
+
+### Performance log
+
+`.decomp/perf.jsonl` holds one JSON line per search block and one per calibration (the start-of-search double compile that tells whether objects repeat), for this machine only: it is never committed, and every worktree of the checkout shares it. Timings are facts about this machine, so they go in neither `attempts.jsonl` nor `events.jsonl`.
+
+- Every record: `kind` (`block` or `calibration`), `unix`, `ticket`, `compiler`, `wall_s`, `t_ref_ms` (the first passing compile of the block, or of the calibration).
+- A block record adds: `round`, `block`, `workers_min`, `workers_max`, `workers_end`, `expanded`, `compiled`, `unique_objects`, `build_fail`, `killed`, `src_dedupe_hits`, `t_compile_p50_ms`, `t_compile_p95_ms`, `stage_ms` (totals for `expand`, `write`, `compile`, `compare`, `score`), `idle_frac`, `best_score_start`, `best_score_end`, `t_to_best_s`, `end_reason`, `model_latency_s`, `writers_active`, and the `flags` it raised and those it `shown`.
+- Flags compare a block with the median of the last 20 block records of the same compiler, once 3 exist: `slow-compile` (compiles per worker-second down 30 percent or more), `io-jitter` (p95 compile time above 3 times the median compile time). `expander-starved` (idle share of the workers above 20 percent) and `scorer-bound` (scoring above 20 percent of stage time) are shares of the block itself. A block that built fewer than 2 candidates per worker raises none.
+- Every raised flag is logged. A flag raised in 3 blocks in a row is shown to the user once per streak, in the search summary's `notice` list, with its measured cost and the fix only the user can make, where there is one.
 
 ### The gate
 

@@ -2744,6 +2744,106 @@ def test_search_refuses_an_unknown_override_in_local_json(base):
            "a misspelt override is named with the ones that exist", r)
 
 
+PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "workers_min", "workers_max", "workers_end", "expanded",
+               "compiled", "unique_objects", "build_fail", "killed", "src_dedupe_hits", "t_compile_p50_ms",
+               "t_compile_p95_ms", "t_ref_ms", "stage_ms", "idle_frac", "best_score_start", "best_score_end",
+               "t_to_best_s", "end_reason", "model_latency_s", "writers_active"}
+
+
+def perf_log(p):
+    f = p.root / ".decomp" / "perf.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def fresh(p, template):
+    """Search with the result cache emptied, so the block compiles. Returns (process, summary)."""
+    (p.root / ".decomp" / "search-cache.json").unlink(missing_ok=True)
+    return search(p, template)
+
+
+def seed_perf(p, n, **fields):
+    """Append n block records of the last record's compiler, as an earlier machine history, each with the given fields."""
+    compiler = perf_log(p)[-1]["compiler"]
+    base = {"kind": "block", "compiler": compiler, "ticket": "other", "compiled": 1000000, "wall_s": 1.0, "workers_end": 1,
+            "t_compile_p50_ms": 10, "t_compile_p95_ms": 12, "idle_frac": 0.0, "stage_ms": {"compile": 1000, "score": 1},
+            "flags": [], "shown": []}
+    with (p.root / ".decomp" / "perf.jsonl").open("a") as f:
+        for _ in range(n):
+            f.write(json.dumps(dict(base, **fields)) + "\n")
+
+
+def test_search_writes_one_record_per_block_and_one_per_calibration(base):
+    p = search_project(base)
+    tune(p, workers=2)
+    r, out = search(p, NEVER)
+    expect(out is not None, "the round should run", r)
+    got = perf_log(p)
+    expect([x["kind"] for x in got] == ["calibration", "block"], f"a cold cache calibrates once, then one block: {got}", r)
+    rec = got[1]
+    expect(PERF_FIELDS <= set(rec), f"the block record lacks {PERF_FIELDS - set(rec)}", r)
+    expect(rec["ticket"] == TID and rec["round"] == 1 and rec["block"] == 1 and rec["workers_end"] == 2, f"identity: {rec}", r)
+    expect(rec["compiled"] == out["counts"]["compiled"] and rec["end_reason"] == "exhausted", f"counts and end: {rec}", r)
+    expect(rec["best_score_end"] == 4 and set(rec["stage_ms"]) == {"write", "compile", "compare", "expand", "score"},
+           f"the end score and the five stages: {rec}", r)
+    expect(0.0 <= rec["idle_frac"] <= 1.0 and rec["t_compile_p95_ms"] >= rec["t_compile_p50_ms"] > 0, f"timings: {rec}", r)
+    r, out = search(p, NEVER)
+    got = perf_log(p)
+    expect([x["kind"] for x in got] == ["calibration", "block", "block"] and got[2]["round"] == 2 and got[2]["block"] == 2,
+           f"a warm cache adds one block record and no calibration: {got}", r)
+
+
+def test_search_perf_log_is_never_committed(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(perf_log(p), "the round should log", r)
+    tracked = subprocess.run(["git", "ls-files"], cwd=p.root, capture_output=True, text=True).stdout
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=p.root, capture_output=True, text=True).stdout
+    expect("perf.jsonl" not in tracked and "perf.jsonl" not in status, f"the log stays out of git: {status}", r)
+
+
+def test_search_raises_slow_compile_for_a_block_30_percent_slower_per_worker(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 3)  # 1,000,000 compiles per worker-second
+    r, out = fresh(p, NEVER)
+    rec = perf_log(p)[-1]
+    expect("slow-compile" in rec["flags"], f"a block far below the median should raise slow-compile: {rec}", r)
+    seed_perf(p, 3, compiled=1, wall_s=1000.0)  # a median so slow the next block is faster than it
+    fresh(p, NEVER)
+    expect("slow-compile" not in perf_log(p)[-1]["flags"], "a block faster than the median raises nothing", r)
+
+
+def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 12)  # enough fast blocks that the slow ones the loop adds leave the median where it is
+    notices = []
+    for _ in range(5):
+        r, out = fresh(p, NEVER)
+        notices.append([n for n in out.get("notice", []) if n.startswith("slow-compile")] or None)
+    log = perf_log(p)
+    log = [x for x in log if x["kind"] == "block"]
+    expect(all("slow-compile" in x["flags"] for x in log[-5:]), f"every block is slow: {[x.get('flags') for x in log]}", r)
+    expect(notices[0] is None and notices[1] is None, f"a flag raised once or twice is logged, not shown: {notices}", r)
+    expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row")
+           and "percent fewer than the median" in notices[2][0] and "antivirus" in notices[2][0],
+           f"the third in a row is shown with its cost and the user's fix: {notices}", r)
+    expect(notices[3] is None and notices[4] is None, f"it is shown once: {notices}", r)
+    expect("slow-compile" in log[-3]["shown"] and "slow-compile" not in log[-4]["shown"] + log[-2]["shown"], f"the record says what was shown: {log[-4:]}", r)
+
+
+def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 3, t_compile_p50_ms=0.001)  # a median compile far below this block's p95
+    r, out = fresh(p, NEVER)
+    rec = perf_log(p)[-1]
+    expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
