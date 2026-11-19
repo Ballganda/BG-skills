@@ -2744,6 +2744,143 @@ def test_search_refuses_an_unknown_override_in_local_json(base):
            "a misspelt override is named with the ones that exist", r)
 
 
+# ---------- template search: the machine-wide slot pool ----------
+
+def peak_project(base, folder, **search):
+    """A search project whose fake compiler logs how many of itself run at once into `folder`."""
+    build = PY + f' "{{tools}}/peak_build.py" "{{source}}" "{{obj}}" "{Path(folder).as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/peak_build.py": PEAK_BUILD_PY})
+    tune(p, **search)
+    return p
+
+
+def peak_of(folder):
+    return max(int(x) for x in (Path(folder) / "peak.log").read_text().split())
+
+
+def slot_folder(p):
+    d = p.root / ".decomp" / "slots"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def writer(p, name, age):
+    """Leave another writer's heartbeat in the pool, last beaten `age` seconds ago (below zero: it stays fresh)."""
+    beat = slot_folder(p) / f"{name}.writer"
+    beat.write_text(name)
+    os.utime(beat, (time.time() - age,) * 2)
+    return beat
+
+
+def hold_slot(p, index, name):
+    slot = slot_folder(p) / f"{index}.slot"
+    slot.write_text(name)
+    return slot
+
+
+def test_two_concurrent_searches_never_compile_more_at_once_than_the_pool_has_slots(base):
+    import threading
+    folder = Path(base) / "peak"
+    one = peak_project(sub(base, "one"), folder, workers=3, slots=2, slot_heartbeat_s=0.2)
+    two = peak_project(sub(base, "two"), folder)
+    shared = {"DECOMP_LOCAL": str(one.root / ".decomp")}  # one machine folder: its settings and its pool
+    got = {}
+
+    def run(name, p):
+        path = p.base / "template.c"
+        path.write_text(wide(2), encoding="utf-8")
+        got[name] = p.run("search", TID, str(path), env=shared)
+
+    threads = [threading.Thread(target=run, args=a) for a in (("one", one), ("two", two))]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    outs = []
+    for name in ("one", "two"):
+        expect(got[name].returncode == 0 and got[name].stdout, f"search {name} should finish", got[name])
+        outs.append(json.loads(got[name].stdout.splitlines()[0]))
+    for out in outs:
+        c = out["counts"]
+        expect(out["end"] == "exhausted" and c["compiled"] == 4, f"every candidate is built: {out}")
+        expect(c["workers"] == 3 and c["slots"] == 2, f"3 workers each, on a pool of 2 slots: {c}")
+    expect(max(o["counts"]["writers_active"] for o in outs) == 2, f"the later search should count both writers: {outs}")
+    expect(peak_of(folder) == 2, f"6 workers on 2 slots should build 2 at once, the peak was {peak_of(folder)}")
+    left = sorted(f.name for f in slot_folder(one).iterdir())
+    expect(left == [], f"both searches should leave the pool empty: {left}")
+
+
+def test_search_reclaims_the_slots_of_a_holder_whose_heartbeat_is_stale(base):
+    folder = Path(base) / "peak"
+    p = peak_project(base, folder, workers=3, slots=2)
+    beat = writer(p, "111-dead", 3600)
+    hold_slot(p, 0, "111-dead")
+    hold_slot(p, 1, "222-beef")  # a holder with no heartbeat at all
+    r, out = search(p, wide(2))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 4,
+           f"the search should build on the reclaimed slots: {out}", r)
+    c = out["counts"]
+    expect(c["slots_reclaimed"] == 2 and c["writers_active"] == 1, f"both stale slots are reclaimed: {c}", r)
+    expect(peak_of(folder) == 2, f"both slots should be in use again, the peak was {peak_of(folder)}", r)
+    expect(not beat.exists(), "the stale heartbeat should be cleared away")
+
+
+def test_search_leaves_the_slot_of_a_holder_whose_heartbeat_is_fresh(base):
+    folder = Path(base) / "peak"
+    p = peak_project(base, folder, workers=3, slots=2)
+    writer(p, "333-cafe", -3600)
+    slot = hold_slot(p, 1, "333-cafe")
+    r, out = search(p, wide(2))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 4,
+           f"the search should build on the slot that is free: {out}", r)
+    c = out["counts"]
+    expect(c["slots_reclaimed"] == 0 and c["writers_active"] == 2, f"a live holder keeps its slot: {c}", r)
+    expect(peak_of(folder) == 1, f"one free slot builds one at a time, the peak was {peak_of(folder)}", r)
+    expect(slot.read_text() == "333-cafe", "the live holder's slot is untouched")
+
+
+def test_search_starts_with_the_cores_divided_by_the_active_writers(base):
+    p = search_project(base)
+    tune(p, cores=8)
+    r, out = search(p, wide(4))
+    c = out["counts"] if out else {}
+    expect(c.get("workers") == 8 and c.get("slots") == 8 and c.get("writers_active") == 1,
+           f"one writer on 8 cores starts 8 workers: {c}", r)
+    writer(p, "111-dead", 3600)  # stale: not an active writer
+    writer(p, "333-cafe", -3600)
+    r, out = search(p, wide(4))
+    c = out["counts"] if out else {}
+    expect(c.get("workers") == 4 and c.get("writers_active") == 2, f"two writers on 8 cores start 4 workers each: {c}", r)
+    writer(p, "444-f00d", -3600)
+    r, out = search(p, wide(4))
+    c = out["counts"] if out else {}
+    expect(c.get("workers") == 2 and c.get("writers_active") == 3, f"three writers on 8 cores start 2 workers each: {c}", r)
+    tune(p, cores=8, workers=5)
+    r, out = search(p, wide(4))
+    expect(out is not None and out["counts"]["workers"] == 5, f"a set worker count is kept: {out}", r)
+
+
+def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails(base):
+    # The one case that reaches into the tool: no command line can make the platform's call fail.
+    import importlib.util
+    kept, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec = importlib.util.spec_from_file_location("decomp_tool", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+    finally:
+        sys.dont_write_bytecode = kept
+    logical = os.cpu_count()
+    expect(1 <= tool.cores() <= logical, f"the physical count is {tool.cores()} of {logical} logical cores")
+
+    def fails():
+        raise OSError("no such call")
+    tool.physical_core_call = fails
+    expect(tool.cores() == logical, f"a failing call should give the logical count: {tool.cores()}")
+    tool.physical_core_call = lambda: 0
+    expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
