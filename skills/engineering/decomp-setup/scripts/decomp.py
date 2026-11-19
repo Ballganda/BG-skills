@@ -440,10 +440,70 @@ def prepare(t, full=False, judge=True):
     return environment, compiler
 
 
+FAKEMATCH_RULES = ("forbidden", "allowed")
+UPGRADE_HINT = "It reaches a project past setup through the skill-upgrade section of /decomp-setup, as a change on a candidate branch."
+
+
+def contract_rules():
+    """The contract's template-search and fakematch rules as decomp.json holds them: (allowed, fakematch).
+
+    Stops, naming the upgrade step, when either key is missing or malformed.
+    """
+    search, fake = CFG.get("template_search"), CFG.get("fakematch")
+    missing = [k for k, ok in (("template_search", isinstance(search, bool)), ("fakematch", fake in FAKEMATCH_RULES)) if not ok]
+    if missing:
+        die(f"decomp.json lacks a valid {' and '.join('`' + k + '`' for k in missing)} "
+            f"(`template_search`: true or false; `fakematch`: {' or '.join(repr(r) for r in FAKEMATCH_RULES)}). "
+            f"{UPGRADE_HINT} `decomp.py contract-keys` prints the values the contract's lines give.")
+    return search, fake
+
+
 def cmd_doctor(a):
     for line in doctor(full=True).lines:
         print(line)
+    if (ROOT / "decomp.json").exists():
+        search, fake = contract_rules()
+        print(f"template search: {'allowed' if search else 'not allowed'}")
+        print(f"fakematch: {fake}")
     print("doctor: ok")
+
+
+def contract_line(text, *names):
+    """The value of the first contract bullet `- <name>: <value>` (any of names, case-insensitive), or None."""
+    for line in text.splitlines():
+        m = re.match(r"\s*[-*]\s*([^:]+):\s*(.*)$", line)
+        if m and m.group(1).strip().lower() in names:
+            return m.group(2).strip()
+    return None
+
+
+def reads_as_allowed(value):
+    """True for an 'allowed' value, False for 'not allowed' or 'forbidden'; None when it says neither."""
+    v = value.lower().strip("` .")
+    if re.match(r"(not allowed|no\b|forbidden|not\b|never)", v):
+        return False
+    if re.match(r"(allowed|yes\b)", v):
+        return True
+    return None
+
+
+def cmd_contract_keys(a):
+    """Print the decomp.json keys the contract's lines give, for the skill upgrade. An old 'Permuter:' line
+    is read as the 'Template search:' line."""
+    path = ROOT / "DECOMP.md"
+    if not path.exists():
+        die("no DECOMP.md; run /decomp-setup")
+    text = path.read_text(encoding="utf-8")
+    search_line = contract_line(text, "template search")
+    if search_line is None:
+        search_line = contract_line(text, "permuter")
+    fake_line = contract_line(text, "fakematch rule")
+    search = reads_as_allowed(search_line) if search_line is not None else None
+    fake = reads_as_allowed(fake_line) if fake_line is not None else None
+    if search is None or fake is None:
+        die("the contract's template-search (or old permuter) line or fakematch line is missing or unclear; "
+            "ask the user which it is and record the answer in the upgrade's ADR.")
+    print(json.dumps({"template_search": search, "fakematch": "allowed" if fake else "forbidden"}))
 
 
 def cmd_provision(a):
@@ -1647,6 +1707,7 @@ def main():
     p = argparse.ArgumentParser(prog="decomp.py")
     s = p.add_subparsers(dest="cmd", required=True)
     s.add_parser("doctor").set_defaults(f=cmd_doctor)
+    s.add_parser("contract-keys").set_defaults(f=cmd_contract_keys)
     x = s.add_parser("provision"); x.add_argument("--tool"); x.add_argument("--force", action="store_true")
     x.set_defaults(f=cmd_provision)
     s.add_parser("gen-specs").set_defaults(f=cmd_gen_specs)

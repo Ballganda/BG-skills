@@ -109,7 +109,8 @@ class Project:
         self.tmp.mkdir()
         self.target = self.base / "target.bin"
         self.target.write_bytes(target)
-        cfg = {"integration_branch": "main", "build": BUILD, "diff": DIFF, "pragma_allow": [], "banned": []}
+        cfg = {"integration_branch": "main", "build": BUILD, "diff": DIFF, "pragma_allow": [], "banned": [],
+               "template_search": True, "fakematch": "forbidden"}
         cfg.update(config or {})
         self.write("tools/decomp.py", TOOL.read_text(encoding="utf-8"))
         self.write("toolchain.json", json.dumps(manifest or legacy_manifest(), indent=1))
@@ -422,6 +423,48 @@ def test_revalidate_header_reaches_tickets_through_a_chain(base):
 
 
 # ---------- target editions ----------
+
+def sub(base, name):
+    """A fresh folder under base, for a test that builds more than one project."""
+    d = Path(base) / name
+    d.mkdir()
+    return d
+
+
+def test_doctor_reports_the_template_search_and_fakematch_rules(base):
+    r = Project(base, config={"template_search": False, "fakematch": "allowed"}).run("doctor")
+    expect(r.returncode == 0 and "template search: not allowed" in r.stdout and "fakematch: allowed" in r.stdout,
+           "doctor should print both rules from decomp.json", r)
+    r = Project(sub(base, "b"), config={"template_search": True, "fakematch": "forbidden"}).run("doctor")
+    expect(r.returncode == 0 and "template search: allowed" in r.stdout and "fakematch: forbidden" in r.stdout,
+           "doctor should print the other values too", r)
+
+
+def test_doctor_names_the_upgrade_when_the_rule_keys_are_missing(base):
+    p = Project(base)
+    cfg = json.loads((p.root / "decomp.json").read_text())
+    del cfg["template_search"], cfg["fakematch"]
+    (p.root / "decomp.json").write_text(json.dumps(cfg))
+    r = p.run("doctor")
+    expect(r.returncode == 1 and "template_search" in r.stderr and "fakematch" in r.stderr
+           and "skill-upgrade" in r.stderr and "doctor: ok" not in r.stdout, "doctor should name the upgrade step", r)
+
+
+def test_upgrade_maps_an_old_permuter_line_to_template_search(base):
+    for line, want in (("Permuter: allowed", True), ("Permuter: not allowed", False),
+                       ("Permuter: allowed, and its output is fakematch-governed.", True)):
+        p = Project(sub(base, str(len(line))))
+        p.write("DECOMP.md", f"# contract\n- Fakematch rule: `forbidden`\n- {line}\n")
+        r = p.run("contract-keys")
+        expect(r.returncode == 0 and json.loads(r.stdout) == {"template_search": want, "fakematch": "forbidden"},
+               f"{line!r} should read as template_search {want}", r)
+    p = Project(sub(base, "n"))
+    p.write("DECOMP.md", "# contract\n- Fakematch rule: allowed with a fakematch: comment (ADR)\n"
+                         "- Template search: not allowed\n- Permuter: allowed\n")
+    r = p.run("contract-keys")
+    expect(json.loads(r.stdout) == {"template_search": False, "fakematch": "allowed"},
+           "a template-search line wins over a permuter line", r)
+
 
 def test_doctor_passes_legacy_single_hash_manifest(base):
     r = Project(base).run("doctor")
