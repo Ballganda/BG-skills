@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -1972,11 +1973,15 @@ NEVER = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a; int WRONG_b;, int WRONG
                 "PERM_GENERAL(int WRONG_d;, int WRONG_e; int WRONG_f; int WRONG_g;) return 1; }\n")
 
 
-def search_project(base, **kw):
+def search_project(base, gate="register-allocation", **kw):
+    """A project with the search fakes. A `check` with the category `gate` opens template search; None runs none."""
     kw["config"] = dict(SEARCH_CONFIG, **kw.get("config", {}))
     kw["files"] = dict(SEARCH_FILES, **kw.get("files", {}))
     kw.setdefault("source", STUCK)
-    return Project(base, **kw)
+    p = Project(base, **kw)
+    if gate:
+        p.run("check", TID, "--category", gate)
+    return p
 
 
 def search(p, template, *more):
@@ -2160,8 +2165,10 @@ def test_search_compiles_higher_likelihood_combinations_first(base):
         "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
     expect(out is not None and out["counts"]["compiled"] == 6, "the whole space is built", r)
     built = log.read_text().splitlines()[-6:]  # after the start-up builds that check the compiler repeats itself
-    expect(built == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b0", "tag_a1 tag_b1", "tag_a2 tag_b1", "tag_a0 tag_b1"],
-           f"candidates should build most likely first: {built}", r)
+    expect(built[0] == "tag_a0 tag_b0", f"the baseline builds first: {built}", r)
+    expect(built[1:4] == ["tag_a1 tag_b0", "tag_a2 tag_b0", "tag_a0 tag_b1"],
+           f"the one-change candidates should build next, most likely first: {built}", r)
+    expect(built[4:] == ["tag_a1 tag_b1", "tag_a2 tag_b1"], f"the rest should build most likely first: {built}", r)
 
 
 def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
@@ -2212,6 +2219,110 @@ def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(bas
     expect(out["window"][0].startswith("0000 mov eax"), "the window is the report's first lines", r)
 
 
+# A steering alternative leads with /* steer: <why> */. The fake diff only counts WRONG, so these templates
+# match whenever no WRONG is left: A1 steers, A2 is natural, and B1 steers where B0 is natural.
+STEERED = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: keep a, in a register */ int right_a;) "
+                  "PERM_GENERAL(int right_b;, /* steer: not needed */ int right_c;) return 1; }\n")
+STEER_AND_NATURAL = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: pin it */ int right_a;, int fine_a;) "
+                            "return 1; }\n")
+ALLOWED = {"config": {"fakematch": "allowed"}}
+
+
+def test_search_refuses_a_steering_alternative_when_fakematch_is_forbidden(base):
+    r, out = search(search_project(base), STEERED)
+    expect(r.returncode == 1 and out is None and "fakematch" in r.stderr and "steer" in r.stderr,
+           "the refusal should name the rule", r)
+    expect("Nothing was built" in r.stderr, "nothing should be built", r)
+    r, out = search(search_project(sub(base, "n")), MATCHING)
+    expect(out is not None and out["end"] == "match", "natural alternatives are still searched", r)
+
+
+def test_search_prefers_a_natural_match_over_a_steering_one(base):
+    r, out = search(search_project(base, **ALLOWED), STEER_AND_NATURAL)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "A2", "the natural match should win", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == MARK + "int f(void) { int fine_a; return 1; }\n" and "fakematch" not in text,
+           f"the winner should hold no steering: {text!r}", r)
+
+
+def test_search_drops_a_steer_choice_the_match_does_not_need(base):
+    r, out = search(search_project(base, **ALLOWED), STEERED)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "A1 B0",
+           "the match without the unneeded steer choice should win", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == MARK + "int f(void) { int right_a; /* fakematch: keep a, in a register */ int right_b; return 1; }\n",
+           f"the winner should carry the tag's reason on its steering line only: {text!r}", r)
+
+
+def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
+    r, out = search(search_project(base, **ALLOWED), in_function(
+        "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: pin it */ int right_a;, /* steer: other */ %0.2 int right_b;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "r1",
+           "the likelier steering match should win, the tag and the likelihood in either order", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == in_function("int right_a; /* fakematch: pin it */"), f"the winner should carry the reason: {text!r}", r)
+
+
+# A fake compiler that logs each compile's WRONG_ tags in order, and ignores every IGNORED_ tag.
+SWEEP_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "order.log")
+open(log, "a").write(" ".join(re.findall(r"WRONG_([a-z0-9]+)", text)) + chr(10))
+text = re.sub(r"IGNORED_[a-z0-9]+", "", text)
+out[0] = text
+open(obj, "w")''')
+
+
+def sweep_project(base):
+    return search_project(base, files={"tools/search_build.py": SWEEP_BUILD_PY})
+
+
+def test_search_compiles_the_baseline_and_each_one_change_candidate_first(base):
+    p = sweep_project(base)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a0;, int WRONG_a1;) "
+                       "PERM_GENERAL(int WRONG_b0;, int WRONG_b1;) "
+                       "PERM_GENERAL(int WRONG_c0;, int WRONG_c1;, int WRONG_c2;) return 1; }\n")
+    log = p.root / "tools" / "order.log"
+    before = len(log.read_text().splitlines())  # the check that opened the gate built the unit
+    r, out = search(p, template)
+    order = log.read_text().splitlines()[before:]
+    expect(order[:2] == ["a0 b0 c0"] * 2, f"the baseline is first built twice, to see whether objects repeat: {order}", r)
+    order = order[2:]  # those two builds are not candidate builds
+    expect(out is not None and out["counts"]["compiled"] == 12 and len(order) == 12 and len(set(order)) == 12,
+           f"every candidate is built once: {order}", r)
+    expect(order[:5] == ["a0 b0 c0", "a1 b0 c0", "a0 b1 c0", "a0 b0 c1", "a0 b0 c2"],
+           f"the baseline and the one-change candidates come first: {order}", r)
+
+
+def test_search_freezes_a_choice_the_compiler_ignores(base):
+    p = sweep_project(base)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_b2;) "
+                       "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["inert"] == ["B"], f"the ignored choice should be inert: {out}", r)
+    expect(out["counts"]["compiled"] == 4, "the inert choice is not varied after the one-change candidates", r)
+    expect(out["effects"] == [{"A": {"A1": 2}}], f"the effect table lists only choices that change the score: {out['effects']}", r)
+    expect("stop" not in out, "a search with a live choice carries no stop advice", r)
+
+
+def test_search_advises_stopping_when_every_choice_is_inert(base):
+    template = MARK + "int f(void) { int WRONG_k; PERM_GENERAL(int IGNORED_x;, int IGNORED_y;) return 1; }\n"
+    r, out = search(sweep_project(base), template)
+    expect(out is not None and out["inert"] == ["A"] and out["effects"] == [], f"every choice is inert: {out}", r)
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 2 and "stop searching" in out["stop"],
+           "the summary should carry stop advice", r)
+
+
+def test_search_effect_table_lists_at_most_eight_choices_and_names_the_next_two(base):
+    others = " ".join(f"PERM_GENERAL(int ok_{i};, int WRONG_{i};)" for i in range(8))
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int right_a;) "
+                       "PERM_GENERAL(int WRONG_b;, int right_b;) " + others + " return 1; }\n")
+    r, out = search(search_project(base), template)
+    expect(out is not None and out["end"] == "match", "the pair of changes matches", r)
+    expect(len(out["effects"]) == 8 and out["inert"] == [], f"the table is cut to 8 choices: {out['effects']}", r)
+    expect(len(out["next"]) == 2 and all(": " in line and line.endswith(" bytes") for line in out["next"]),
+           f"two runners-up are named: {out['next']}", r)
+    expect(len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+
+
 # A counting fake compiler: it logs every build to a file, and with STAMP it writes a changing timestamp
 # into each object. The matching fake diff reports the function's bytes (the object without comments,
 # white space, or the stamp) as `function_sha256`.
@@ -2244,8 +2355,8 @@ def test_search_compiles_alternatives_with_identical_source_once(base):
     p, builds = counting_project(base)
     r, out = search(p, TWINS)
     expect(out is not None and out["counts"]["space"] == 4, "the template has four candidates", r)
-    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 2,
-           f"two of the four share a source with another: {out['counts']}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 1,
+           f"the twin is seen once, and the freeze of its inert choice skips the fourth: {out['counts']}", r)
     expect(out["counts"]["unique_objects"] == 2 and out["counts"]["hashing"] == "object", "two distinct objects", r)
 
 
@@ -2270,6 +2381,162 @@ def test_search_hashes_function_bytes_when_the_compiler_stamps_its_objects(base)
            "two sources with the same function bytes are one object", r)
     r, again = search(p, COMMENTED)
     expect(again["counts"]["compiled"] == 0 and again["counts"]["hashing"] == "function", "and the cache still serves them", r)
+
+
+# ---------- check trail and the template-search gate ----------
+
+GATE_OPENS = ("register-allocation", "statement-order", "expression-shape")
+GATE_CLOSES = ("reference-gap", "data-layout", "calling-convention", "optimization", "unit-order", "build-fail")
+ATTEMPT_FIELDS = {"id", "ticket", "unix", "model", "tier", "result", "category", "differ_bytes", "evidence", "source_sha256"}
+
+
+def trail(p):
+    f = p.root / ".decomp" / "trail.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def check_with(p, wrong, *args):
+    """Run `check` on a unit the search fake scores at 2 * wrong differing bytes. Returns its parsed JSON line."""
+    p.write(SOURCE, MARK + "int f(void) { " + "int WRONG; " * wrong + "return 1; }\n")
+    r = p.run("check", TID, *args)
+    expect(r.returncode == 0, "check should run", r)
+    return json.loads(r.stdout.splitlines()[0])
+
+
+def set_tier(p, tier):
+    ticket = p.root / "tickets" / UNIT / f"{TID}.md"
+    ticket.write_text(ticket.read_text().replace("tier: SMALL", f"tier: {tier}"))
+
+
+def test_check_appends_one_trail_record_per_run_outside_the_commit(base):
+    p = search_project(base, gate=None)
+    before = time.time()
+    check_with(p, 2, "--category", "signedness")
+    check_with(p, 0)
+    got = trail(p)
+    expect([(e["ticket"], e["result"], e["differ_bytes"], e["category"]) for e in got] ==
+           [(TID, "differ", 4, "signedness"), (TID, "bytes-match", 0, "")], f"the trail should hold both runs: {got}")
+    expect(all(before - 1 <= e["unix"] <= time.time() + 1 for e in got), f"each record holds its time: {got}")
+    p.write(SOURCE, STUCK)
+    expect(p.git("status", "--porcelain") == "", "the trail is never something git would commit")
+    expect(not (p.root / "ledger").exists(), "check records nothing in the ledger")
+
+
+def test_check_refuses_a_category_outside_the_mismatch_list(base):
+    p = search_project(base, gate=None)
+    r = p.run("check", TID, "--category", "bogus")
+    expect(r.returncode == 1 and "unknown category bogus" in r.stderr and "register-allocation" in r.stderr,
+           "check should refuse the category and list the real ones", r)
+    expect(trail(p) == [], "a refused check leaves no trail record")
+
+
+def test_gate_opens_on_a_latest_category_that_small_variations_fix(base):
+    p = search_project(base, gate=None)
+    for category in GATE_OPENS:
+        out = check_with(p, 1, "--category", category)
+        expect(out["search_open"] is True and category in out["search_reason"], f"{category} should open the gate: {out}")
+    out = check_with(p, 0, "--category", "signedness")
+    expect(out["search_open"] is False, f"another category as the latest closes it again: {out}")
+    out = check_with(p, 1, "--category", "statement-order")
+    expect(out["search_open"] is True, f"the gate follows the latest category: {out}")
+    out = check_with(p, 0, "--category", "statement-order")
+    expect(out["search_open"] is False, f"a match leaves nothing to search for: {out}")
+
+
+def test_gate_opens_after_three_attempts_with_no_fall_in_differ_bytes(base):
+    p = search_project(base, gate=None)
+    opened = [check_with(p, wrong, "--category", "signedness")["search_open"] for wrong in (3, 2, 2, 3, 1, 1, 2)]
+    #         6      4      4      6 (none below 4)  2 (a fall)  2      4 (none below 2)
+    expect(opened == [False, False, False, True, False, False, True], f"the gate should open only on a stall: {opened}")
+
+
+def test_gate_stays_closed_for_tiny_tickets_and_stop_or_report_categories(base):
+    p = search_project(base, gate=None)
+    for category in GATE_CLOSES:
+        for _ in range(3):
+            out = check_with(p, 1, "--category", category)
+        expect(out["search_open"] is False and category in out["search_reason"],
+               f"{category} should keep the gate closed through a stall: {out}")
+    set_tier(p, "TINY")
+    out = check_with(p, 1, "--category", "register-allocation")
+    expect(out["search_open"] is False and "TINY" in out["search_reason"], f"a TINY ticket stays closed: {out}")
+    r, _ = search(p, MATCHING)
+    expect(r.returncode == 1 and "TINY" in r.stderr, "search should refuse a TINY ticket with the reason", r)
+
+
+def test_a_build_failure_keeps_the_gate_closed_without_a_category(base):
+    p = search_project(base, gate=None)
+    for _ in range(3):
+        p.write(SOURCE, MARK + "SYNTAX_ERROR\n")
+        r = p.run("check", TID)
+        out = json.loads(r.stdout.splitlines()[0])
+    expect(out["result"] == "build-fail" and out["search_open"] is False and "build-fail" in out["search_reason"],
+           f"three build failures should not open the gate: {out}")
+    expect(trail(p)[-1]["category"] == "build-fail", "the trail records the failure's category")
+
+
+def test_search_is_refused_with_the_reason_while_the_gate_is_closed(base):
+    p = search_project(base, gate=None)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "closed" in r.stderr and "no check has run" in r.stderr,
+           "search should refuse before any check", r)
+    check_with(p, 1, "--category", "data-layout")
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "data-layout" in r.stderr, "the refusal should give the reason", r)
+    expect(len(trail(p)) == 1 and not (p.root / ".decomp" / "search").exists(), "a refused search is not an attempt")
+
+
+def test_gate_is_reported_closed_when_the_contract_disallows_template_search(base):
+    p = search_project(base, gate=None, config={"template_search": False})
+    out = check_with(p, 1, "--category", "register-allocation")
+    expect(out["search_open"] is False and "contract" in out["search_reason"], f"check should say why: {out}")
+
+
+def test_a_search_round_adds_one_attempt_to_the_trail(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and out["end"] == "exhausted", "the round should run", r)
+    got = trail(p)
+    expect(len(got) == 2 and (got[1]["by"], got[1]["result"], got[1]["differ_bytes"]) == ("search", "differ", 4),
+           f"the round is one trail record holding its best score: {got}")
+    expect(got[1]["category"] == "register-allocation", "the round keeps the category it worked on")
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and len(trail(p)) == 3, "each round is one more attempt", r)
+
+
+def test_verify_records_a_template_round_in_the_evidence_and_leaves_the_ledger_fields(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match", "the round should match", r)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 0 and '"result": "bytes-match"' in r.stdout, "verify should record bytes-match", r)
+    lines = (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text().splitlines()
+    marked = [l for l in lines if l.startswith("template-round: ")]
+    expect(len(marked) == 1, f"the evidence should mark the attempt as a template round: {lines[-3:]}", r)
+    got = json.loads(marked[0][len("template-round: "):])
+    expect((got["best"], got["differ_bytes"], got["kinds"], got["category"]) == ("A1 B2", 0, [], "register-allocation"),
+           f"the evidence should hold the round's best candidate, its kinds, and its category: {got}")
+    attempts = p.lines("attempts.jsonl")
+    expect(len(attempts) == 1 and set(attempts[0]) == ATTEMPT_FIELDS, f"the ledger's fields are unchanged: {attempts}")
+
+
+def test_verify_without_the_flag_marks_no_template_round(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, MATCHING)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 0, "verify should pass", r)
+    expect("template-round" not in (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text(),
+           "an attempt is a template round only when the flag says so")
+
+
+def test_verify_refuses_the_template_round_flag_when_no_round_is_kept(base):
+    p = search_project(base, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 1 and "no template round is kept" in r.stderr, "verify should refuse", r)
+    expect(p.lines("attempts.jsonl") == [] and p.status() == "claimed", "the refusal records nothing")
 
 
 def rmtree(path):

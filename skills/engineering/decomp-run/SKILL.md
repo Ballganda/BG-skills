@@ -44,14 +44,14 @@ When it reports, re-run `revalidate --ref <its branch>` yourself, because its ow
 
 Fill free writer slots (the contract's cap) from `python tools/decomp.py next --n <free slots>`, which lists smallest first. Use `--first <id> --reason <text>` only for a requirement the user stated, with that requirement as the reason. Per ticket:
 
-- **Model**: the contract's model for the ticket's tier. Escalate to the next tier's model once the ticket's notes show the contract's number of attempts with no fall in differ bytes, or when its category is listed in `OPEN.md`. Never escalate a `reference-gap`: that is a repair.
+- **Model**: the contract's model for the ticket's tier. Escalate to the next tier's model once the ticket's notes show the contract's number of attempts with no fall in differ bytes, or when its category is listed in `OPEN.md`. A template round counts as one attempt in these notes, however many candidates it tried. Never escalate a `reference-gap`: that is a repair.
 - `claim <id> --by <writer name>`, then `git worktree add <path> -b w/<id> <integration branch>`.
 - Start a background writer subagent on that model, working in that worktree. Tell it to call the Skill tool with `decomp-match` for the ticket path, commit to `w/<id>`, and reply in the report format the skill defines.
 
 ### 4. Judge each report
 
 - **Gap**: `release <id> --to blocked-reference`, then `note <id> gap: <the gap line>`.
-- **Otherwise**: `verify <id> --model <writer's model> --category <reported category>`, then `note <id> <result> <category> <differ bytes>: <the writer's note line>`. If the writer reported a local match but `verify` disagrees, say so in the note. If that happens twice in a project, tell the user: the writer's environment and the clean build differ.
+- **Otherwise**: `verify <id> --model <writer's model> --category <reported category>`, adding `--template-round` when the writer's `attempt` line says `template` (the round's evidence is kept on this machine, so the flag works from the integration checkout), then `note <id> <result> <category> <differ bytes>: <the writer's note line>`. If the writer reported a local match but `verify` disagrees, say so in the note. If that happens twice in a project, tell the user: the writer's environment and the clean build differ.
 - **`bytes-match`**: save `git diff <integration branch>...w/<id> -- <source>` to a file, then start an auditor subagent on the contract's auditor model. Give it only that file's path and the path to `GUARDRAILS.md` in `decomp-standards`. Record its one-line verdict with `audit <id> pass|fail --auditor <model> --note "<verdict>"`.
 - **Audit pass**: merge `w/<id>` into the integration branch, `integrate <id>`, record the lesson (step 5), then remove the worktree and branch.
 - **Anything else**: `release <id>`, then remove the worktree and branch. The notes carry what was learned to the next writer.
