@@ -1793,11 +1793,31 @@ KINDS = ("decl-order", "stmt-order", "loop-form", "temp-type", "signedness", "wi
          "expression-shape", "branch-order", "inlining", "other")  # the levers of decomp-match's MISMATCH.md
 HEAD = re.compile(r"@([A-Za-z_]+)(?:[ \t]+(\S+))?")  # a choice point's first argument: @label kind
 LIKELIHOOD = re.compile(r"%(\d+(?:\.\d*)?|\.\d+)(?:\s+|$)")  # an alternative's leading %0.7
-# A choice point: its label, its alternatives' source text, its kind, and one likelihood per alternative
-# (None: all alike). A Reference is a later PERM_VAR(label): the same pick again.
-Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods", defaults=("other", None))
+STEER_TAG = re.compile(r"/\*\s*steer:(.*?)\*/\s*", re.S)  # leads a steering alternative: /* steer: <reason> */
+# A choice point: its label, its alternatives' source text, its kind, one likelihood per alternative
+# (None: all alike), and per alternative the reason it steers the compiler (None: the alternative is
+# natural; an empty tuple: all natural). A Reference is a later PERM_VAR(label): the same pick again.
+Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods steers", defaults=("other", None, ()))
 Reference = collections.namedtuple("Reference", "label")
 Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
+
+
+def steer(choice, pick):
+    """The reason one alternative of a choice point steers the compiler, or None when it is natural."""
+    return choice.steers[pick] if choice.steers else None
+
+
+def picked(self, pick):
+    """The source one alternative of a choice point stands for."""
+    why = steer(self, pick)
+    text = self.alternatives[pick]
+    if why is None:
+        return text
+    note = f" /* fakematch: {why} */"
+    return "\n".join(line + note if line.strip() else line for line in text.split("\n"))
+
+
+Choice.picked = picked
 
 
 def choice_label(n):
@@ -1862,8 +1882,16 @@ class Template:
             picks[choice.label] = int(m.group(2))
         return [picks.get(c.label, 0) for c in self.choices]
 
+    def steering(self, vector):
+        """The choice points whose pick steers the compiler, as (index into choices, reason) pairs."""
+        return [(i, steer(c, pick)) for i, (c, pick) in enumerate(zip(self.choices, vector))
+                if steer(c, pick) is not None]
+
     def render(self, vector):
-        """The candidate as plain source: each choice point replaced by its picked alternative."""
+        """The candidate as plain source: each choice point replaced by its picked alternative.
+
+        A steering alternative's tag becomes a `fakematch: <why>` comment on each of its lines.
+        """
         return render_parts(self.parts, vector)
 
 
@@ -1872,7 +1900,7 @@ def render_parts(parts, vector):
     picks, said, out = iter(vector), {}, []
     for p in parts:
         if isinstance(p, Choice):
-            said[p.label] = p.alternatives[next(picks)]
+            said[p.label] = p.picked(next(picks))
             out.append(said[p.label])
         else:
             out.append(said[p.label] if isinstance(p, Reference) else p)
@@ -1892,19 +1920,32 @@ def read_head(where, args, default_kind):
     return m.group(1), kind, args[1:]
 
 
-def read_likelihoods(where, alternatives):
-    """Each alternative's text without its leading likelihood, and the likelihoods (None when none was given)."""
-    texts, weights = [], []
+def read_alternatives(where, alternatives):
+    """Each alternative's text without its leading likelihood and steering tag, which come in either order.
+
+    Returns (texts, likelihoods or None when none was given, per alternative its steering reason or None).
+    """
+    texts, weights, steers = [], [], []
     for alt in alternatives:
-        weight = 1.0
-        if alt.startswith("%"):
-            m = LIKELIHOOD.match(alt)
-            if not m or float(m.group(1)) <= 0:
-                die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
-            weight, alt = float(m.group(1)), alt[m.end():]
+        weight = why = None
+        while True:
+            tag = STEER_TAG.match(alt) if why is None else None
+            if tag:
+                why = " ".join(tag.group(1).split())
+                if not why:
+                    die(f"template {where}: a steering tag needs a reason: /* steer: <why> */")
+                alt = alt[tag.end():].strip()
+            elif weight is None and alt.startswith("%"):
+                m = LIKELIHOOD.match(alt)
+                if not m or float(m.group(1)) <= 0:
+                    die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
+                weight, alt = float(m.group(1)), alt[m.end():]
+            else:
+                break
         texts.append(alt)
-        weights.append(weight)
-    return texts, weights if any(w != 1.0 for w in weights) else None
+        weights.append(1.0 if weight is None else weight)
+        steers.append(why)
+    return texts, weights if any(w != 1.0 for w in weights) else None, tuple(steers)
 
 
 def line_orders(where, body):
@@ -1960,7 +2001,7 @@ def parse_template(text):
             first = inner[0].lstrip().startswith("@")
             head, _, body = inner[0].partition("\n") if first else ("", "", inner[0])
             label, kind, _ = read_head(here, [head.strip()] if first else [], "stmt-order")
-            alternatives, weights = line_orders(here, body), None
+            alternatives, weights, steers = line_orders(here, body), None, ()
         else:
             args = split_alternatives(code, text, body_at, end - 1)
             if macro == "PERM_VAR" and len(args) == 1 and re.fullmatch(r"[A-Za-z_]+", args[0]):
@@ -1979,15 +2020,15 @@ def parse_template(text):
                 if not lo <= hi or hi - lo + 1 > MAX_INT_VALUES:
                     die(f"template {here}: PERM_INT needs lo <= hi and at most {MAX_INT_VALUES} values")
                 args = [str(i) for i in range(lo, hi + 1)]
-            alternatives, weights = read_likelihoods(here, args)
+            alternatives, weights, steers = read_alternatives(here, args)
             if macro == "PERM_ONCE":
-                alternatives, weights = [""] + alternatives, weights and [1.0] + weights
+                alternatives, weights, steers = [""] + alternatives, weights and [1.0] + weights, (None,) + steers
             if len(alternatives) < 2:
                 die(f"template {here}: a choice point needs two or more alternatives")
         label = label or choice_label(len(choices))
         if any(c.label == label for c in choices):
             die(f"template {here}: the label '{label}' is used twice; labels are what choice codes name")
-        choice = Choice(label, alternatives, kind, weights)
+        choice = Choice(label, alternatives, kind, weights, steers)
         choices.append(choice)
         parts.append(choice)
         if macro == "PERM_VAR":
@@ -2001,9 +2042,9 @@ def candidates(template):
     """The seeds a round tries after its opening one-change sweep, in order: the whole space, most likely first.
 
     A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
-    given the order is the seeds', baseline first.
+    and no steering alternative the order is the seeds', baseline first.
     """
-    if all(c.likelihoods is None for c in template.choices):
+    if all(c.likelihoods is None and not any(c.steers) for c in template.choices):
         return range(template.space())
     return most_likely_first(template)
 
@@ -2011,21 +2052,23 @@ def candidates(template):
 def most_likely_first(template):
     """Every seed, the likeliest candidate first, produced lazily so a large space costs nothing until it is read.
 
-    Each choice point's alternatives are ranked by likelihood (written order breaking ties). A heap
-    holds the frontier of rank vectors: raising one rank never raises the likelihood, and each vector
-    is reached by one route, raising ranks left to right.
+    Each choice point's alternatives are ranked by likelihood (a natural one before a steering one,
+    then written order, breaking ties). A heap holds the frontier of rank vectors: raising one rank
+    never raises the likelihood, and each vector is reached by one route, raising ranks left to right.
+    At equal likelihood the candidate with fewer steering alternatives goes first.
     """
     weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
-    ranked = [sorted(range(len(w)), key=lambda i, w=w: (-w[i], i)) for w in weights]
+    ranked = [sorted(range(len(w)), key=lambda i, w=w, c=c: (-w[i], steer(c, i) is not None, i))
+              for w, c in zip(weights, template.choices)]
     cost = [[-math.log(w[i]) for i in order] for w, order in zip(weights, ranked)]
 
     def entry(ranks, last):
-        seed = template.seed([order[r] for order, r in zip(ranked, ranks)])
-        return (sum(k[r] for k, r in zip(cost, ranks)), seed, ranks, last)
+        vector = [order[r] for order, r in zip(ranked, ranks)]
+        return (sum(k[r] for k, r in zip(cost, ranks)), len(template.steering(vector)), template.seed(vector), ranks, last)
 
     heap = [entry((0,) * len(ranked), 0)]
     while heap:
-        _, seed, ranks, last = heapq.heappop(heap)
+        _, _, seed, ranks, last = heapq.heappop(heap)
         yield seed
         for j in range(last, len(ranks)):
             if ranks[j] + 1 < len(ranked[j]):
@@ -2035,7 +2078,8 @@ def most_likely_first(template):
 def one_change(template):
     """The seeds that open a round: the baseline, then each candidate with one choice point changed.
 
-    The one-change candidates go most likely first, in template order where likelihoods tie or none was given.
+    The one-change candidates go most likely first. Where likelihoods tie or none was given, a natural
+    alternative goes before a steering one, then template order decides.
     """
     changed = []
     for i, c in enumerate(template.choices):
@@ -2043,8 +2087,8 @@ def one_change(template):
         for pick in range(1, len(c.alternatives)):
             vector = [0] * len(template.choices)
             vector[i] = pick
-            changed.append((-weights[pick] / weights[0], len(changed), template.seed(vector)))
-    return [0] + [seed for _, _, seed in sorted(changed)]
+            changed.append((-weights[pick] / weights[0], steer(c, pick) is not None, len(changed), template.seed(vector)))
+    return [0] + [seed for *_, seed in sorted(changed)]
 
 
 def inert_choices(template, results):
@@ -2172,17 +2216,21 @@ def run_round(template, score, report, fingerprint=lambda: None):
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. A choice point whose alternatives all gave the baseline's object is inert:
     it stays at its first alternative from then on.
+    A natural match ends the round at once. A match that needs steering is kept while the rest is tried
+    for a natural one; when none turns up, the steered match is reduced to the steering it needs.
     best is a dict: seed, score, and diff window of the closest candidate, or only the first failure
     log when no candidate was scored. results holds one record per candidate tried.
     """
     counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
     state = {"best": None, "failure": ""}
     results, tried = [], set()
+    scored, steered = {}, []  # scored: seed to its Score. steered: seeds that match only through steering
 
     def attempt(seed):
+        """Score one candidate. True when it is a natural match, which ends the round."""
         tried.add(seed)
         vector = template.vector(seed)
-        s = score(template.render(vector))
+        s = scored[seed] = score(template.render(vector))
         counts["guardrail" if s.result == "guardrail" else "compiled"] += 1
         counts["build_fail"] += s.result == "build-fail"
         results.append({"seed": seed, "code": template.code(vector), "result": s.result,
@@ -2191,7 +2239,13 @@ def run_round(template, score, report, fingerprint=lambda: None):
             state["failure"] = state["failure"] or s.log
         elif state["best"] is None or rank(s) < rank(state["best"]["score"]):
             state["best"] = {"seed": seed, "score": s, "window": window(report)}
-        return s.result == "bytes-match"
+        if s.result != "bytes-match":
+            return False
+        if template.steering(vector):
+            steered.append(seed)  # a match that needs steering: keep looking for a natural one
+            return False
+        state["best"] = {"seed": seed, "score": s, "window": window(report)}
+        return True
 
     def finish(end):
         return end, state["best"] or {"failure": state["failure"]}, counts, results
@@ -2206,7 +2260,30 @@ def run_round(template, score, report, fingerprint=lambda: None):
             continue
         if attempt(seed):
             return finish("match")
+    if steered:
+        seed = reduce_steering(template, steered, scored, attempt)
+        state["best"] = {"seed": seed, "score": scored[seed], "window": []}
+        return finish("match")
     return finish("exhausted")
+
+
+def reduce_steering(template, seeds, scored, attempt):
+    """The seed of the steered match that keeps the fewest steer choices, each flipped to a natural alternative where
+    the match survives it. Candidates already scored are not built again."""
+    seed = min(seeds, key=lambda s: len(template.steering(template.vector(s))))
+    vector = template.vector(seed)
+    for i, _ in template.steering(vector):
+        for pick in range(len(template.choices[i].alternatives)):
+            if steer(template.choices[i], pick) is not None:
+                continue
+            flipped = vector[:i] + [pick] + vector[i + 1:]
+            at = template.seed(flipped)
+            if at not in scored:
+                attempt(at)
+            if scored[at].result == "bytes-match":
+                vector = flipped
+                break
+    return template.seed(vector)
 
 
 EFFECT_ROWS = 8  # choice points the effect table lists
@@ -2478,6 +2555,9 @@ def cmd_search(a):
         die(f"cannot read the template: {e}")
     text = source_text(data)
     template = parse_template(text)
+    if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
+        die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
+            "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
