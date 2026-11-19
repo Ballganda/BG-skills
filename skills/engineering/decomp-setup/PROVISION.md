@@ -67,7 +67,7 @@ The contract names exact tools. Provisioning puts those tools on this machine, r
 {"target": "<absolute path to the target>", "roots": {"<tool name>": "<folder of a user-installed tool>"}}
 ```
 
-A tool with no entry in `roots` lives in `.decomp/toolchain/<name>/`, where `provision` unpacks it.
+A tool with no entry in `roots` lives in `.decomp/toolchain/<name>/`, where `provision` unpacks it. An optional `"search"` object overrides template search's block constants for this machine; `decomp-standards`' layout lists them.
 
 ## Steps
 

@@ -2044,8 +2044,8 @@ def test_search_summary_stays_under_the_cap_and_holds_no_source(base):
 
 def test_search_reports_the_build_failure_when_no_candidate_builds(base):
     r, out = search(search_project(base), MATCHING.replace("return 1;", "SYNTAX_ERROR"))
-    expect(out is not None and out["end"] == "exhausted" and out["best"] is None, "no candidate is the best", r)
-    expect(out["counts"]["build_fail"] == 6 and "C2143" in out["failure"], "the summary carries the compiler's error", r)
+    expect(out is not None and out["end"] == "abort-buildfail" and out["best"] is None, "no candidate is the best", r)
+    expect(2 <= out["counts"]["build_fail"] <= 6 and "C2143" in out["failure"], "the summary carries the compiler's error", r)
 
 
 def test_search_detail_returns_one_candidates_source_and_score(base):
@@ -2160,6 +2160,7 @@ def test_search_names_choice_codes_by_label(base):
 def test_search_compiles_higher_likelihood_combinations_first(base):
     log = Path(base) / "order.log"
     p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    tune(p, workers=1)  # one worker builds in the order the candidates come
     r, out = search(p, in_function(
         "PERM_GENERAL(%0.2 tag_a0 WRONG_1, %0.5 tag_a1 WRONG_2, %0.3 tag_a2 WRONG_3) "
         "PERM_GENERAL(%0.9 tag_b0 WRONG_4, %0.1 tag_b1 WRONG_5)"))
@@ -2277,6 +2278,7 @@ def sweep_project(base):
 
 def test_search_compiles_the_baseline_and_each_one_change_candidate_first(base):
     p = sweep_project(base)
+    tune(p, workers=1)  # one worker builds in the order the candidates come
     template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a0;, int WRONG_a1;) "
                        "PERM_GENERAL(int WRONG_b0;, int WRONG_b1;) "
                        "PERM_GENERAL(int WRONG_c0;, int WRONG_c1;, int WRONG_c2;) return 1; }\n")
@@ -2595,6 +2597,7 @@ def test_a_kind_with_more_history_compiles_its_alternatives_earlier(base):
                            "PERM_GENERAL(@shape expression-shape, tag_b0 WRONG_3, tag_b1 WRONG_4)")
     second_writer(p, 1, ["expression-shape"])
     second_writer(p, 2, ["expression-shape"])
+    tune(p, workers=1)  # one worker builds in the order the candidates come
     r, out = search(p, template)
     after = log.read_text().splitlines()[-4:]
     expect(after == ["tag_a0 tag_b0", "tag_a0 tag_b1", "tag_a1 tag_b0", "tag_a1 tag_b1"],
@@ -2607,6 +2610,138 @@ def test_a_search_writes_no_priors_file(base):
     search(p, HISTORY_TEMPLATE)
     names = [f.name for d in (p.root / ".decomp", p.root / "ledger") if d.is_dir() for f in d.rglob("*") if f.is_file()]
     expect(not [n for n in names if "prior" in n.lower() or "histor" in n.lower()], f"no priors file: {names}")
+
+
+# ---------- template search: parallel blocks ----------
+
+# A fake compiler that counts how many of itself run at once: each run marks itself in a folder,
+# stays a while, and logs how many marks it sees when it starts and when it ends.
+PEAK_BUILD_PY = """import os, sys, time
+src, obj, folder = sys.argv[1:4]
+os.makedirs(os.path.join(folder, "running"), exist_ok=True)
+me = os.path.join(folder, "running", str(os.getpid()))
+def note():
+    open(os.path.join(folder, "peak.log"), "a").write(str(len(os.listdir(os.path.join(folder, "running")))) + chr(10))
+open(me, "w").close()
+note()
+time.sleep(0.5)
+note()
+os.remove(me)
+open(obj, "w").write(open(src).read())
+"""
+# A fake compiler that hangs on a candidate holding HANG, after starting a grandchild that keeps
+# adding to a heartbeat file for up to 30 seconds.
+HANG_BUILD_PY = """import subprocess, sys, time
+src, obj, beat = sys.argv[1:4]
+text = open(src).read()
+if "HANG" in text:
+    code = "import sys, time" + chr(10) + "for i in range(300):" + chr(10) + "    open(sys.argv[1], 'a').write('x')" + chr(10) + "    time.sleep(0.1)"
+    subprocess.Popen([sys.executable, "-c", code, beat])
+    time.sleep(30)
+open(obj, "w").write(text)
+"""
+# A fake compiler whose object leaves the comments out.
+BARE_BUILD_PY = """import re, sys
+open(sys.argv[2], "w").write(re.sub(r"/[*].*?[*]/", "", open(sys.argv[1]).read()))
+"""
+
+
+def tune(p, **search):
+    """Override block constants in the project's local.json, as a user would for this machine."""
+    path = p.root / ".decomp" / "local.json"
+    path.write_text(json.dumps(dict(json.loads(path.read_text()), search=search)))
+
+
+def wide(n, alternatives=("int WRONG_{c}0;", "int WRONG_{c}1; int WRONG_{c}2;")):
+    """A template of n choice points that never matches."""
+    return MARK + "int f(void) { int WRONG_now; " + " ".join(
+        "PERM_GENERAL(" + ", ".join(a.format(c=chr(97 + i)) for a in alternatives) + ")" for i in range(n)) + " return 1; }\n"
+
+
+def test_search_runs_as_many_compiles_at_once_as_it_has_workers(base):
+    folder = Path(base) / "peak"
+    build = PY + f' "{{tools}}/peak_build.py" "{{source}}" "{{obj}}" "{folder.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/peak_build.py": PEAK_BUILD_PY})
+    tune(p, workers=3)
+    r, out = search(p, wide(3))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 8, "all 8 candidates are built", r)
+    peak = max(int(x) for x in (folder / "peak.log").read_text().split())
+    expect(peak == 3 and out["counts"]["workers"] == 3, f"3 workers should build 3 at once, the peak was {peak}", r)
+    expect(out["counts"]["shell"] == 0, "an adapter with no shell feature starts without the shell", r)
+    expect(out["best"] == {"code": "A0 B0 C0", "differ_bytes": 8}, "the best is the same whatever the workers' order", r)
+
+
+def test_search_block_ends_at_an_overridden_deadline(base):
+    p = search_project(base)
+    tune(p, workers=2, deadline_s=1)
+    r, out = search(p, wide(10))
+    expect(out is not None and out["end"] == "deadline", f"the block should end on its deadline: {out}", r)
+    c = out["counts"]
+    expect(1.0 <= c["wall_s"] < 6.0, f"the block ran {c['wall_s']} s on a 1 s deadline", r)
+    expect(0 < c["compiled"] < c["space"] == 1024, "it stopped with candidates left", r)
+
+
+def test_search_block_aborts_when_most_early_candidates_fail_to_build(base):
+    p = search_project(base)
+    tune(p, workers=2)
+    r, out = search(p, wide(3, ("int WRONG_{c};", "SYNTAX_ERROR {c}1;", "SYNTAX_ERROR {c}2;", "SYNTAX_ERROR {c}3;")))
+    expect(out is not None and out["end"] == "abort-buildfail", f"3 of the first 4 builds fail: {out}", r)
+    c = out["counts"]
+    expect(c["build_fail"] >= 3 and c["compiled"] < c["space"] == 64, "the block ends long before the space does", r)
+    expect(out["best"] == {"code": "A0 B0 C0", "differ_bytes": 8}, "the candidate that built is still the best", r)
+
+
+def test_search_block_is_exhausted_when_its_candidates_are_mostly_repeats(base):
+    p = search_project(base)
+    tune(p, workers=1, repeat_window=10)
+    r, out = search(p, wide(3, ("int WRONG_same;",) * 5))
+    expect(out is not None and out["end"] == "exhausted", f"every candidate has one source: {out}", r)
+    c = out["counts"]
+    expect(c["compiled"] == 1 and c["src_dedupe_hits"] == 10 and c["space"] == 125,
+           f"one build, then a window of 10 repeats ends the block: {c}", r)
+
+
+def test_search_block_ends_on_a_plateau(base):
+    p = search_project(base, config={"build": PY + ' "{tools}/bare_build.py" "{source}" "{obj}"'},
+                       files={"tools/bare_build.py": BARE_BUILD_PY})
+    tune(p, workers=1, plateau_compiles=6)
+    r, out = search(p, wide(8, ("/* {c}0 */", "/* {c}1 */")))
+    expect(out is not None and out["end"] == "plateau", f"no candidate brings a new object or score: {out}", r)
+    c = out["counts"]
+    expect(c["compiled"] == 7 and c["unique_objects"] == 1 and c["space"] == 256,
+           f"the first build, then 6 with nothing new: {c}", r)
+
+
+def test_search_kills_a_hung_compile_with_its_grandchild_as_a_build_fail(base):
+    beat = Path(base) / "beat"
+    build = PY + f' "{{tools}}/hang_build.py" "{{source}}" "{{obj}}" "{beat.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/hang_build.py": HANG_BUILD_PY})
+    tune(p, workers=1, hang_floor_s=2, hang_start_s=10)
+    r, out = search(p, MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, int HANG;) return 1; }\n")
+    expect(out is not None and out["end"] == "exhausted", f"the block should outlive the hang: {out}", r)
+    c = out["counts"]
+    expect(c["killed"] == 1 and c["build_fail"] == 1 and c["compiled"] == 3, f"the hang is one killed build-fail: {c}", r)
+    expect(out["best"] == {"code": "A0", "differ_bytes": 2}, "the other candidates are scored", r)
+    expect(beat.exists() and beat.stat().st_size > 0, "the grandchild should have started")
+    size = beat.stat().st_size
+    time.sleep(0.6)
+    expect(beat.stat().st_size == size, "the grandchild should be dead: its heartbeat still grows")
+
+
+def test_search_falls_back_to_the_shell_for_an_adapter_that_needs_it(base):
+    p = search_project(base, config={"build": "cd . && " + SEARCH_CONFIG["build"]})
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and out["counts"]["build_fail"] == 0,
+           f"a build adapter using && should still build: {out}", r)
+    expect(out["counts"]["shell"] > 0, "it ran through the shell", r)
+
+
+def test_search_refuses_an_unknown_override_in_local_json(base):
+    p = search_project(base)
+    tune(p, deadline=1)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "deadline" in r.stderr and "deadline_s" in r.stderr,
+           "a misspelt override is named with the ones that exist", r)
 
 
 def rmtree(path):

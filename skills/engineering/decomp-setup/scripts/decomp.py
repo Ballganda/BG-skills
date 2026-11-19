@@ -16,10 +16,14 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
+import signal
+import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -885,6 +889,8 @@ def launch(command, cwd, environment, capture=True):
     """
     if not capture:
         return subprocess.run(command, shell=True, cwd=cwd, env=environment.vars)
+    if getattr(environment, "run", None):  # a search block's Launcher: no shell where it can, and a kill on a hang
+        return environment.run(command, cwd)
     return subprocess.run(command, shell=True, cwd=cwd, env=environment.vars,
                           capture_output=True, text=True, errors="replace")
 
@@ -1780,9 +1786,11 @@ def cmd_sync(a):
 #
 # The stages, in the order a round runs them:
 #   parse_template   template text -> Template (the choice points and the text between them)
-#   candidates       Template -> the seeds to try, in order
-#   Worker.score     one candidate's source -> Score, through the build and diff adapters
-#   run_round        the loop over candidates: keeps the best, stops on a match
+#   one_change       Template -> the seeds that open a round: the baseline and the one-change sweep
+#   candidates       Template -> the seeds to try after them, in order
+#   Memo.entry       one candidate's source -> its result, through the dedupe layers and a Worker's
+#                    build and diff adapters, which a Launcher starts
+#   run_block        the workers' loop over candidates: keeps the best, ends by Block's rules
 #   summary          the round's result -> the capped JSON the writer reads
 # A round's template and results stay in this machine's folder, where the detail form reads them.
 
@@ -2168,6 +2176,7 @@ class Worker:
     """
 
     def __init__(self, folder, environment, t, compiler, tree, template_text):
+        """environment is the block's Launcher."""
         self.environment, self.t, self.compiler, self.tree = environment, t, compiler, tree
         self.source = Path(folder) / "unit" / t["source"]
         self.objdir = Path(folder) / "obj"
@@ -2190,10 +2199,15 @@ class Worker:
         return None
 
     def build(self, text):
-        """Build one candidate's source. Returns (obj, failure log or '')."""
-        self.source.write_bytes(source_bytes(text))
-        self.report.unlink(missing_ok=True)
-        return build_unit(*self.args(), self.objdir, str(self.report))
+        """Build one candidate's source. Returns (obj, failure log or ''). A build that passes is timed."""
+        wait = self.environment.settings["lock_retry_s"]
+        retrying(lambda: self.source.write_bytes(source_bytes(text)), wait)
+        retrying(lambda: self.report.unlink(missing_ok=True), wait)
+        start = time.perf_counter()
+        obj, failure = build_unit(*self.args(), self.objdir, str(self.report))
+        if not failure:
+            self.environment.sample(time.perf_counter() - start)
+        return obj, failure
 
     def diff(self, obj, fields=None):
         """Diff a built object. The diff report of this candidate is left in self.report."""
@@ -2250,68 +2264,369 @@ def window(report, first_differ=None):
     return lines[start:start + WINDOW_LINES]
 
 
-def run_round(template, score, report, fingerprint=lambda: None, boost=None):
-    """Try candidates until one matches or none is left. Returns (end reason, best, counts, results).
+SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.json overrides any of them
+    "workers": 0,  # worker threads; 0 is one per logical core
+    "deadline_s": 0,  # a fixed block deadline; 0 leaves it to the floor and the ceiling
+    "floor_s": 10.0,  # a block runs at least this long,
+    "floor_compiles": 200,  # and on until it has built this many candidates,
+    "ceiling_s": 60.0,  # or until the ceiling: the last round's model latency, never above this
+    "plateau_compiles": 200,  # a plateau: this many scored candidates with no new best score and no new object,
+    "plateau_frac": 0.25,  # and no fewer than this share of the block's scored candidates
+    "buildfail_frac": 0.5,  # the block aborts when more than this share of its first 2 x workers builds fail
+    "repeat_window": 100,  # the block is exhausted when, of its last this many candidates,
+    "repeat_frac": 0.9,  # more than this share only repeated a source it had already tried
+    "hang_factor": 10.0,  # an adapter run is killed after this many times the median compile time,
+    "hang_floor_s": 5.0,  # though never sooner than this,
+    "hang_start_s": 120.0,  # and after this long while fewer than 2 x workers compiles are timed
+    "lock_retry_s": 2.0,  # how long an overwrite retries on a file another process still holds
+}
 
-    score turns a candidate's source into a Score and leaves its diff report at report. fingerprint
-    returns a hash of the object the last score built, or None. boost is the history's (see candidates).
-    The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
-    group most likely first. A choice point whose alternatives all gave the baseline's object is inert:
-    it stays at its first alternative from then on.
-    A natural match ends the round at once. A match that needs steering is kept while the rest is tried
-    for a natural one; when none turns up, the steered match is reduced to the steering it needs.
-    best is a dict: seed, score, and diff window of the closest candidate, or only the first failure
-    log when no candidate was scored. results holds one record per candidate tried.
+
+def search_settings():
+    """The block constants for this machine: the defaults with local.json's "search" entries over them."""
+    path = local_dir() / "local.json"
+    local = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    given = local.get("search", {})
+    bad = [k for k, v in given.items() if k not in SEARCH_DEFAULTS or isinstance(v, bool)
+           or not isinstance(v, (int, float)) or v < 0] if isinstance(given, dict) else ["search"]
+    if bad:
+        die(f'{path}: "search" holds {sorted(bad)}; it takes a number, zero or more, for any of {sorted(SEARCH_DEFAULTS)}')
+    return dict(SEARCH_DEFAULTS, **given)
+
+
+def retrying(overwrite, seconds):
+    """Run a file overwrite, again for a short while when a lingering handle or a scanner still holds the file."""
+    end, pause = time.perf_counter() + seconds, 0.005
+    while True:
+        try:
+            return overwrite()
+        except PermissionError:
+            if time.perf_counter() >= end:
+                raise
+            time.sleep(pause)
+            pause = min(pause * 2, 0.1)
+
+
+# What makes a command need the host's shell: the characters the shell itself reads.
+SHELL_ONLY = re.compile(r"[%&|<>^\n]" if os.name == "nt" else r"[$`&|;<>()*?\[\]{}~#!\n]")
+_KERNEL32 = None
+
+
+def kernel32():
+    """Windows' Job Object calls, with their handle types declared (a handle is pointer-sized)."""
+    global _KERNEL32
+    if _KERNEL32 is None:
+        import ctypes
+        k, handle = ctypes.WinDLL("kernel32"), ctypes.c_void_p
+        k.CreateJobObjectW.restype, k.CreateJobObjectW.argtypes = handle, [ctypes.c_void_p, ctypes.c_wchar_p]
+        k.AssignProcessToJobObject.argtypes = [handle, handle]
+        k.TerminateJobObject.argtypes = [handle, ctypes.c_uint]
+        k.CloseHandle.argtypes = [handle]
+        _KERNEL32 = k
+    return _KERNEL32
+
+
+def tree_handle(proc):
+    """What kill_tree needs to end a started process with its descendants.
+
+    On Windows it is a new Job Object holding the process (None when it cannot be made). Elsewhere
+    the process leads its own process group (see Launcher.start), and nothing more is needed.
     """
-    counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
-    state = {"best": None, "failure": ""}
-    results, tried = [], set()
-    scored, steered = {}, []  # scored: seed to its Score. steered: seeds that match only through steering
-
-    def attempt(seed):
-        """Score one candidate. True when it is a natural match, which ends the round."""
-        tried.add(seed)
-        vector = template.vector(seed)
-        s = scored[seed] = score(template.render(vector))
-        counts["guardrail" if s.result == "guardrail" else "compiled"] += 1
-        counts["build_fail"] += s.result == "build-fail"
-        results.append({"seed": seed, "code": template.code(vector), "result": s.result,
-                        "differ_bytes": s.differ_bytes, "object": fingerprint()})
-        if rank(s) is None:
-            state["failure"] = state["failure"] or s.log
-        elif state["best"] is None or rank(s) < rank(state["best"]["score"]):
-            state["best"] = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
-        if s.result != "bytes-match":
-            return False
-        if template.steering(vector):
-            steered.append(seed)  # a match that needs steering: keep looking for a natural one
-            return False
-        state["best"] = {"seed": seed, "score": s, "window": window(report, s.first_differ)}
-        return True
-
-    def finish(end):
-        return end, state["best"] or {"failure": state["failure"]}, counts, results
-
-    for seed in one_change(template, boost):
-        if attempt(seed):
-            return finish("match")
-    inert = inert_choices(template, results)
-    frozen = {i for i, c in enumerate(template.choices) if c.label in inert}
-    for seed in candidates(template, boost):
-        if seed in tried or any(pick for i, pick in enumerate(template.vector(seed)) if i in frozen):
-            continue
-        if attempt(seed):
-            return finish("match")
-    if steered:
-        seed = reduce_steering(template, steered, scored, attempt)
-        state["best"] = {"seed": seed, "score": scored[seed], "window": []}
-        return finish("match")
-    return finish("exhausted")
+    if os.name != "nt":
+        return None
+    try:
+        k = kernel32()
+        job = k.CreateJobObjectW(None, None)
+        if job and not k.AssignProcessToJobObject(job, int(proc._handle)):
+            k.CloseHandle(job)
+            job = None
+        return job
+    except (OSError, AttributeError):
+        return None
 
 
-def reduce_steering(template, seeds, scored, attempt):
+def kill_tree(proc, job):
+    """Kill a process and every descendant. Killing only proc would leave a compiler running, holding the worker's files."""
+    if os.name != "nt":
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    elif job:
+        kernel32().TerminateJobObject(job, 1)
+    else:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+class Launcher:
+    """How a search block runs its adapters, standing where `check` passes doctor's Environment.
+
+    It starts a command without the host's shell and falls back to the shell when the command
+    needs one. It kills a run that hangs, as a whole process tree. It keeps the compile times that
+    set the hang limit. Its counters are read after the block.
+    """
+
+    def __init__(self, environment, settings, workers):
+        self.vars, self.settings, self.workers = environment.vars, settings, workers
+        self.lock = threading.Lock()
+        self.times, self.programs = [], {}
+        self.killed = self.shell = 0
+
+    def sample(self, seconds):
+        """Note the time one passing compile took."""
+        with self.lock:
+            self.times.append(seconds)
+
+    def limit(self):
+        """Seconds a run may take before it counts as hung."""
+        s = self.settings
+        with self.lock:
+            if len(self.times) < 2 * self.workers:
+                return s["hang_start_s"]
+            return max(s["hang_floor_s"], s["hang_factor"] * statistics.median(self.times[-512:]))
+
+    def direct(self, command, cwd):
+        """How to start a filled command with no shell: (Popen args, program file), or None when it needs the shell.
+
+        It needs the shell for a character the shell reads (`%VAR%`, `&&`, a redirection), and for a
+        program that is no executable file: a `.cmd` or `.bat` tool, or a shell builtin.
+        """
+        if SHELL_ONLY.search(command):
+            return None
+        try:
+            words = shlex.split(command, posix=os.name != "nt")
+        except ValueError:
+            return None
+        program = words[0].strip('"') if words else ""
+        if not program or "=" in program:
+            return None
+        with self.lock:
+            if program not in self.programs:
+                named = os.path.join(cwd, program) if os.path.dirname(program) else program
+                found = shutil.which(named, path=self.vars.get("PATH"))
+                if found and os.name == "nt" and not found.lower().endswith((".exe", ".com")):
+                    found = None
+                self.programs[program] = found
+            found = self.programs[program]
+        if not found:
+            return None
+        # Windows hands the command line over as written: the program splits it as it would under cmd.exe.
+        return (command, found) if os.name == "nt" else (words, None)
+
+    def start(self, args, cwd, executable=None, shell=False):
+        return subprocess.Popen(args, executable=executable, shell=shell, cwd=cwd, env=self.vars,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, errors="replace", start_new_session=os.name != "nt")
+
+    def run(self, command, cwd):
+        """Run one filled adapter command to its end or the hang limit. Returns it as subprocess.run would."""
+        proc, direct = None, self.direct(command, cwd)
+        if direct:
+            with contextlib.suppress(OSError):
+                proc = self.start(direct[0], cwd, executable=direct[1])
+        if proc is None:
+            proc = self.start(command, cwd, shell=True)
+            with self.lock:
+                self.shell += 1
+        job, limit = tree_handle(proc), self.limit()
+        try:
+            out, err = proc.communicate(timeout=limit)
+            return subprocess.CompletedProcess(command, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            kill_tree(proc, job)
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:  # a survivor still holds the pipes: leave them
+                out, err = "", ""
+            with self.lock:
+                self.killed += 1
+            return subprocess.CompletedProcess(command, -9, out or "", f"{err or ''}\nkilled: still running after {limit:.1f} s")
+        finally:
+            if job:
+                kernel32().CloseHandle(job)
+
+
+class Block:
+    """One block's running state, shared by its workers under one lock: what was tried, and when to end.
+
+    A block ends on, first that holds: a natural match; `abort-buildfail`, when most of its first builds
+    fail; `exhausted`, when no candidate is left or nearly all of the last ones were repeats; `plateau`,
+    when scored candidates stopped bringing a new best score or a new object; and `deadline`.
+
+    The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
+    group most likely first. The rest waits for the sweep's last result: a choice point whose
+    alternatives all gave the baseline's object is inert, and stays at its first alternative from
+    then on. A match that needs steering does not end the block: it is kept while the rest is tried
+    for a natural one (see run_block). boost is the history's (see candidates).
+    """
+
+    def __init__(self, template, settings, workers, ceiling, boost=None):
+        self.template, self.settings, self.workers, self.ceiling = template, settings, workers, ceiling
+        self.boost = boost
+        self.lock = threading.Condition()
+        self.sweep = collections.deque(one_change(template, boost))  # the opening seeds, not yet handed out
+        self.swept = set(self.sweep)
+        self.pending = set(self.sweep)  # the opening seeds with no result yet
+        self.seeds = None  # the seeds after the sweep, made when its results are in
+        self.by_seed = {}  # seed to its result, for every candidate tried
+        self.steered, self.natural = [], None  # seeds that match only through steering; the natural match
+        self.start = time.perf_counter()  # monotonic and fine-grained: the wall clock steps about 15 ms on Windows
+        self.end = self.best = self.error = None
+        self.results, self.failure = [], ""
+        self.counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
+        self.early = []  # the first 2 x workers builds: whether each failed
+        self.recent = collections.deque(maxlen=max(1, int(settings["repeat_window"])))  # per candidate: was it a repeat
+        self.scored = self.since_gain = 0
+
+    def elapsed(self):
+        return time.perf_counter() - self.start
+
+    def due(self):
+        """Whether the deadline has come: past the floor (its seconds and its compiles both), or at the ceiling."""
+        s, t = self.settings, self.elapsed()
+        if s["deadline_s"]:
+            return t >= s["deadline_s"]
+        return t >= s["floor_s"] and (self.counts["compiled"] >= s["floor_compiles"] or t >= self.ceiling)
+
+    def take(self):
+        """The next seed for a worker, or None when the block has ended."""
+        with self.lock:
+            while True:
+                if self.end:
+                    return None
+                if self.due():
+                    self.end = "deadline"
+                    return None
+                if self.sweep:
+                    return self.sweep.popleft()
+                if not self.pending:
+                    break
+                self.lock.wait(0.05)  # the sweep's last builds are still out: what is inert is not known yet
+            if self.seeds is None:
+                self.seeds = self.rest()
+            seed = next(self.seeds, None)
+            if seed is None:
+                self.end = "exhausted"
+            return seed
+
+    def rest(self):
+        """The seeds after the sweep: the space, most likely first, less the sweep and every candidate that varies
+        an inert choice point. Call with the lock held, the sweep's results in."""
+        t = self.template
+        inert = inert_choices(t, self.results)
+        frozen = {i for i, c in enumerate(t.choices) if c.label in inert}
+        return (seed for seed in candidates(t, self.boost)
+                if seed not in self.swept and not any(pick for i, pick in enumerate(t.vector(seed)) if i in frozen))
+
+    def mostly_failing(self):
+        return bool(self.early) and sum(self.early) > self.settings["buildfail_frac"] * len(self.early)
+
+    def record(self, seed, e, how, new_object):
+        """Count one tried candidate and end the block when a rule says so.
+
+        e is its Memo entry; how is `built`, `cached`, `repeat`, or `refused`; new_object says
+        whether its object was not seen before in this round.
+        """
+        s = self.settings
+        score = Score(e["r"], e["d"], e.get("log", ""), e.get("f"))
+        vector = self.template.vector(seed)
+        with self.lock:
+            self.results.append({"seed": seed, "code": self.template.code(vector), "result": score.result,
+                                 "differ_bytes": score.differ_bytes, "object": e.get("o")})
+            self.by_seed[seed] = score.result
+            self.pending.discard(seed)
+            self.lock.notify_all()
+            self.counts["guardrail"] += score.result == "guardrail"
+            self.counts["compiled"] += how == "built"
+            self.counts["build_fail"] += score.result == "build-fail"
+            gain = new_object
+            if rank(score) is None:
+                self.failure = self.failure or score.log
+            elif self.best is None or (rank(score), seed) < (rank(self.best["score"]), self.best["seed"]):
+                gain = gain or self.best is None or rank(score) < rank(self.best["score"])
+                self.best = {"seed": seed, "score": score, "window": e.get("w", [])}
+            if score.result == "bytes-match" and self.template.steering(vector):
+                self.steered.append(seed)  # a match that needs steering: keep looking for a natural one
+            elif score.result == "bytes-match":
+                if self.natural is None or seed < self.natural["seed"]:
+                    self.natural = {"seed": seed, "score": score, "window": e.get("w", [])}
+                self.end = "match"  # even over an end another worker has set: the match is in hand
+                return
+            self.recent.append(how == "repeat")
+            if how == "built" and len(self.early) < 2 * self.workers:
+                self.early.append(score.result == "build-fail")
+                if len(self.early) == 2 * self.workers and self.mostly_failing():
+                    self.end = self.end or "abort-buildfail"
+            if how in ("built", "cached"):
+                self.scored += 1
+                self.since_gain = 0 if gain else self.since_gain + 1
+            if len(self.recent) == self.recent.maxlen and sum(self.recent) > s["repeat_frac"] * len(self.recent):
+                self.end = self.end or "exhausted"
+            if self.since_gain >= max(s["plateau_compiles"], s["plateau_frac"] * self.scored, 1):
+                self.end = self.end or "plateau"
+
+    def attempt(self, seed, memo, worker):
+        """Score one candidate in the worker's own folder and record it."""
+        text = self.template.render(self.template.vector(seed))
+        try:
+            found = memo.entry(text, worker)
+        except OSError as err:  # a file of the worker's stayed locked: this candidate is lost, not the block
+            found = {"r": "build-fail", "d": None, "log": str(err)}, "built", False
+        self.record(seed, *found)
+
+    def result(self, seed, memo, worker):
+        """A candidate's result, scored now when the block did not try it."""
+        if seed not in self.by_seed:
+            self.attempt(seed, memo, worker)
+        return self.by_seed[seed]
+
+    def work(self, memo, worker):
+        """One worker's loop: take a seed, score it, record it."""
+        try:
+            while True:
+                seed = self.take()
+                if seed is None:
+                    return
+                self.attempt(seed, memo, worker)
+        except BaseException as err:  # raised again by run_block, on the main thread
+            with self.lock:
+                self.error, self.end = self.error or err, self.end or "stopped"
+
+
+def run_block(template, memo, workers, settings, ceiling, boost=None):
+    """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
+
+    Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
+    its next candidate only when it is free, so a later candidate can use every earlier result.
+    best is a dict: seed, score, and diff window of the closest candidate (the lowest seed among
+    equals), or only the first failure log when no candidate was scored. results holds one record
+    per candidate tried, by seed.
+    A block that ends with no natural match but with one that needs steering ends as a match: the
+    steered match, reduced to the steering it needs.
+    """
+    block = Block(template, settings, len(workers), ceiling, boost)
+    threads = [threading.Thread(target=block.work, args=(memo, w), daemon=True) for w in workers]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    if block.error:
+        raise block.error
+    end, best = block.end, block.best or {"failure": block.failure}
+    if end == "exhausted" and block.mostly_failing():  # the space ran out before 2 x workers builds were in
+        end = "abort-buildfail"
+    if block.natural:
+        best = block.natural
+    elif block.steered:
+        seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]))
+        end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
+    block.counts.update(workers=len(workers), wall_s=round(block.elapsed(), 2))
+    return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
+
+
+def reduce_steering(template, seeds, result):
     """The seed of the steered match that keeps the fewest steer choices, each flipped to a natural alternative where
-    the match survives it. Candidates already scored are not built again."""
+    the match survives it. result gives a seed's result, building only a candidate not scored before."""
     seed = min(seeds, key=lambda s: len(template.steering(template.vector(s))))
     vector = template.vector(seed)
     for i, _ in template.steering(vector):
@@ -2319,10 +2634,7 @@ def reduce_steering(template, seeds, scored, attempt):
             if steer(template.choices[i], pick) is not None:
                 continue
             flipped = vector[:i] + [pick] + vector[i + 1:]
-            at = template.seed(flipped)
-            if at not in scored:
-                attempt(at)
-            if scored[at].result == "bytes-match":
+            if result(template.seed(flipped)) == "bytes-match":
                 vector = flipped
                 break
     return template.seed(vector)
@@ -2475,47 +2787,66 @@ class Memo:
     Order for one candidate: the source seen this round, the source in the cache, a refusal by the
     guardrails, the build, the object known to the cache (with `function` hashing: the function's bytes
     as the diff adapter reports them in `function_sha256`, known after the diff), and last the diff.
-    A call returns a Score and leaves the diff window of the result at the worker's report, as
-    Worker.score does.
+    A block's workers share one Memo. A source two workers hold at once is built by the first, and
+    the other waits for that result.
     """
 
-    def __init__(self, worker, cache, ctx, hashing):
-        self.worker, self.cache, self.ctx, self.hashing = worker, cache, ctx, hashing
-        self.seen, self.objects = {}, set()
-        self.last = None  # the object key of the last candidate scored, for the round's inert-choice check
-        self.src_hits = self.cache_hits = self.object_hits = self.served = 0
+    def __init__(self, cache, ctx, hashing):
+        self.cache, self.ctx, self.hashing = cache, ctx, hashing
+        self.lock = threading.Lock()
+        self.seen, self.objects = {}, set()  # seen: source key to its entry, or to an Event while a worker builds it
+        self.src_hits = self.cache_hits = self.object_hits = 0
 
     def key(self, kind, data):
         h = hashlib.sha256(self.ctx.encode() + b"\0" + kind.encode() + b"\0")
         h.update(data if isinstance(data, bytes) else data.encode())
         return h.hexdigest()
 
-    def reply(self, e):
-        self.worker.report.write_text("\n".join(e.get("w", [])), encoding="utf-8")
-        self.last = e.get("o")
-        if e.get("o"):
+    def new_object(self, e):
+        """Whether the entry's object is the first of its hash this round. Call with the lock held."""
+        new = bool(e.get("o")) and e["o"] not in self.objects
+        if new:
             self.objects.add(e["o"])
-        return Score(e["r"], e["d"], e.get("log", ""), e.get("f"))
+        return new
 
-    def __call__(self, text):
+    def entry(self, text, worker):
+        """One candidate's result, built in worker's folder when it is unseen. Returns (entry, how, new object).
+
+        The entry holds the result `r`, the differing bytes `d`, a failure `log`, the diff window `w`,
+        and the object key `o`. how is `repeat` (the source was tried this round), `cached` (served
+        from the result cache), `refused` (by the guardrails), or `built`.
+        """
         skey = self.key("src", source_bytes(text))
-        if skey in self.seen:
-            self.src_hits += 1
-            self.served += self.seen[skey]["r"] != "guardrail"
-            return self.reply(self.seen[skey])
-        if skey in self.cache["src"]:
-            self.cache_hits += 1
-            self.served += 1
-            self.seen[skey] = self.cache["src"][skey]
-            return self.reply(self.seen[skey])
-        e = self.fresh(text)
-        self.seen[skey] = e
-        if e["r"] in ("differ", "bytes-match"):
-            self.cache["src"][skey] = e
-        return self.reply(e)
+        while True:
+            with self.lock:
+                e = self.seen.get(skey)
+                if e is None and skey in self.cache["src"]:
+                    e = self.seen[skey] = self.cache["src"][skey]
+                    self.cache_hits += 1
+                    return e, "cached", self.new_object(e)
+                if e is None:
+                    building = self.seen[skey] = threading.Event()
+                    break
+                if not isinstance(e, threading.Event):
+                    self.src_hits += 1
+                    return e, "repeat", False
+            e.wait()
+        try:
+            e = self.fresh(text, worker)
+        except BaseException:
+            with self.lock:
+                del self.seen[skey]
+            building.set()
+            raise
+        with self.lock:
+            self.seen[skey] = e
+            if e["r"] in ("differ", "bytes-match"):
+                self.cache["src"][skey] = e
+            new = self.new_object(e)
+        building.set()
+        return e, "refused" if e["r"] == "guardrail" else "built", new
 
-    def fresh(self, text):
-        w = self.worker
+    def fresh(self, text, w):
         refused = w.refuse(text)
         if refused:
             return {"r": refused.result, "d": None, "log": refused.log}
@@ -2525,19 +2856,21 @@ class Memo:
         okey = None
         if self.hashing == "object" and os.path.exists(obj):
             okey = self.key("obj", file_sha(obj).encode())
-            if okey in self.cache["obj"]:
-                self.object_hits += 1
-                return dict(self.cache["obj"][okey], o=okey)
+            with self.lock:
+                if okey in self.cache["obj"]:
+                    self.object_hits += 1
+                    return dict(self.cache["obj"][okey], o=okey)
         fields = {}
         s = w.diff(obj, fields)
         e = {"r": s.result, "d": s.differ_bytes, "log": s.log, "w": window(w.report, s.first_differ), "f": s.first_differ}
         if self.hashing == "function" and isinstance(fields.get("function_sha256"), str):
             okey = self.key("fn", fields["function_sha256"].encode())
-            if okey in self.cache["obj"]:
+        with self.lock:
+            if self.hashing == "function" and okey in self.cache["obj"]:
                 self.object_hits += 1
-        if okey and e["r"] in ("differ", "bytes-match"):
-            e["o"] = okey
-            self.cache["obj"][okey] = e
+            if okey and e["r"] in ("differ", "bytes-match"):
+                e["o"] = okey
+                self.cache["obj"][okey] = e
         return e
 
     def counts(self):
@@ -2549,6 +2882,18 @@ class Memo:
 def search_dir(tid):
     """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
     return checkout_dir() / "search" / tid
+
+
+def model_latency(state):
+    """Seconds since the ticket's last round ended on this machine: the time the model took. None when unknown.
+
+    This one timing is by the wall clock, because it spans two runs of the tool.
+    """
+    try:
+        took = time.time() - float((state / "ended").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return took if took >= 0 else None
 
 
 ROUND_EVIDENCE = "template-round: "  # starts the evidence line of an attempt `verify` recorded as a template round
@@ -2639,25 +2984,31 @@ def cmd_search(a):
     if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
         die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
             "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
+    settings = search_settings()
+    state = search_dir(t["id"])
+    latency = model_latency(state)
+    ceiling = settings["ceiling_s"] if latency is None else min(latency, settings["ceiling_s"])
+    count = max(1, min(int(settings["workers"]) or os.cpu_count() or 1, template.space()))
+    launcher = Launcher(environment, settings, count)
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
-        worker = Worker(Path(scratch) / "w0", environment, t, compiler, tree, text)
+        workers = [Worker(Path(scratch) / f"w{i}", launcher, t, compiler, tree, text) for i in range(count)]
         cache, ctx = load_cache(), search_context(t, compiler, tree, text)
-        spare = Worker(Path(scratch) / "w1", environment, t, compiler, tree, text) if ctx not in cache["stable"] else None
+        spare = None
+        if ctx not in cache["stable"]:
+            spare = workers[1] if count > 1 else Worker(Path(scratch) / "spare", launcher, t, compiler, tree, text)
         baseline = template.render(template.vector(0))
-        hashing = "object" if objects_repeat(worker, spare, baseline, cache, ctx) else "function"
-        memo = Memo(worker, cache, ctx, hashing)
+        hashing = "object" if objects_repeat(workers[0], spare, baseline, cache, ctx) else "function"
+        memo = Memo(cache, ctx, hashing)
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
         category = (trail(t["id"]) or [{}])[-1].get("category")
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
-        end, best, counts, results = run_round(template, memo, worker.report, lambda: memo.last, boost)
-        counts["compiled"] -= memo.served
-        counts.update(memo.counts())
+        end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
+        counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
         save_cache(cache)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    state = search_dir(t["id"])
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
@@ -2667,6 +3018,7 @@ def cmd_search(a):
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
     print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category))))
+    (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
 
 def search_detail(t, code):
