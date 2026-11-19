@@ -2012,7 +2012,8 @@ def test_search_without_a_match_returns_the_closest_candidate_as_exhausted(base)
     expect(r.returncode == 0 and out is not None, "search should print a summary", r)
     expect(out["end"] == "exhausted" and out["best"] == {"code": "A1 B0", "differ_bytes": 4},
            "the summary should name the candidate with the fewest differing bytes", r)
-    expect(out["counts"] == {"space": 4, "compiled": 4, "build_fail": 0, "guardrail": 0}, "every candidate is built", r)
+    expect({k: out["counts"][k] for k in ("space", "compiled", "build_fail", "guardrail")}
+           == {"space": 4, "compiled": 4, "build_fail": 0, "guardrail": 0}, "every candidate is built", r)
     expect("winner" not in out, "a round without a match writes no winner", r)
 
 
@@ -2075,6 +2076,66 @@ def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
     expect(not (p.root / "ledger").exists(), "search records nothing in the ledger")
     expect(p.git("status", "--porcelain") == "" and p.git("diff", "--name-only", "decomp-setup") == "",
            "nothing tracked or frozen changed, and nothing new sits in the tree")
+
+
+# A counting fake compiler: it logs every build to a file, and with STAMP it writes a changing timestamp
+# into each object. The matching fake diff reports the function's bytes (the object without comments,
+# white space, or the stamp) as `function_sha256`.
+COUNT_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src).read()
+open(log, "a").write("build" + chr(10))
+open(obj, "w").write(text + (chr(10) + "STAMP " + str(time.time_ns()) if "STAMP" in sys.argv[4:] else ""))
+"""
+COUNT_DIFF_PY = """import hashlib, json, re, sys
+body = re.sub(r"/[*].*?[*]/|STAMP .*", "", open(sys.argv[1]).read(), flags=re.S)
+body = "".join(body.split())
+n = body.count("WRONG")
+open(sys.argv[2], "w").write("report" + chr(10))
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+"""
+TWINS = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_a;) PERM_GENERAL(int WRONG_b;, int WRONG_c;) return 1; }\n"
+COMMENTED = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_a; /* the same bytes */) return 1; }\n"
+
+
+def counting_project(base, stamp=False):
+    log = Path(base) / "builds.log"
+    build = PY + f' "{{tools}}/count_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"' + (" STAMP" if stamp else "")
+    p = search_project(base, config={"build": build, "diff": PY + ' "{tools}/count_diff.py" "{obj}" "{report}"'},
+                       files={"tools/count_build.py": COUNT_BUILD_PY, "tools/count_diff.py": COUNT_DIFF_PY})
+    return p, lambda: len(log.read_text().splitlines()) if log.exists() else 0
+
+
+def test_search_compiles_alternatives_with_identical_source_once(base):
+    p, builds = counting_project(base)
+    r, out = search(p, TWINS)
+    expect(out is not None and out["counts"]["space"] == 4, "the template has four candidates", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 2,
+           f"two of the four share a source with another: {out['counts']}", r)
+    expect(out["counts"]["unique_objects"] == 2 and out["counts"]["hashing"] == "object", "two distinct objects", r)
+
+
+def test_search_serves_a_second_round_with_the_same_template_from_the_cache(base):
+    p, builds = counting_project(base)
+    r, first = search(p, TWINS)
+    built = builds()
+    r, again = search(p, TWINS)
+    expect(again is not None and again["counts"]["compiled"] == 0 and again["counts"]["cache_hits"] == 2,
+           f"the second round should build nothing: {again and again['counts']}", r)
+    expect(builds() == built, "no compiler ran in the second round, not even for the stability check", r)
+    expect(again["best"] == first["best"] and again["window"] == first["window"], "the cache keeps the result and window", r)
+    cache = p.root / ".decomp" / "search-cache.json"
+    expect(cache.exists() and p.git("status", "--porcelain") == "", "the cache sits under .decomp/ and is not committed", r)
+
+
+def test_search_hashes_function_bytes_when_the_compiler_stamps_its_objects(base):
+    p, builds = counting_project(base, stamp=True)
+    r, out = search(p, COMMENTED)
+    expect(out is not None and out["counts"]["hashing"] == "function", f"the stamp should be detected: {out}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["unique_objects"] == 1,
+           "two sources with the same function bytes are one object", r)
+    r, again = search(p, COMMENTED)
+    expect(again["counts"]["compiled"] == 0 and again["counts"]["hashing"] == "function", "and the cache still serves them", r)
 
 
 # ---------- check trail and the template-search gate ----------
