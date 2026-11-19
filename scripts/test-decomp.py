@@ -14,7 +14,9 @@ function names) to run only the matching cases, for example:
 python scripts/test-decomp.py verify
 """
 import hashlib
+import itertools
 import json
+import math
 import os
 import shutil
 import stat
@@ -2742,6 +2744,106 @@ def test_search_refuses_an_unknown_override_in_local_json(base):
     r, out = search(p, MATCHING)
     expect(r.returncode == 1 and out is None and "deadline" in r.stderr and "deadline_s" in r.stderr,
            "a misspelt override is named with the ones that exist", r)
+
+
+# A fake diff where two alternatives only help together: tag_b2 with tag_d2 takes 6 bytes off, either alone none.
+PAIR_DIFF_PY = """import json, sys
+text = open(sys.argv[1]).read()
+n = 2 * text.count("WRONG") - (6 if "tag_b2" in text and "tag_d2" in text else 0)
+open(sys.argv[2], "w").write("report" + chr(10))
+print(json.dumps({"match": n == 0, "differ_bytes": n}))
+"""
+
+
+def grid(n, weight=lambda i, a: "", alternatives=3):
+    """A template of n choice points whose alternative a of choice point c holds tag_<c><a>, a weight before it, and one WRONG."""
+    return in_function(" ".join(
+        "PERM_GENERAL(" + ", ".join(f"{weight(i, a)} tag_{chr(97 + i)}{a} WRONG_x".strip() for a in range(alternatives)) + ")"
+        for i in range(n)))
+
+
+def sampled_search(base, template, files=None, config=None, **constants):
+    """Search with one worker and a compiler that logs its order. Returns (process, summary, the candidates built, in order)."""
+    log = Path(base) / "order.log"
+    p = search_project(base, config=config or {},
+                       files=dict({"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))}, **(files or {})))
+    tune(p, workers=1, **constants)  # one worker builds in the order the candidates come
+    r, out = search(p, template)
+    expect(out is not None, "search should print a summary", r)
+    return r, out, log.read_text().splitlines()[-out["counts"]["compiled"]:]
+
+
+def test_search_samples_in_the_same_order_on_every_run_with_one_seed(base):
+    runs = [sampled_search(sub(base, name), grid(6), budget=120, **kw)
+            for name, kw in (("a", {}), ("b", {}), ("c", {"seed": 7}))]
+    (r, out, first), (_, _, again), (_, _, other) = runs
+    c = out["counts"]
+    expect(c["space"] == 729 and c["compiled"] == 120 and out["end"] == "deadline", f"the budget ends the block: {out}", r)
+    expect(c["sampled"] == 120 - 13 and len(set(first)) == 120, f"13 open the round, the rest are sampled, none twice: {c}", r)
+    expect(first == again, "one seed should give one order")
+    expect(first[:13] == other[:13] and first != other, "another seed should give another order after the sweep")
+
+
+def test_search_samples_a_high_likelihood_combination_before_a_low_one(base):
+    r, out, order = sampled_search(base, grid(6, lambda i, a: ("%0.3", "%0.6", "%0.1")[a]), budget=120)
+    expect(order[13] == " ".join(f"tag_{c}1" for c in "abcdef"),
+           f"the likeliest combination should be the first one sampled: {order[13:16]}", r)
+    picks = " ".join(order[13:]).split()
+    high, low = sum(x.endswith("1") for x in picks), sum(x.endswith("2") for x in picks)
+    expect(high > low, f"the likelier alternative should be sampled more: {high} against {low}", r)
+
+
+def test_search_samples_a_natural_alternative_before_a_steering_one_at_equal_likelihood(base):
+    template = grid(6, lambda i, a: ("%0.2", "%0.4", "/* steer: pin it */ %0.4")[a])
+    r, out, order = sampled_search(base, template, config={"fakematch": "allowed"}, budget=60)
+    natural, steering = (" ".join(f"tag_{c}{a}" for c in "abcdef") for a in (1, 2))
+    expect(order[13] == natural, f"the first combination sampled should be the natural one: {order[13]}", r)
+    expect(steering not in order or order.index(steering) > 13, "the steering combination comes after it", r)
+    singles = [x for line in order[1:13] for x in line.split() if not x.endswith("0")]
+    expect([x[-1] for x in singles] == ["1"] * 6 + ["2"] * 6, f"the sweep tries the natural alternatives first: {singles}", r)
+
+
+def test_search_finds_a_pair_that_only_helps_together_against_the_priors(base):
+    away = grid(6, lambda i, a: "%0.02" if a == 2 and i in (1, 3) else "%0.49")
+    r, out, order = sampled_search(base, away, files={"tools/search_diff.py": PAIR_DIFF_PY}, budget=120)
+    code = out["best"]["code"].split()
+    expect(out["best"]["differ_bytes"] == 6 and "B2" in code and "D2" in code, f"the best should hold the pair: {out['best']}", r)
+    expect(out["effects"] == [], f"neither alternative helps alone: {out['effects']}", r)
+    expect(out.get("pairs") and out["pairs"][0].startswith("B2+D2: -"), f"the summary should name the pair first: {out.get('pairs')}", r)
+    expect(len(out["pairs"]) <= 3, "at most three pairs are named", r)
+
+
+def test_search_with_a_budget_of_tens_of_compiles_covers_every_pair_of_alternatives(base):
+    weights = (0.5, 0.3, 0.2)
+    r, out, order = sampled_search(base, grid(5, lambda i, a: f"%{weights[a]}"), budget=40)
+    c = out["counts"]
+    opening = 11 + c["pairwise"]
+    expect(c["space"] == 243 and c["compiled"] == 40 and 0 < c["pairwise"] <= 29, f"the covering sample fits the budget: {c}", r)
+    held = {(x, y) for line in order[:opening] for x, y in itertools.combinations(line.split(), 2)}
+    expect(len(held) == 10 * 9, f"the sweep and the sample should hold all 90 pairs, they hold {len(held)}", r)
+    prior = [math.prod(weights[int(x[-1])] for x in line.split()) for line in order[11:opening]]
+    expect(prior == sorted(prior, reverse=True), f"the sample is tried likeliest first: {prior}", r)
+
+
+def test_search_makes_a_fifth_of_its_sampled_picks_exploratory(base):
+    r, out, order = sampled_search(base, grid(6, lambda i, a: ("%0.3", "%0.6", "%0.1")[a]), budget=150)
+    c = out["counts"]
+    expect(c["sampled"] == 150 - 13 and c["pairwise"] == 0, f"a budget of 150 samples without the covering opening: {c}", r)
+    expect(c["explored"] >= 0.2 * c["sampled"], f"{c['explored']} of {c['sampled']} picks were exploratory", r)
+    top = " ".join(f"tag_{x}1" for x in "abcdef")
+    expect(top not in order[14:], "no later pick repeats the best-ranked candidate", r)
+
+
+def test_search_tries_first_the_alternative_written_as_the_closest_solved_function_is(base):
+    other = "u0002-00402000"
+    files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
+             "src/u0002.c": f"// @decomp {other}\nint g(int n) {{ int k = 0; while (k < n) k++; return k; }}\n",
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated")}
+    template = in_function("int tag_a; PERM_GENERAL(tag_base = WRONG_x;, for (; tag_for < WRONG_n;) WRONG_k++;, "
+                           "while (tag_while < WRONG_n) WRONG_k++;)")
+    r, out, order = sampled_search(base, template, files=files)
+    expect([line.split()[1] for line in order] == ["tag_base", "tag_while", "tag_for"],
+           f"the spelling the solved function uses should be tried before the other: {order}", r)
 
 
 def rmtree(path):

@@ -15,6 +15,7 @@ import itertools
 import json
 import math
 import os
+import random
 import re
 import shlex
 import shutil
@@ -2136,6 +2137,310 @@ def inert_choices(template, results):
     return out
 
 
+# ---------- template search: the priors, and which candidates a block tries when it cannot try them all ----------
+
+EXPLORE_FRAC = 0.2  # of the sampled picks, the share made against the likelihoods, at least
+EXPLORE_DRAWS = 8  # random candidates an exploratory pick chooses among: the one holding the most untried pairs
+THOMPSON_DRAWS = 4  # draws a likelihood pick makes before it takes the likeliest untried candidate instead
+PRIOR_WEIGHT = 4.0  # the scored candidates a prior likelihood weighs as much as
+STEER_RANK = 0.9  # a steering alternative's likelihood in the sampler, against a natural one's of 1
+PAIRWISE_BELOW = 100  # a budget of fewer compiles than this opens with a pairwise covering sample,
+PAIRWISE_PAIRS = 4000  # unless the alternatives make more pairs than this: no such budget covers them
+SIMILAR_N = 3  # the closest matched functions a prior looks at
+SIMILAR_BONUS = 1.0  # an alternative written as a function of closeness c is written has its likelihood times 1 + this x c
+PAIR_ROWS = 3  # interacting pairs the summary names
+C_WORDS = frozenset("auto break case char const continue default do double else enum extern float for goto if int "
+                    "long register return short signed sizeof static struct switch typedef union unsigned void "
+                    "volatile while".split())
+SHAPE_TOKEN = re.compile(r"[A-Za-z_]\w*|\d[\w.]*|\S")
+MARKER = re.compile(r"(?://|/\*)[ \t]*@decomp ([\w.-]+)")
+
+
+def shape(text):
+    """Source as its shape, one token per word: keywords and punctuation kept, any other name as I, any number as N."""
+    return " ".join(w if w in C_WORDS or not (w[0].isalnum() or w[0] == "_") else "N" if w[0].isdigit() else "I"
+                    for w in SHAPE_TOKEN.findall(lexed(text)[0]))
+
+
+def closest_solved(t, n=SIMILAR_N):
+    """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
+
+    A function's source is its unit's text from its marker to the next marker. One that cannot be
+    read is left out, as is every one when the ticket's own expected bytes are missing.
+    """
+    try:
+        mine = grams((ROOT / t["expected"]).read_bytes())
+    except OSError:
+        return []
+    scored = []
+    for o in all_tickets():
+        if o["status"] not in MATCHED or o["id"] == t["id"]:
+            continue
+        try:
+            g = grams((ROOT / o["expected"]).read_bytes())
+            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        marks = list(MARKER.finditer(text))
+        at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
+        if mine and g and at is not None:
+            end = marks[at + 1].start() if at + 1 < len(marks) else len(text)
+            scored.append((len(mine & g) / len(mine | g), o["id"], text[marks[at].end():end]))
+    return [(s, text) for s, _, text in sorted(scored, key=lambda x: (-x[0], x[1]))[:n]]
+
+
+def with_similar(template, near):
+    """The template with each likelihood raised where the alternative is written as the closest solved functions are.
+
+    near is closest_solved's. An alternative gets the bonus when its shape, two tokens or more, stands
+    in such a function, by that function's closeness. A choice point whose alternatives all get the
+    same bonus is left alone: the functions say nothing about it.
+    """
+    near = [(s, f" {shape(text)} ") for s, text in near if s > 0]
+    parts = []
+    for p in template.parts:
+        if near and isinstance(p, Choice):
+            shapes = [shape(a) for a in p.alternatives]
+            bonus = [max((s for s, text in near if x.count(" ") and f" {x} " in text), default=0.0) for x in shapes]
+            if len(set(bonus)) > 1:
+                weights = p.likelihoods or [1.0] * len(shapes)
+                p = p._replace(likelihoods=[w * (1 + SIMILAR_BONUS * b) for w, b in zip(weights, bonus)])
+        parts.append(p)
+    return Template(parts)
+
+
+def unfrozen_first(template, frozen, boost=None):
+    """Every seed that keeps the choice points labelled in frozen at their first alternative, likeliest first, lazily."""
+    narrow = Template([p._replace(alternatives=p.alternatives[:1], likelihoods=None, steers=())
+                       if isinstance(p, Choice) and p.label in frozen else p for p in template.parts])
+    return (template.seed(narrow.vector(seed)) for seed in most_likely_first(narrow, boost))
+
+
+class Sampler:
+    """Picks the candidates of a space too large to try whole: best-first from the priors, learning as results come.
+
+    Each alternative of a free (not frozen) choice point holds a Beta belief that it helps. Its prior
+    mean is its likelihood's share of its choice point's (history and closeness to solved functions
+    are already in the likelihoods; a steering alternative's counts STEER_RANK, so at equal
+    likelihood the natural one ranks above it), weighing PRIOR_WEIGHT results. A scored candidate
+    moves the belief of every alternative it holds by how far its differing bytes fall below the
+    baseline's (toward helps) or rise above (toward hurts); a candidate that does not build counts
+    as the worst.
+
+    The first pick is the likeliest untried candidate. After it a pick is Thompson sampling: one draw
+    from each belief, the highest draw of each choice point taken. At least EXPLORE_FRAC of the picks
+    are exploratory instead: uniform at random, never the candidate of every top-ranked alternative,
+    and of EXPLORE_DRAWS the one holding the most pairs of alternatives no tried candidate held,
+    so a pair that only helps together is reached even when the priors point away from it.
+    Every pick is a candidate not tried before, built only from the template's alternatives.
+    """
+
+    def __init__(self, template, frozen, tried, boost, rng):
+        self.template, self.rng = template, rng
+        self.free = [i for i, c in enumerate(template.choices) if c.label not in frozen]
+        self.sizes = [len(c.alternatives) for c in template.choices]
+        self.prior = []
+        for c, weights in zip(template.choices, likelihoods(template, boost)):
+            weights = [w * (STEER_RANK if steer(c, a) is not None else 1.0) for a, w in enumerate(weights)]
+            self.prior.append([w / sum(weights) for w in weights])
+        self.helped = [[0.0] * n for n in self.sizes]
+        self.hurt = [[0.0] * n for n in self.sizes]
+        self.tried, self.covered = set(), set()  # seeds handed out; the pairs of alternatives they hold
+        self.left = math.prod(self.sizes[i] for i in self.free)  # candidates of the free space not tried
+        self.likely = unfrozen_first(template, frozen, boost)
+        self.read, self.base = 0, None  # results learnt from; the differing bytes they are judged against
+        self.picks = self.explored = 0
+        for seed in tried:
+            self.mark(seed)
+
+    def pairs(self, vector):
+        return [(i, vector[i], j, vector[j]) for i, j in itertools.combinations(self.free, 2)]
+
+    def in_space(self, vector):
+        return not any(pick for i, pick in enumerate(vector) if i not in self.free)
+
+    def mark(self, seed):
+        """Count a seed as tried."""
+        vector = self.template.vector(seed)
+        if seed not in self.tried and self.in_space(vector):
+            self.tried.add(seed)
+            self.left -= 1
+            self.covered.update(self.pairs(vector))
+
+    def learn(self, results):
+        """Move the beliefs by the results not read before. The first call needs the baseline's result among them."""
+        scored = [r["differ_bytes"] for r in results if r["differ_bytes"] is not None and r["differ_bytes"] >= 0]
+        if self.base is None and scored:
+            first = next((r["differ_bytes"] for r in results if r["seed"] == 0), None)
+            self.base = first if first is not None and first >= 0 else scored[0]
+        for r in results[self.read:]:
+            vector, d = self.template.vector(r["seed"]), r["differ_bytes"]
+            if self.base is None or not self.in_space(vector):
+                continue
+            gain = -1.0 if d is None or d < 0 else (self.base - d) / max(self.base, d, 1)
+            for i in self.free:
+                (self.helped if gain > 0 else self.hurt)[i][vector[i]] += abs(gain)
+        self.read = len(results)
+
+    def belief(self, i, a):
+        """The Beta parameters of one alternative's belief."""
+        p = self.prior[i][a]
+        return PRIOR_WEIGHT * p + self.helped[i][a], PRIOR_WEIGHT * (1 - p) + self.hurt[i][a]
+
+    def top(self):
+        """Each choice point's top-ranked alternative by its belief's mean: together, the current best-ranked candidate."""
+        def mean(i, a):
+            helps, hurts = self.belief(i, a)
+            return helps / (helps + hurts)
+        return [max(range(n), key=lambda a, i=i: (mean(i, a), -a)) if i in self.free else 0
+                for i, n in enumerate(self.sizes)]
+
+    def explore(self):
+        """An untried candidate outside the best-ranked one, chosen for the untried pairs it holds. None when no draw gave one."""
+        top, best, most = self.top(), None, -1
+        for _ in range(EXPLORE_DRAWS):
+            vector = [self.rng.randrange(n) if i in self.free else 0 for i, n in enumerate(self.sizes)]
+            seed = self.template.seed(vector)
+            new = sum(1 for pair in self.pairs(vector) if pair not in self.covered)
+            if seed not in self.tried and vector != top and new > most:
+                best, most = seed, new
+        return best
+
+    def thompson(self):
+        """An untried candidate from one draw per belief. None when every draw gave a tried one."""
+        for _ in range(THOMPSON_DRAWS):
+            vector = [0] * len(self.sizes)
+            for i in self.free:
+                draws = [self.rng.betavariate(*self.belief(i, a)) for a in range(self.sizes[i])]
+                vector[i] = max(range(len(draws)), key=lambda a: (draws[a], -a))
+            seed = self.template.seed(vector)
+            if seed not in self.tried:
+                return seed
+        return None
+
+    def pick(self):
+        """The next seed to try, or None when the free space is spent."""
+        if self.left <= 0:
+            return None
+        seed = self.explore() if self.picks and self.explored < EXPLORE_FRAC * (self.picks + 1) else None
+        explored = seed is not None
+        if seed is None and self.picks:
+            seed = self.thompson()
+        if seed is None:
+            seed = next(s for s in self.likely if s not in self.tried)
+        self.picks += 1
+        self.explored += explored
+        self.mark(seed)
+        return seed
+
+
+def pairwise_cover(sampler):
+    """Seeds that between them hold every pair of alternatives of two free choice points, likeliest first.
+
+    A pair a tried candidate held needs no seed. Each seed starts from a pair still to cover and
+    gives every other choice point the alternative that covers the most further pairs (the likelier
+    one among equals). Returns None when the alternatives make more than PAIRWISE_PAIRS pairs.
+    """
+    free, sizes, prior = sampler.free, sampler.sizes, sampler.prior
+    if sum(sizes[i] * sizes[j] for i, j in itertools.combinations(free, 2)) > PAIRWISE_PAIRS:
+        return None
+    need = {(i, a, j, b) for i, j in itertools.combinations(free, 2)
+            for a in range(sizes[i]) for b in range(sizes[j])} - sampler.covered
+    rows = []
+    while need:
+        i, a, j, b = min(need)
+        held = {i: a, j: b}
+        for k in free:
+            if k not in held:
+                def covers(c, k=k):
+                    return sum(1 for m, at in held.items() if ((m, at, k, c) if m < k else (k, c, m, at)) in need)
+                held[k] = max(range(sizes[k]), key=lambda c, k=k: (covers(c), prior[k][c], -c))
+        vector = [held.get(k, 0) for k in range(len(sizes))]
+        need.difference_update(sampler.pairs(vector))
+        rows.append((-sum(math.log(prior[k][vector[k]]) for k in free), sampler.template.seed(vector)))
+    return [seed for _, seed in sorted(rows)]
+
+
+def block_budget(block):
+    """The compiles the block is expected to fit, from start to end. None when nothing tells.
+
+    `budget` in the block constants sets it. Otherwise it is the compile rate so far over the time
+    the deadline leaves; a block that has built nothing (every result came from the cache) has no rate.
+    """
+    s, built, t = block.settings, block.counts["compiled"], block.elapsed()
+    if s["budget"]:
+        return int(s["budget"])
+    if not built or t <= 0:
+        return None
+    rate = built / t
+    return int(rate * (s["deadline_s"] or max(s["floor_s"], min(s["floor_compiles"] / rate, block.ceiling))))
+
+
+def space_fits(block, inert):
+    """Whether the block can try every candidate the sweep left, the inert choice points frozen."""
+    budget = block_budget(block)
+    live = [len(c.alternatives) for c in block.template.choices if c.label not in inert]
+    left = math.prod(live) - 1 - sum(n - 1 for n in live)
+    return budget is None or left <= budget - block.counts["compiled"]
+
+
+def sampled(block, inert):
+    """The seeds after the sweep when the space does not fit the budget, chosen one at a time as results come.
+
+    First a pairwise covering sample, when the budget is under PAIRWISE_BELOW compiles; then the
+    Sampler's picks, each made from every result in so far. The random generator is seeded from
+    the block constants, so one worker tries the same candidates in the same order on every run.
+    Take each seed with the block's lock held. The counts gain `budget`, `pairwise`, `sampled`, and `explored`.
+    """
+    sampler = Sampler(block.template, set(inert), block.swept, block.boost, random.Random(int(block.settings["seed"])))
+    budget = block_budget(block)
+    block.counts.update(budget=budget, pairwise=0, sampled=0, explored=0)
+    for seed in (pairwise_cover(sampler) or []) if budget < PAIRWISE_BELOW else []:
+        sampler.mark(seed)
+        block.counts["pairwise"] += 1
+        yield seed
+    while True:
+        sampler.learn(block.results)
+        seed = sampler.pick()
+        if seed is None:
+            return
+        block.counts.update(sampled=sampler.picks, explored=sampler.explored)
+        yield seed
+
+
+def interacting_pairs(template, results):
+    """The pairs of alternatives whose joint effect differs most from the sum of their single effects, as summary lines.
+
+    For alternatives a and b of two choice points, over the scored candidates: the mean differing
+    bytes of those holding both, less those holding only a, less those holding only b, plus those
+    holding neither. With only the baseline, the two one-change candidates and their pair scored,
+    that is the pair's change against the baseline less the two single changes. Negative: the two
+    help more together than apart. A pair needs a scored candidate of each of the four kinds.
+    """
+    scored = [(template.vector(r["seed"]), r["differ_bytes"]) for r in results
+              if r["differ_bytes"] is not None and r["differ_bytes"] >= 0]
+    one, both = collections.defaultdict(lambda: [0, 0]), collections.defaultdict(lambda: [0, 0])
+    for vector, d in scored:
+        changed = [(i, a) for i, a in enumerate(vector) if a]
+        for x in changed:
+            one[x][0] += d
+            one[x][1] += 1
+        for pair in itertools.combinations(changed, 2):
+            both[pair][0] += d
+            both[pair][1] += 1
+    total, found = sum(d for _, d in scored), []
+    for (x, y), (ab, n_ab) in both.items():
+        a_only, n_a = one[x][0] - ab, one[x][1] - n_ab
+        b_only, n_b = one[y][0] - ab, one[y][1] - n_ab
+        neither, n_0 = total - one[x][0] - one[y][0] + ab, len(scored) - one[x][1] - one[y][1] + n_ab
+        if n_a and n_b and n_0:
+            joint = round(ab / n_ab - a_only / n_a - b_only / n_b + neither / n_0)
+            if joint:
+                found.append((-abs(joint), x, y, joint))
+    labels = [c.label for c in template.choices]
+    return [f"{labels[x[0]]}{x[1]}+{labels[y[0]]}{y[1]}: {joint:+d} bytes" for _, x, y, joint in sorted(found)[:PAIR_ROWS]]
+
+
 def beside(tree, source, text):
     """The tree's files a source at this path reaches through includes looked up beside the including file.
 
@@ -2279,6 +2584,8 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "hang_floor_s": 5.0,  # though never sooner than this,
     "hang_start_s": 120.0,  # and after this long while fewer than 2 x workers compiles are timed
     "lock_retry_s": 2.0,  # how long an overwrite retries on a file another process still holds
+    "budget": 0,  # the compiles a block fits, and its end once it built them; 0 works it out from the deadline
+    "seed": 0,  # seeds the random picks of a space too large to try whole
 }
 
 
@@ -2484,6 +2791,8 @@ class Block:
     def due(self):
         """Whether the deadline has come: past the floor (its seconds and its compiles both), or at the ceiling."""
         s, t = self.settings, self.elapsed()
+        if s["budget"] and self.counts["compiled"] >= s["budget"]:
+            return True
         if s["deadline_s"]:
             return t >= s["deadline_s"]
         return t >= s["floor_s"] and (self.counts["compiled"] >= s["floor_compiles"] or t >= self.ceiling)
@@ -2514,6 +2823,8 @@ class Block:
         an inert choice point. Call with the lock held, the sweep's results in."""
         t = self.template
         inert = inert_choices(t, self.results)
+        if not space_fits(self, inert):
+            return sampled(self, inert)
         frozen = {i for i, c in enumerate(t.choices) if c.label in inert}
         return (seed for seed in candidates(t, self.boost)
                 if seed not in self.swept and not any(pick for i, pick in enumerate(t.vector(seed)) if i in frozen))
@@ -2673,6 +2984,9 @@ def insights(template, results, best):
                          and r["differ_bytes"] >= 0), key=lambda r: (r["differ_bytes"], r["seed"]))
         out["next"] = [" ".join(w for w, a, b in zip(r["code"].split(), template.vector(r["seed"]), top) if a != b)
                        + f": {r['differ_bytes']} bytes" for r in scored[:NEXT_ROWS]]
+    pairs = interacting_pairs(template, results)
+    if pairs:
+        out["pairs"] = pairs
     if template.choices and len(out["inert"]) == len(template.choices):
         out["stop"] = "every choice point is inert: no alternative changes the object, so stop searching this template"
     return out
@@ -2980,7 +3294,7 @@ def cmd_search(a):
     except OSError as e:
         die(f"cannot read the template: {e}")
     text = source_text(data)
-    template = parse_template(text)
+    template = with_similar(parse_template(text), closest_solved(t))
     if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
         die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
             "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
