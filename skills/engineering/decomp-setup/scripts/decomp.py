@@ -2705,6 +2705,37 @@ class Launcher:
                 kernel32().CloseHandle(job)
 
 
+def uses_wine():
+    """True on a host that runs the toolchain under Wine: not Windows, and toolchain.json names wine as a prerequisite here."""
+    return sys.platform != "win32" and any(h["name"] == "wine" for h in toolchain()["prerequisites"])
+
+
+@contextlib.contextmanager
+def persistent_wineserver(launcher):
+    """Keep one wineserver running for a block, so each compile skips Wine's startup. Does nothing off Wine.
+
+    The block starts it before the first compile and ends it after the last. A wineserver that cannot be
+    found or started leaves the block as it was: Wine starts its own per compile.
+    """
+    proc = None
+    found = shutil.which("wineserver", path=launcher.vars.get("PATH")) if uses_wine() else None
+    if found:
+        with contextlib.suppress(OSError):
+            proc = subprocess.Popen([found, "-f", "-p"], env=launcher.vars, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        yield proc
+    finally:
+        if proc:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                kill_tree(proc, None)
+                proc.wait()
+
+
 class Block:
     """One block's running state, shared by its workers under one lock: what was tried, and when to end.
 
@@ -2877,17 +2908,26 @@ def run_block(template, memo, workers, settings, ceiling, boost=None):
     if block.natural:
         best = block.natural
     elif block.steered:
-        seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]))
+        seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]), boost)
         end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
     block.counts.update(workers=len(workers), wall_s=round(block.elapsed(), 2))
     return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
 
 
-def reduce_steering(template, seeds, result):
+def reduce_steering(template, seeds, result, boost=None):
     """The seed of the steered match that keeps the fewest steer choices, each flipped to a natural alternative where
-    the match survives it. result gives a seed's result, building only a candidate not scored before."""
-    seed = min(seeds, key=lambda s: len(template.steering(template.vector(s))))
-    vector = template.vector(seed)
+    the match survives it. result gives a seed's result, building only a candidate not scored before.
+
+    Among steered matches the one with the fewest steer choices is kept, then the likeliest (boost is the
+    history's, see candidates), then the lowest seed: the order their builds ended in decides nothing.
+    """
+    weights = likelihoods(template, boost)
+
+    def order(seed):
+        vector = template.vector(seed)
+        return len(template.steering(vector)), -math.prod(w[pick] for w, pick in zip(weights, vector)), seed
+
+    vector = template.vector(min(seeds, key=order))
     for i, _ in template.steering(vector):
         for pick in range(len(template.choices[i].alternatives)):
             if steer(template.choices[i], pick) is not None:
@@ -3265,7 +3305,8 @@ def cmd_search(a):
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
         category = (trail(t["id"]) or [{}])[-1].get("category")
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
-        end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
+        with persistent_wineserver(launcher):
+            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)

@@ -2264,6 +2264,22 @@ def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
     expect(text == in_function("int right_a; /* fakematch: pin it */"), f"the winner should carry the reason: {text!r}", r)
 
 
+# A fake compiler that takes longer over a source holding a SLOW_ tag, so that candidate's result comes in last.
+SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
+    import time
+    time.sleep(1)
+open(obj, "w")''')
+
+
+def test_search_picks_the_likelier_steering_match_whichever_build_ends_first(base):
+    p = search_project(base, files={"tools/search_build.py": SLOW_BUILD_PY}, **ALLOWED)
+    tune(p, workers=3)  # the three candidates build at once, the likelier match the slowest
+    r, out = search(p, in_function(
+        "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: likely */ int SLOW_a;, %0.2 /* steer: other */ int right_b;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "r1",
+           "the likelier steering match should win, though its build ended last", r)
+
+
 # A fake compiler that logs each compile's WRONG_ tags in order, and ignores every IGNORED_ tag.
 SWEEP_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "order.log")
 open(log, "a").write(" ".join(re.findall(r"WRONG_([a-z0-9]+)", text)) + chr(10))
@@ -2879,6 +2895,55 @@ def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails
     expect(tool.cores() == logical, f"a failing call should give the logical count: {tool.cores()}")
     tool.physical_core_call = lambda: 0
     expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
+
+
+# A fake `wineserver` that logs each start and then idles until it is killed. Linux and macOS only: Windows
+# has no Wine and no `sh` to run it.
+FAKE_WINESERVER = "#!/bin/sh" + chr(10) + 'echo "$@" >> "$WINESERVER_LOG"' + chr(10) + "exec sleep 60" + chr(10)
+
+
+def wine_project(base, wine=True):
+    """A search project on a host that runs its toolchain under Wine, with a fake wineserver first on PATH."""
+    m = legacy_manifest()
+    if wine:
+        m["prerequisites"] = [{"name": "wine", "version_cmd": "echo wine-8", "version": "wine-8", "hosts": HERE}]
+    p = search_project(base, manifest=m)
+    fake = Path(base) / "fake-wine"
+    fake.mkdir()
+    (fake / "wineserver").write_text(FAKE_WINESERVER, encoding="utf-8")
+    (fake / "wineserver").chmod(0o755)
+    log = Path(base) / "wineserver.log"
+    p.env = {"PATH": str(fake) + os.pathsep + os.environ["PATH"], "WINESERVER_LOG": str(log)}
+    return p, log
+
+
+def search_with_env(p, template):
+    path = p.base / "template.c"
+    path.write_text(template, encoding="utf-8")
+    r = p.run("search", TID, str(path), env=p.env)
+    return r, json.loads(r.stdout.splitlines()[0])
+
+
+def test_search_starts_one_wineserver_per_block_not_per_candidate(base):
+    if sys.platform == "win32":
+        print("SKIP: Windows runs the tools natively and has no wineserver, so the Wine path cannot run here")
+        return
+    p, log = wine_project(base)
+    r, out = search_with_env(p, MATCHING)
+    expect(out["counts"]["compiled"] > 1, f"the block should compile several candidates: {out}", r)
+    started = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    expect(started == ["-f -p"], f"one persistent wineserver per block, not per candidate: {started}", r)
+    r, out = search_with_env(p, MATCHING)
+    expect(len(log.read_text(encoding="utf-8").splitlines()) == 2, "a second block starts its own wineserver", r)
+
+
+def test_search_starts_no_wineserver_when_the_toolchain_does_not_use_wine(base):
+    if sys.platform == "win32":
+        print("SKIP: Windows runs the tools natively and has no wineserver, so the Wine path cannot run here")
+        return
+    p, log = wine_project(base, wine=False)
+    r, out = search_with_env(p, MATCHING)
+    expect(out["end"] == "match" and not log.exists(), "no wine prerequisite, no wineserver", r)
 
 
 def rmtree(path):
