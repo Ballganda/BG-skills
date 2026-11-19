@@ -114,10 +114,21 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 
 ## Template search
 
-A **template** is the unit's whole source file, `@decomp` marker included, with **choice points**: `PERM_GENERAL(a, b, ...)`, each listing two or more alternative spellings of the text at that place. Keep the template file outside the project tree.
+A **template** is the unit's whole source file, `@decomp` marker included, with **choice points**, each listing alternative spellings of the text at that place. Keep the template file outside the project tree. The tool only combines alternatives the writer wrote.
 
-- **Alternatives.** They are split at the commas that sit inside no bracket, so an alternative holding a bare comma (`int a, b;`) is written another way. Surrounding white space is dropped, and an empty alternative is allowed. A choice point inside a comment or a literal is not read. A choice point inside another, and any other `PERM_` macro, is refused.
-- **Choice code.** Choice points are labelled `A`, `B`, and on, in file order, and alternatives are numbered from 0. A candidate is one alternative per choice point, named by its choice code: `A1 B0`. All zeros is the baseline.
+| Macro | The choice point is |
+| --- | --- |
+| `PERM_GENERAL(a, b, ...)` | One of the alternatives |
+| `PERM_VAR(@name, a, b, ...)` | As `PERM_GENERAL`; a later `PERM_VAR(name)` repeats the same pick |
+| `PERM_ONCE(a, b, ...)` | Nothing, or one of the alternatives |
+| `PERM_INT(lo, hi)` | One integer from `lo` to `hi` (at most 64 values) |
+| `PERM_LINESWAP(lines)` | Its lines in every order (at most 5 lines) |
+| `PERM_IGNORE(text)` | The text itself: no choice, a stretch the tool leaves alone |
+
+- **Alternatives.** They are split at the commas that sit inside no bracket, so an alternative holding a bare comma (`int a, b;`) is written another way. Surrounding white space is dropped, and an empty alternative is allowed. A choice point inside a comment or a literal is not read. A choice point inside another, and any other `PERM_` macro, is refused. A template may hold at most 12 choice points.
+- **Label and kind.** The first argument may be `@label kind` (for `PERM_LINESWAP`, a first line). The label names the choice point and must be unique; it defaults to `A`, `B`, and on, in file order. The kind is one of `decl-order`, `stmt-order`, `loop-form`, `temp-type`, `signedness`, `width`, `operator`, `expression-shape`, `branch-order`, `inlining`, `other` (default `other`, `stmt-order` for `PERM_LINESWAP`).
+- **Likelihood.** An alternative may start with `%0.7`: the writer's likelihood that it is right. Without likelihoods, all alternatives are alike.
+- **Choice code.** Alternatives are numbered from 0. A candidate is one alternative per choice point, named by its choice code: `A1 B0`. All zeros is the baseline.
 - **A round.** `search` needs `template_search` to be true in `decomp.json` and [the gate](#the-gate) open, and refuses, with the reason, otherwise. It builds each candidate in a scratch copy of the unit's folder layout (the candidate at the unit's own path, with the headers the template includes beside itself), runs the adapters from the current worktree as `check` does, and scores each candidate with the `diff` adapter's `differ_bytes`. A candidate the guardrail scan refuses, or with no single marker, is not built. The round stops at the first exact match.
 - **Summary.** One JSON line, capped at about 600 tokens, that never holds candidate source:
   - `end`: `match`, or `exhausted` when every candidate was tried without one.
