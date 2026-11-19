@@ -10,7 +10,10 @@ import codecs
 import collections
 import contextlib
 import hashlib
+import heapq
+import itertools
 import json
+import math
 import os
 import re
 import shutil
@@ -1111,12 +1114,71 @@ def cmd_disasm(a):
     run_adapter("disasm", environment, expected=t["expected"], address=t["address"])
 
 
+# ---------- check trail and the template-search gate ----------
+
+TRAIL = "trail.jsonl"  # the check trail: this machine only, never committed, shared by every worktree
+GATE_OPENS = ("register-allocation", "statement-order", "expression-shape")  # categories small source variations fix
+GATE_CLOSES = ("reference-gap", "data-layout", "calling-convention", "optimization", "unit-order", "build-fail")
+GATE_STALL = 3  # attempts with no fall in differ_bytes that open the gate
+
+
+def trail(tid):
+    """The ticket's check trail, oldest first: one record per `check` run and per template round."""
+    p = checkout_dir() / TRAIL
+    if not p.exists():
+        return []
+    return [r for r in (json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()) if r["ticket"] == tid]
+
+
+def append_trail(tid, by, result, differ_bytes, category):
+    """Add one attempt to the check trail. by is `check` or `search`."""
+    p = checkout_dir() / TRAIL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"unix": now(), "ticket": tid, "by": by, "result": result, "differ_bytes": differ_bytes, "category": category}
+    with p.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def stalled(entries):
+    """True when the last GATE_STALL attempts show no fall in differ_bytes: none is closer than the first of them."""
+    last = [float("inf") if e["differ_bytes"] is None else e["differ_bytes"] for e in entries[-GATE_STALL:]]
+    return len(last) == GATE_STALL and last[-1] != float("inf") and min(last[1:]) >= last[0]
+
+
+def gate(t):
+    """Whether template search is open for ticket t, from its tier and check trail: (open, reason)."""
+    entries = trail(t["id"])
+    if CFG.get("template_search") is not True:
+        return False, "the contract does not allow template search"
+    if t["tier"] == "TINY":
+        return False, "a TINY ticket never uses template search"
+    if not entries:
+        return False, "no check has run for this ticket on this machine"
+    latest = entries[-1]
+    if latest["by"] == "check" and latest["result"] == "bytes-match":  # a round's match is not one until check says so
+        return False, "the latest check matched"
+    category = latest["category"]
+    if category in GATE_CLOSES:
+        return False, f"the latest category, {category}, needs a stop or a report, which no template fixes"
+    if category in GATE_OPENS:
+        return True, f"the latest category is {category}"
+    if stalled(entries):
+        return True, f"differ_bytes has not fallen over the last {GATE_STALL} attempts"
+    return False, (f"it opens on a latest category of {', '.join(GATE_OPENS[:-1])} or {GATE_OPENS[-1]}, "
+                   f"or after {GATE_STALL} attempts with no fall in differ_bytes")
+
+
 def cmd_check(a):
     t, _ = read_ticket(a.id)
+    if a.category and a.category not in CATEGORIES:
+        die(f"unknown category {a.category}; the mismatch categories are {', '.join(sorted(CATEGORIES))}")
     environment, compiler = prepare(t)
     report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
     result, n, log = build_and_diff(environment, t, compiler, os.getcwd(), report)
-    print(json.dumps({"result": result, "differ_bytes": n, "report": report}))
+    category = "" if result == "bytes-match" else a.category or ("build-fail" if result == "build-fail" else "")
+    append_trail(t["id"], "check", result, n, category)
+    is_open, reason = gate(t)
+    print(json.dumps({"result": result, "differ_bytes": n, "report": report, "search_open": is_open, "search_reason": reason}))
     if log:
         print(log)
 
@@ -1130,6 +1192,7 @@ def cmd_verify(a):
         a.category = None
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}")
+    template_round = kept_round(a.id) if a.template_round else None
     stop_if_edition_differs(environment, t)
     integ, branch = CFG["integration_branch"], a.branch or f"w/{a.id}"
     changed = git("diff", "--name-only", f"{integ}...{branch}").split()
@@ -1160,6 +1223,9 @@ def cmd_verify(a):
     if log:
         with evidence.open("a", encoding="utf-8", newline="\n") as f:
             f.write(log + "\n")
+    if template_round:  # in the evidence file, so the ledger's committed fields stay as they are
+        with evidence.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(ROUND_EVIDENCE + json.dumps(template_round, sort_keys=True) + "\n")
     append("attempts.jsonl", rec)
     if result == "bytes-match":
         move(a.id, "bytes-match")
@@ -1719,8 +1785,18 @@ WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
 WINDOW_WIDTH = 120  # characters kept of each of those lines
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
-CHOICE_CODE = re.compile(r"([A-Z]+)(\d+)")
-Choice = collections.namedtuple("Choice", "label alternatives")
+CHOICE_CODE = re.compile(r"([A-Za-z_]+)(\d+)")
+MAX_CHOICES = 12  # choice points in one template
+MAX_LINESWAP_LINES = 5  # lines in one PERM_LINESWAP
+MAX_INT_VALUES = 64  # values in one PERM_INT range
+KINDS = ("decl-order", "stmt-order", "loop-form", "temp-type", "signedness", "width", "operator",
+         "expression-shape", "branch-order", "inlining", "other")  # the levers of decomp-match's MISMATCH.md
+HEAD = re.compile(r"@([A-Za-z_]+)(?:[ \t]+(\S+))?")  # a choice point's first argument: @label kind
+LIKELIHOOD = re.compile(r"%(\d+(?:\.\d*)?|\.\d+)(?:\s+|$)")  # an alternative's leading %0.7
+# A choice point: its label, its alternatives' source text, its kind, and one likelihood per alternative
+# (None: all alike). A Reference is a later PERM_VAR(label): the same pick again.
+Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods", defaults=("other", None))
+Reference = collections.namedtuple("Reference", "label")
 Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
 
 
@@ -1788,14 +1864,77 @@ class Template:
 
     def render(self, vector):
         """The candidate as plain source: each choice point replaced by its picked alternative."""
-        picks = iter(vector)
-        return "".join(p.alternatives[next(picks)] if isinstance(p, Choice) else p for p in self.parts)
+        return render_parts(self.parts, vector)
+
+
+def render_parts(parts, vector):
+    """Template.render, apart: each choice point replaced by its picked alternative, each reference by that pick again."""
+    picks, said, out = iter(vector), {}, []
+    for p in parts:
+        if isinstance(p, Choice):
+            said[p.label] = p.alternatives[next(picks)]
+            out.append(said[p.label])
+        else:
+            out.append(said[p.label] if isinstance(p, Reference) else p)
+    return "".join(out)
+
+
+def read_head(where, args, default_kind):
+    """A macro's arguments split into (label or None, kind, the rest). A first argument @label kind names the choice point."""
+    if not args or not args[0].startswith("@"):
+        return None, default_kind, args
+    m = HEAD.fullmatch(args[0])
+    if not m:
+        die(f"template {where}: a choice point's name looks like '@label kind' (label: letters and underscores)")
+    kind = m.group(2) or default_kind
+    if kind not in KINDS:
+        die(f"template {where}: '{kind}' is not a kind of choice; the kinds are {', '.join(KINDS)}")
+    return m.group(1), kind, args[1:]
+
+
+def read_likelihoods(where, alternatives):
+    """Each alternative's text without its leading likelihood, and the likelihoods (None when none was given)."""
+    texts, weights = [], []
+    for alt in alternatives:
+        weight = 1.0
+        if alt.startswith("%"):
+            m = LIKELIHOOD.match(alt)
+            if not m or float(m.group(1)) <= 0:
+                die(f"template {where}: a likelihood is a positive number after %, such as '%0.7 alternative'")
+            weight, alt = float(m.group(1)), alt[m.end():]
+        texts.append(alt)
+        weights.append(weight)
+    return texts, weights if any(w != 1.0 for w in weights) else None
+
+
+def line_orders(where, body):
+    """The alternatives of a PERM_LINESWAP: its non-blank lines in every order, the written order first."""
+    nl = "\r\n" if "\r\n" in body else "\n"
+    lines = [x.strip() for x in body.split(nl) if x.strip()]
+    if len(lines) > MAX_LINESWAP_LINES:
+        die(f"template {where}: PERM_LINESWAP has {len(lines)} lines; the limit is {MAX_LINESWAP_LINES}")
+    if len(lines) < 2:
+        die(f"template {where}: PERM_LINESWAP needs two or more lines, one per line of source")
+    lead, trail = body[:len(body) - len(body.lstrip())], body[len(body.rstrip()):]
+    last = body.rstrip().split(nl)[-1]
+    indent = last[:len(last) - len(last.lstrip())]
+    return [lead + (nl + indent).join(order) + trail for order in itertools.permutations(lines)]
 
 
 def parse_template(text):
-    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template."""
+    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template.
+
+    The macros, each with an optional first argument '@label kind' naming its choice point, and each
+    alternative taking a leading '%0.7' likelihood:
+      PERM_GENERAL(a, b, ...)   one of the alternatives
+      PERM_VAR(@name, a, b ...) as PERM_GENERAL; a later PERM_VAR(name) repeats the pick
+      PERM_ONCE(a, b, ...)      nothing, or one of the alternatives
+      PERM_INT(lo, hi)          one integer from lo to hi
+      PERM_LINESWAP(lines)      the lines in every order (at most MAX_LINESWAP_LINES)
+      PERM_IGNORE(text)         the text itself: no choice, only a marked stretch to leave alone
+    """
     code, _ = lexed(text)
-    parts, at = [], 0
+    parts, choices, variables, at = [], [], set(), 0
 
     def where(i):
         return f"line {text.count(chr(10), 0, i) + 1}"
@@ -1803,23 +1942,94 @@ def parse_template(text):
     for m in PERM_MACRO.finditer(code):
         if m.start() < at:
             die(f"template {where(m.start())}: a choice point inside another is not supported")
-        if m.group() != "PERM_GENERAL":
-            die(f"template {where(m.start())}: {m.group()} is not supported; write PERM_GENERAL(a, b, ...)")
+        here, macro = where(m.start()), m.group()
+        if macro not in ("PERM_GENERAL", "PERM_VAR", "PERM_ONCE", "PERM_INT", "PERM_LINESWAP", "PERM_IGNORE"):
+            die(f"template {here}: {macro} is not supported; the macros are PERM_GENERAL, PERM_VAR, PERM_ONCE, "
+                "PERM_INT, PERM_LINESWAP, PERM_IGNORE")
         inner = parenthesised(code, text, m.end())
         if not inner:
-            die(f"template {where(m.start())}: PERM_GENERAL has no closing parenthesis")
+            die(f"template {here}: {macro} has no closing parenthesis")
         end = inner[1]
-        alternatives = split_alternatives(code, text, end - 1 - len(inner[0]), end - 1)
-        if len(alternatives) < 2:
-            die(f"template {where(m.start())}: a choice point needs two or more alternatives")
-        parts += [text[at:m.start()], Choice(choice_label(len(parts) // 2), alternatives)]
+        body_at = end - 1 - len(inner[0])
+        parts.append(text[at:m.start()])
         at = end
+        if macro == "PERM_IGNORE":
+            parts.append(inner[0])
+            continue
+        if macro == "PERM_LINESWAP":
+            first = inner[0].lstrip().startswith("@")
+            head, _, body = inner[0].partition("\n") if first else ("", "", inner[0])
+            label, kind, _ = read_head(here, [head.strip()] if first else [], "stmt-order")
+            alternatives, weights = line_orders(here, body), None
+        else:
+            args = split_alternatives(code, text, body_at, end - 1)
+            if macro == "PERM_VAR" and len(args) == 1 and re.fullmatch(r"[A-Za-z_]+", args[0]):
+                if args[0] not in variables:
+                    die(f"template {here}: PERM_VAR({args[0]}) comes before the PERM_VAR(@{args[0]}, ...) that defines it")
+                parts.append(Reference(args[0]))
+                continue
+            label, kind, args = read_head(here, args, "other")
+            if macro == "PERM_VAR" and label is None:
+                die(f"template {here}: PERM_VAR(@name, a, b, ...) defines a variable; PERM_VAR(name) repeats its pick")
+            if macro == "PERM_INT":
+                try:
+                    lo, hi = (int(x) for x in args)
+                except ValueError:
+                    die(f"template {here}: PERM_INT(lo, hi) takes two integers")
+                if not lo <= hi or hi - lo + 1 > MAX_INT_VALUES:
+                    die(f"template {here}: PERM_INT needs lo <= hi and at most {MAX_INT_VALUES} values")
+                args = [str(i) for i in range(lo, hi + 1)]
+            alternatives, weights = read_likelihoods(here, args)
+            if macro == "PERM_ONCE":
+                alternatives, weights = [""] + alternatives, weights and [1.0] + weights
+            if len(alternatives) < 2:
+                die(f"template {here}: a choice point needs two or more alternatives")
+        label = label or choice_label(len(choices))
+        if any(c.label == label for c in choices):
+            die(f"template {here}: the label '{label}' is used twice; labels are what choice codes name")
+        choice = Choice(label, alternatives, kind, weights)
+        choices.append(choice)
+        parts.append(choice)
+        if macro == "PERM_VAR":
+            variables.add(label)
+    if len(choices) > MAX_CHOICES:
+        die(f"template has {len(choices)} choice points; the limit is {MAX_CHOICES}")
     return Template(parts + [text[at:]])
 
 
 def candidates(template):
-    """The seeds a round tries, in order: the whole space, baseline first."""
-    return range(template.space())
+    """The seeds a round tries, in order: the whole space, most likely first.
+
+    A candidate's likelihood is the product of its alternatives' likelihoods. With no likelihoods
+    given the order is the seeds', baseline first.
+    """
+    if all(c.likelihoods is None for c in template.choices):
+        return range(template.space())
+    return most_likely_first(template)
+
+
+def most_likely_first(template):
+    """Every seed, the likeliest candidate first, produced lazily so a large space costs nothing until it is read.
+
+    Each choice point's alternatives are ranked by likelihood (written order breaking ties). A heap
+    holds the frontier of rank vectors: raising one rank never raises the likelihood, and each vector
+    is reached by one route, raising ranks left to right.
+    """
+    weights = [c.likelihoods or [1.0] * len(c.alternatives) for c in template.choices]
+    ranked = [sorted(range(len(w)), key=lambda i, w=w: (-w[i], i)) for w in weights]
+    cost = [[-math.log(w[i]) for i in order] for w, order in zip(weights, ranked)]
+
+    def entry(ranks, last):
+        seed = template.seed([order[r] for order, r in zip(ranked, ranks)])
+        return (sum(k[r] for k, r in zip(cost, ranks)), seed, ranks, last)
+
+    heap = [entry((0,) * len(ranked), 0)]
+    while heap:
+        _, seed, ranks, last = heapq.heappop(heap)
+        yield seed
+        for j in range(last, len(ranks)):
+            if ranks[j] + 1 < len(ranked[j]):
+                heapq.heappush(heap, entry(ranks[:j] + (ranks[j] + 1,) + ranks[j + 1:], j))
 
 
 def one_change(template):
@@ -2215,6 +2425,35 @@ def search_dir(tid):
     return checkout_dir() / "search" / tid
 
 
+ROUND_EVIDENCE = "template-round: "  # starts the evidence line of an attempt `verify` recorded as a template round
+
+
+def record_round(t, template, best, results):
+    """Count a finished round as one attempt in the check trail, and keep what `verify --template-round` records.
+
+    The round carries the category of the attempt before it: it worked on that difference.
+    """
+    category = trail(t["id"])[-1]["category"]
+    kept = {"unix": now(), "category": category, "best": None, "result": results[0]["result"] if results else "build-fail",
+            "differ_bytes": None, "kinds": []}
+    if "score" in best:
+        vector = template.vector(best["seed"])
+        kinds = [getattr(c, "kind", None) for c, pick in zip(template.choices, vector) if pick]
+        kept.update(best=template.code(vector), result=best["score"].result, differ_bytes=best["score"].differ_bytes,
+                    kinds=[k for k in kinds if k])
+    (search_dir(t["id"]) / "round.json").write_text(json.dumps(kept, sort_keys=True) + "\n", encoding="utf-8")
+    append_trail(t["id"], "search", kept["result"], kept["differ_bytes"], category)
+
+
+def kept_round(tid):
+    """The ticket's last template round as `verify --template-round` records it. Stops when this machine keeps none."""
+    try:
+        return json.loads((search_dir(tid) / "round.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        die(f"no template round is kept for {tid} on this machine, so --template-round has no evidence to record; "
+            "nothing was recorded. Run verify on the machine that ran the round, or without the flag.")
+
+
 def cmd_search(a):
     t, _ = read_ticket(a.id)
     if a.detail is not None:
@@ -2225,6 +2464,9 @@ def cmd_search(a):
     if not contract_rules()[0]:
         die("the contract does not allow template search (`template_search` is false in decomp.json); "
             "nothing was built.")
+    is_open, reason = gate(t)
+    if not is_open:
+        die(f"template search is closed for {t['id']}: {reason}; nothing was built.")
     try:
         data = Path(a.template).read_bytes()
     except OSError as e:
@@ -2250,6 +2492,7 @@ def cmd_search(a):
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
+    record_round(t, template, best, results)
     winner = None
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
@@ -2291,9 +2534,10 @@ def main():
     x = s.add_parser("release"); x.add_argument("id"); x.add_argument("--to", default="open"); x.set_defaults(f=cmd_release)
     x = s.add_parser("inventory"); x.add_argument("--redo", action="store_true"); x.set_defaults(f=cmd_inventory)
     x = s.add_parser("disasm"); x.add_argument("id"); x.set_defaults(f=cmd_disasm)
-    x = s.add_parser("check"); x.add_argument("id"); x.set_defaults(f=cmd_check)
+    x = s.add_parser("check"); x.add_argument("id"); x.add_argument("--category"); x.set_defaults(f=cmd_check)
     x = s.add_parser("verify"); x.add_argument("id"); x.add_argument("--model", required=True)
-    x.add_argument("--category"); x.add_argument("--branch"); x.set_defaults(f=cmd_verify)
+    x.add_argument("--category"); x.add_argument("--branch"); x.add_argument("--template-round", action="store_true")
+    x.set_defaults(f=cmd_verify)
     x = s.add_parser("audit"); x.add_argument("id"); x.add_argument("verdict", choices=["pass", "fail"])
     x.add_argument("--auditor", required=True); x.add_argument("--note"); x.add_argument("--branch"); x.set_defaults(f=cmd_audit)
     x = s.add_parser("integrate"); x.add_argument("id"); x.add_argument("--branch"); x.set_defaults(f=cmd_integrate)
