@@ -2372,7 +2372,7 @@ def test_verify_records_a_template_round_in_the_evidence_and_leaves_the_ledger_f
     marked = [l for l in lines if l.startswith("template-round: ")]
     expect(len(marked) == 1, f"the evidence should mark the attempt as a template round: {lines[-3:]}", r)
     got = json.loads(marked[0][len("template-round: "):])
-    expect((got["best"], got["differ_bytes"], got["kinds"], got["category"]) == ("A1 B2", 0, [], "register-allocation"),
+    expect((got["best"], got["differ_bytes"], got["kinds"], got["category"]) == ("A1 B2", 0, ["other", "other"], "register-allocation"),
            f"the evidence should hold the round's best candidate, its kinds, and its category: {got}")
     attempts = p.lines("attempts.jsonl")
     expect(len(attempts) == 1 and set(attempts[0]) == ATTEMPT_FIELDS, f"the ledger's fields are unchanged: {attempts}")
@@ -2394,6 +2394,76 @@ def test_verify_refuses_the_template_round_flag_when_no_round_is_kept(base):
     r = p.run("verify", TID, "--model", "m", "--template-round")
     expect(r.returncode == 1 and "no template round is kept" in r.stderr, "verify should refuse", r)
     expect(p.lines("attempts.jsonl") == [] and p.status() == "claimed", "the refusal records nothing")
+
+
+def second_writer(p, n, kinds, result="bytes-match", category="register-allocation"):
+    """Record, as another writer's `verify --template-round` would, attempt n of the ticket: a round holding these kinds."""
+    ledger = p.root / "ledger"
+    (ledger / "evidence").mkdir(parents=True, exist_ok=True)
+    aid = f"{TID}-a{n:03d}"
+    rec = {"id": aid, "ticket": TID, "unix": 1, "model": "m", "tier": "SMALL", "category": "", "differ_bytes": 0,
+           "evidence": f"ledger/evidence/{aid}.txt", "result": result, "source_sha256": "0"}
+    kept = {"category": category, "best": "x", "differ_bytes": 0, "kinds": kinds, "result": result, "unix": 1}
+    (ledger / "evidence" / f"{aid}.txt").write_text(f"template-round: {json.dumps(kept)}\n", encoding="utf-8")
+    with (ledger / "attempts.jsonl").open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+HISTORY_TEMPLATE = in_function("PERM_GENERAL(@regs decl-order, int WRONG_a;, int right_a;) "
+                               "PERM_GENERAL(@shape expression-shape, int WRONG_b;, int right_b;)")
+
+
+def test_history_line_counts_template_round_wins_by_kind_for_the_category(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, HISTORY_TEMPLATE)
+    expect(out is not None and out["end"] == "match" and "history" not in out, "no history before a recorded win", r)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 0, "verify should record the win", r)
+    r, out = search(p, HISTORY_TEMPLATE)
+    expect(out is not None and out["history"] == "expression-shape fixed register-allocation 1 of 1 times on this compiler",
+           f"the history line should count the win by kind: {out}", r)
+
+
+def test_a_win_recorded_by_a_second_writer_changes_the_next_rounds_history_line(base):
+    p = search_project(base)
+    second_writer(p, 1, ["decl-order"])
+    r, out = search(p, HISTORY_TEMPLATE)
+    expect(out is not None and out["history"] == "decl-order fixed register-allocation 1 of 1 times on this compiler",
+           f"the first round should see the first writer's win: {out}", r)
+    second_writer(p, 2, ["decl-order"])
+    second_writer(p, 3, ["decl-order"], result="differ")
+    r, out = search(p, HISTORY_TEMPLATE)
+    expect(out is not None and out["history"] == "decl-order fixed register-allocation 2 of 3 times on this compiler",
+           f"the next round should see what was recorded in between: {out}", r)
+
+
+def test_history_of_another_category_adds_no_line(base):
+    p = search_project(base)
+    second_writer(p, 1, ["decl-order"], category="data-layout")
+    r, out = search(p, HISTORY_TEMPLATE)
+    expect(out is not None and "history" not in out, f"only the ticket's category counts: {out}", r)
+
+
+def test_a_kind_with_more_history_compiles_its_alternatives_earlier(base):
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    template = in_function("PERM_GENERAL(@regs decl-order, tag_a0 WRONG_1, tag_a1 WRONG_2) "
+                           "PERM_GENERAL(@shape expression-shape, tag_b0 WRONG_3, tag_b1 WRONG_4)")
+    second_writer(p, 1, ["decl-order"])
+    second_writer(p, 2, ["decl-order"])
+    r, out = search(p, template)
+    after = log.read_text().splitlines()[-4:]
+    expect(after[:2] == ["tag_a1 tag_b0", "tag_a1 tag_b1"] and len(after) == 4,
+           f"the kind with a win history should compile its alternatives first: {after}", r)
+
+
+def test_a_search_writes_no_priors_file(base):
+    p = search_project(base)
+    second_writer(p, 1, ["decl-order"])
+    search(p, HISTORY_TEMPLATE)
+    names = [f.name for d in (p.root / ".decomp", p.root / "ledger") if d.is_dir() for f in d.rglob("*") if f.is_file()]
+    expect(not [n for n in names if "prior" in n.lower() or "histor" in n.lower()], f"no priors file: {names}")
 
 
 def rmtree(path):
