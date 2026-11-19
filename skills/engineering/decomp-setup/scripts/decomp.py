@@ -6,6 +6,7 @@ decomp-setup tag. It is the only writer of ticket statuses and ledger records.
 Standard library only. Run from the project root: python tools/decomp.py <cmd>.
 """
 import argparse
+import atexit
 import codecs
 import collections
 import contextlib
@@ -2204,13 +2205,14 @@ class Worker:
         began = time.perf_counter()
         retrying(lambda: self.source.write_bytes(source_bytes(text)), wait)
         retrying(lambda: self.report.unlink(missing_ok=True), wait)
-        start = time.perf_counter()
-        self.environment.add("write", start - began)
-        obj, failure = build_unit(*self.args(), self.objdir, str(self.report))
-        took = time.perf_counter() - start
-        self.environment.add("compile", took)
-        if not failure:
-            self.environment.sample(took)
+        self.environment.add("write", time.perf_counter() - began)
+        with compile_slot(self):  # the wait for a slot is neither write time nor compile time
+            start = time.perf_counter()
+            obj, failure = build_unit(*self.args(), self.objdir, str(self.report))
+            took = time.perf_counter() - start
+            self.environment.add("compile", took)
+            if not failure:
+                self.environment.sample(took)
         return obj, failure
 
     def diff(self, obj, fields=None):
@@ -2273,7 +2275,7 @@ def window(report, first_differ=None):
 
 
 SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.json overrides any of them
-    "workers": 0,  # worker threads; 0 is one per logical core
+    "workers": 0,  # worker threads; 0 is the physical cores divided by the active writers
     "deadline_s": 0,  # a fixed block deadline; 0 leaves it to the floor and the ceiling
     "floor_s": 10.0,  # a block runs at least this long,
     "floor_compiles": 200,  # and on until it has built this many candidates,
@@ -2287,6 +2289,10 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "hang_floor_s": 5.0,  # though never sooner than this,
     "hang_start_s": 120.0,  # and after this long while fewer than 2 x workers compiles are timed
     "lock_retry_s": 2.0,  # how long an overwrite retries on a file another process still holds
+    "cores": 0,  # the physical cores to plan for; 0 asks the platform
+    "slots": 0,  # compile slots in the machine-wide pool; 0 is the cores, or `workers` when that is set higher
+    "slot_heartbeat_s": 2.0,  # how often a running search renews its heartbeat in the pool,
+    "slot_stale_s": 30.0,  # and how old a heartbeat makes its search's slots free for the taking
 }
 
 
@@ -2364,6 +2370,259 @@ def kill_tree(proc, job):
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
     with contextlib.suppress(OSError):
         proc.kill()
+
+
+def physical_core_call():
+    """The physical core count as the platform reports it. Raises, or counts nothing, where the platform cannot say."""
+    if os.name == "nt":
+        import ctypes
+        k, size = ctypes.WinDLL("kernel32"), ctypes.c_ulong(0)
+        k.GetLogicalProcessorInformationEx(0, None, ctypes.byref(size))  # 0 is RelationProcessorCore: one record per core
+        buf = ctypes.create_string_buffer(size.value)
+        if not k.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(size)):
+            raise OSError("GetLogicalProcessorInformationEx failed")
+        raw, at, count = buf.raw[:size.value], 0, 0
+        while at < len(raw):
+            step = int.from_bytes(raw[at + 4:at + 8], "little")  # a record starts with its relationship, then its size
+            if step <= 0:
+                raise OSError("GetLogicalProcessorInformationEx returned a record of no size")
+            at, count = at + step, count + 1
+        return count
+    if sys.platform == "darwin":
+        import ctypes
+        n, size = ctypes.c_int(0), ctypes.c_size_t(ctypes.sizeof(ctypes.c_int))
+        if ctypes.CDLL(None).sysctlbyname(b"hw.physicalcpu", ctypes.byref(n), ctypes.byref(size), None, 0):
+            raise OSError("sysctlbyname hw.physicalcpu failed")
+        return n.value
+    usable, seen = os.sched_getaffinity(0), set()  # Linux has no such call: the kernel lists each core's threads
+    for cpu in usable:
+        seen.add(Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list").read_text().strip())
+    return len(seen)
+
+
+def cores():
+    """This machine's physical cores, or its logical ones when the platform's call fails."""
+    try:
+        count = physical_core_call()
+    except Exception:
+        count = 0
+    return count if isinstance(count, int) and count > 0 else os.cpu_count() or 1
+
+
+SLOT_HOLDER = re.compile(r"\d+-[0-9a-f]+")  # a search's name in the pool: its process id and a random part
+
+
+class SlotPool:
+    """The compile slots every search on this machine shares, so concurrent writers do not oversubscribe the CPU.
+
+    The pool is a folder under the machine-only .decomp/: `<n>.slot` is slot n, held by the search named
+    inside it, and `<name>.writer` is a running search's heartbeat, touched every few seconds. A build
+    runs only while its worker holds a slot, taken by creating the file and given back by removing it.
+    A slot whose holder's heartbeat is missing or stale is reclaimed, so a search that died frees its
+    slots within the stale time. No search holds more than its share (the slots divided by the active
+    writers, rounded up) at once, so a search that takes a slot back the moment it frees one cannot
+    starve another.
+    """
+
+    def __init__(self, settings):
+        self.dir = local_dir() / "slots"  # beside local.json, whose settings size the pool
+        self.cores = int(settings["cores"]) or cores()
+        self.size = int(settings["slots"]) or max(self.cores, int(settings["workers"]))
+        self.stale_s, self.beat_s, self.retry_s = settings["slot_stale_s"], settings["slot_heartbeat_s"], settings["lock_retry_s"]
+        self.id = f"{os.getpid()}-{os.urandom(4).hex()}"
+        self.beat = self.dir / f"{self.id}.writer"
+        self.lock = threading.Condition()
+        self.closed = threading.Event()
+        self.held, self.busy, self.reclaimed = set(), 0, 0  # slots held; workers holding or waiting for one
+        self.writers = self.writers_at_start = 1
+
+    def open(self):
+        """Join the pool: start the heartbeat and count the active writers, this one included."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.beat.write_text(self.id, encoding="utf-8")
+        self.writers = self.writers_at_start = self.count_writers()
+        atexit.register(self.close)  # a search that stops on an error still leaves the pool
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+        return self
+
+    def close(self):
+        """Leave the pool: give back every slot and remove the heartbeat. Safe to call twice."""
+        if self.closed.is_set():
+            return
+        self.closed.set()
+        with self.lock:
+            for i in sorted(self.held):
+                with contextlib.suppress(OSError):
+                    self.drop(i)
+            self.held.clear()
+            with contextlib.suppress(OSError):
+                self.beat.unlink()
+
+    def stale(self, path):
+        """Whether a file was last written longer ago than the stale time, or is gone. By the wall clock: it spans processes."""
+        try:
+            return time.time() - path.stat().st_mtime > self.stale_s
+        except OSError:
+            return True
+
+    def count_writers(self):
+        """The searches whose heartbeat is fresh, this one included. A stale heartbeat is cleared away."""
+        count = 1
+        for beat in self.dir.glob("*.writer"):
+            if beat == self.beat:
+                continue
+            if not self.stale(beat):
+                count += 1
+            else:
+                with contextlib.suppress(OSError):
+                    beat.unlink()
+        return count
+
+    def heartbeat(self):
+        while not self.closed.wait(self.beat_s):
+            with self.lock:
+                if self.closed.is_set():
+                    return
+                with contextlib.suppress(OSError):
+                    try:
+                        os.utime(self.beat)
+                    except FileNotFoundError:  # cleared as stale while this process stood still
+                        self.beat.write_text(self.id, encoding="utf-8")
+            writers = self.count_writers()
+            with self.lock:
+                self.writers = writers
+                self.lock.notify_all()
+
+    def start_workers(self):
+        """The worker count a search starts with: the cores divided by the active writers."""
+        return max(1, self.cores // self.writers_at_start)
+
+    def share(self):
+        """The slots this search may hold at once. Call with the lock held."""
+        return max(1, -(-self.size // self.writers))
+
+    def path(self, i):
+        return self.dir / f"{i}.slot"
+
+    def take(self, i):
+        try:
+            fd = os.open(self.path(i), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:  # held, or on Windows still being removed
+            return False
+        try:
+            os.write(fd, self.id.encode())
+        finally:
+            os.close(fd)
+        return True
+
+    def acquire(self, prefer=0):
+        """Wait for a free slot and take it, trying slot `prefer` first. Returns the slot's number."""
+        with self.lock:
+            while self.busy >= self.share():
+                self.lock.wait(0.1)
+            self.busy += 1
+        pause, reap_at = 0.002, 0.0
+        try:
+            while True:
+                for k in range(self.size):
+                    i = (prefer + k) % self.size
+                    if self.take(i):
+                        with self.lock:
+                            self.held.add(i)
+                        return i
+                if time.perf_counter() >= reap_at:
+                    reap_at = time.perf_counter() + min(1.0, self.stale_s / 4)
+                    if self.reap():
+                        continue
+                time.sleep(pause)
+                pause = min(pause * 2, 0.05)
+        except BaseException:
+            with self.lock:
+                self.busy -= 1
+                self.lock.notify_all()
+            raise
+
+    def drop(self, i):
+        """Remove slot i's file while it still names this search. Reclaimed from a search that stood still, it is another's."""
+        slot = self.path(i)
+
+        def remove():
+            try:
+                if slot.read_text(encoding="utf-8") == self.id:
+                    slot.unlink()
+            except FileNotFoundError:
+                pass
+        retrying(remove, self.retry_s)
+
+    def release(self, i):
+        try:
+            self.drop(i)
+            gone = True
+        except OSError:  # another process still holds the file: close() tries again, and the stale time frees it at the latest
+            gone = False
+        with self.lock:
+            self.busy -= 1
+            if gone:
+                self.held.discard(i)
+            self.lock.notify_all()
+
+    def abandoned(self, i):
+        """Whether slot i is held by a search that stopped beating."""
+        slot = self.path(i)
+        try:
+            holder = slot.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return False  # free, or being written
+        if holder == self.id:
+            return False
+        if SLOT_HOLDER.fullmatch(holder):
+            return self.stale(self.dir / f"{holder}.writer")
+        return slot.exists() and self.stale(slot)  # half written, or not a search's: judged by its own age
+
+    def reap(self):
+        """Free the slots of searches that stopped beating. Returns how many.
+
+        One search reclaims at a time, under a lock file, and looks again once it holds the lock:
+        without that, two waiting searches could each remove the slot the other had just taken.
+        """
+        found = [i for i in range(self.size) if self.abandoned(i)]
+        if not found:
+            return 0
+        lock = self.dir / "reclaim.lock"
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except OSError:
+            if self.stale(lock):  # its taker died while reclaiming
+                with contextlib.suppress(OSError):
+                    lock.unlink()
+            return 0
+        freed = 0
+        try:
+            for i in found:
+                if self.abandoned(i):
+                    with contextlib.suppress(OSError):
+                        self.path(i).unlink()
+                        freed += 1
+        finally:
+            with contextlib.suppress(OSError):
+                retrying(lock.unlink, self.retry_s)
+        with self.lock:
+            self.reclaimed += freed
+        return freed
+
+
+@contextlib.contextmanager
+def compile_slot(worker):
+    """Hold one of the machine's compile slots for the length of a worker's build. A launcher with no pool builds freely."""
+    pool = getattr(worker.environment, "pool", None)
+    if pool is None:
+        yield
+        return
+    worker.slot = pool.acquire(getattr(worker, "slot", 0))
+    try:
+        yield
+    finally:
+        pool.release(worker.slot)
 
 
 class Launcher:
@@ -3078,7 +3337,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
         "best_score_start": start_best, "best_score_end": final,
         "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
         "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
-        "writers_active": 1,  # this writer: the tool cannot see the others
+        "writers_active": counts.get("writers_active", 1),  # the searches in the slot pool when this one started
     }
 
 
@@ -3201,8 +3460,10 @@ def cmd_search(a):
     state = search_dir(t["id"])
     latency = model_latency(state)
     ceiling = settings["ceiling_s"] if latency is None else min(latency, settings["ceiling_s"])
-    count = max(1, min(int(settings["workers"]) or os.cpu_count() or 1, template.space()))
+    pool = SlotPool(settings).open()
+    count = max(1, min(int(settings["workers"]) or pool.start_workers(), template.space()))
     launcher = Launcher(environment, settings, count)
+    launcher.pool = pool
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
@@ -3228,12 +3489,14 @@ def cmd_search(a):
         with persistent_wineserver(launcher):
             end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
+        counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
         notices = log_block(compiler, block_record(
             t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
             trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
     finally:
+        pool.close()
         shutil.rmtree(scratch, ignore_errors=True)
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
