@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -1972,11 +1973,15 @@ NEVER = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a; int WRONG_b;, int WRONG
                 "PERM_GENERAL(int WRONG_d;, int WRONG_e; int WRONG_f; int WRONG_g;) return 1; }\n")
 
 
-def search_project(base, **kw):
+def search_project(base, gate="register-allocation", **kw):
+    """A project with the search fakes. A `check` with the category `gate` opens template search; None runs none."""
     kw["config"] = dict(SEARCH_CONFIG, **kw.get("config", {}))
     kw["files"] = dict(SEARCH_FILES, **kw.get("files", {}))
     kw.setdefault("source", STUCK)
-    return Project(base, **kw)
+    p = Project(base, **kw)
+    if gate:
+        p.run("check", TID, "--category", gate)
+    return p
 
 
 def search(p, template, *more):
@@ -2070,6 +2075,162 @@ def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
     expect(not (p.root / "ledger").exists(), "search records nothing in the ledger")
     expect(p.git("status", "--porcelain") == "" and p.git("diff", "--name-only", "decomp-setup") == "",
            "nothing tracked or frozen changed, and nothing new sits in the tree")
+
+
+# ---------- check trail and the template-search gate ----------
+
+GATE_OPENS = ("register-allocation", "statement-order", "expression-shape")
+GATE_CLOSES = ("reference-gap", "data-layout", "calling-convention", "optimization", "unit-order", "build-fail")
+ATTEMPT_FIELDS = {"id", "ticket", "unix", "model", "tier", "result", "category", "differ_bytes", "evidence", "source_sha256"}
+
+
+def trail(p):
+    f = p.root / ".decomp" / "trail.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def check_with(p, wrong, *args):
+    """Run `check` on a unit the search fake scores at 2 * wrong differing bytes. Returns its parsed JSON line."""
+    p.write(SOURCE, MARK + "int f(void) { " + "int WRONG; " * wrong + "return 1; }\n")
+    r = p.run("check", TID, *args)
+    expect(r.returncode == 0, "check should run", r)
+    return json.loads(r.stdout.splitlines()[0])
+
+
+def set_tier(p, tier):
+    ticket = p.root / "tickets" / UNIT / f"{TID}.md"
+    ticket.write_text(ticket.read_text().replace("tier: SMALL", f"tier: {tier}"))
+
+
+def test_check_appends_one_trail_record_per_run_outside_the_commit(base):
+    p = search_project(base, gate=None)
+    before = time.time()
+    check_with(p, 2, "--category", "signedness")
+    check_with(p, 0)
+    got = trail(p)
+    expect([(e["ticket"], e["result"], e["differ_bytes"], e["category"]) for e in got] ==
+           [(TID, "differ", 4, "signedness"), (TID, "bytes-match", 0, "")], f"the trail should hold both runs: {got}")
+    expect(all(before - 1 <= e["unix"] <= time.time() + 1 for e in got), f"each record holds its time: {got}")
+    p.write(SOURCE, STUCK)
+    expect(p.git("status", "--porcelain") == "", "the trail is never something git would commit")
+    expect(not (p.root / "ledger").exists(), "check records nothing in the ledger")
+
+
+def test_check_refuses_a_category_outside_the_mismatch_list(base):
+    p = search_project(base, gate=None)
+    r = p.run("check", TID, "--category", "bogus")
+    expect(r.returncode == 1 and "unknown category bogus" in r.stderr and "register-allocation" in r.stderr,
+           "check should refuse the category and list the real ones", r)
+    expect(trail(p) == [], "a refused check leaves no trail record")
+
+
+def test_gate_opens_on_a_latest_category_that_small_variations_fix(base):
+    p = search_project(base, gate=None)
+    for category in GATE_OPENS:
+        out = check_with(p, 1, "--category", category)
+        expect(out["search_open"] is True and category in out["search_reason"], f"{category} should open the gate: {out}")
+    out = check_with(p, 0, "--category", "signedness")
+    expect(out["search_open"] is False, f"another category as the latest closes it again: {out}")
+    out = check_with(p, 1, "--category", "statement-order")
+    expect(out["search_open"] is True, f"the gate follows the latest category: {out}")
+    out = check_with(p, 0, "--category", "statement-order")
+    expect(out["search_open"] is False, f"a match leaves nothing to search for: {out}")
+
+
+def test_gate_opens_after_three_attempts_with_no_fall_in_differ_bytes(base):
+    p = search_project(base, gate=None)
+    opened = [check_with(p, wrong, "--category", "signedness")["search_open"] for wrong in (3, 2, 2, 3, 1, 1, 2)]
+    #         6      4      4      6 (none below 4)  2 (a fall)  2      4 (none below 2)
+    expect(opened == [False, False, False, True, False, False, True], f"the gate should open only on a stall: {opened}")
+
+
+def test_gate_stays_closed_for_tiny_tickets_and_stop_or_report_categories(base):
+    p = search_project(base, gate=None)
+    for category in GATE_CLOSES:
+        for _ in range(3):
+            out = check_with(p, 1, "--category", category)
+        expect(out["search_open"] is False and category in out["search_reason"],
+               f"{category} should keep the gate closed through a stall: {out}")
+    set_tier(p, "TINY")
+    out = check_with(p, 1, "--category", "register-allocation")
+    expect(out["search_open"] is False and "TINY" in out["search_reason"], f"a TINY ticket stays closed: {out}")
+    r, _ = search(p, MATCHING)
+    expect(r.returncode == 1 and "TINY" in r.stderr, "search should refuse a TINY ticket with the reason", r)
+
+
+def test_a_build_failure_keeps_the_gate_closed_without_a_category(base):
+    p = search_project(base, gate=None)
+    for _ in range(3):
+        p.write(SOURCE, MARK + "SYNTAX_ERROR\n")
+        r = p.run("check", TID)
+        out = json.loads(r.stdout.splitlines()[0])
+    expect(out["result"] == "build-fail" and out["search_open"] is False and "build-fail" in out["search_reason"],
+           f"three build failures should not open the gate: {out}")
+    expect(trail(p)[-1]["category"] == "build-fail", "the trail records the failure's category")
+
+
+def test_search_is_refused_with_the_reason_while_the_gate_is_closed(base):
+    p = search_project(base, gate=None)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "closed" in r.stderr and "no check has run" in r.stderr,
+           "search should refuse before any check", r)
+    check_with(p, 1, "--category", "data-layout")
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "data-layout" in r.stderr, "the refusal should give the reason", r)
+    expect(len(trail(p)) == 1 and not (p.root / ".decomp" / "search").exists(), "a refused search is not an attempt")
+
+
+def test_gate_is_reported_closed_when_the_contract_disallows_template_search(base):
+    p = search_project(base, gate=None, config={"template_search": False})
+    out = check_with(p, 1, "--category", "register-allocation")
+    expect(out["search_open"] is False and "contract" in out["search_reason"], f"check should say why: {out}")
+
+
+def test_a_search_round_adds_one_attempt_to_the_trail(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and out["end"] == "exhausted", "the round should run", r)
+    got = trail(p)
+    expect(len(got) == 2 and (got[1]["by"], got[1]["result"], got[1]["differ_bytes"]) == ("search", "differ", 4),
+           f"the round is one trail record holding its best score: {got}")
+    expect(got[1]["category"] == "register-allocation", "the round keeps the category it worked on")
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and len(trail(p)) == 3, "each round is one more attempt", r)
+
+
+def test_verify_records_a_template_round_in_the_evidence_and_leaves_the_ledger_fields(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match", "the round should match", r)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 0 and '"result": "bytes-match"' in r.stdout, "verify should record bytes-match", r)
+    lines = (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text().splitlines()
+    marked = [l for l in lines if l.startswith("template-round: ")]
+    expect(len(marked) == 1, f"the evidence should mark the attempt as a template round: {lines[-3:]}", r)
+    got = json.loads(marked[0][len("template-round: "):])
+    expect((got["best"], got["differ_bytes"], got["kinds"], got["category"]) == ("A1 B2", 0, [], "register-allocation"),
+           f"the evidence should hold the round's best candidate, its kinds, and its category: {got}")
+    attempts = p.lines("attempts.jsonl")
+    expect(len(attempts) == 1 and set(attempts[0]) == ATTEMPT_FIELDS, f"the ledger's fields are unchanged: {attempts}")
+
+
+def test_verify_without_the_flag_marks_no_template_round(base):
+    p = search_project(base, status="claimed")
+    r, out = search(p, MATCHING)
+    p.branch(f"w/{TID}", {SOURCE: Path(out["winner"]).read_text()})
+    r = p.run("verify", TID, "--model", "m")
+    expect(r.returncode == 0, "verify should pass", r)
+    expect("template-round" not in (p.root / "ledger" / "evidence" / f"{TID}-a001.txt").read_text(),
+           "an attempt is a template round only when the flag says so")
+
+
+def test_verify_refuses_the_template_round_flag_when_no_round_is_kept(base):
+    p = search_project(base, status="claimed")
+    p.branch(f"w/{TID}", {SOURCE: CLEAN})
+    r = p.run("verify", TID, "--model", "m", "--template-round")
+    expect(r.returncode == 1 and "no template round is kept" in r.stderr, "verify should refuse", r)
+    expect(p.lines("attempts.jsonl") == [] and p.status() == "claimed", "the refusal records nothing")
 
 
 def rmtree(path):
