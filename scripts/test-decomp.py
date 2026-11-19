@@ -1939,6 +1939,139 @@ def test_lock_refuses_a_held_lock_with_exit_3_and_unlock_frees_it(base):
     expect(r.returncode == 0, "unlocking a free lock is not an error", r)
 
 
+# ---------- template search ----------
+
+# The fake compiler for `search` copies the candidate into the object with every header it includes
+# beside itself, and fails when one is missing or the candidate holds SYNTAX_ERROR. The fake diff
+# scores 2 bytes per WRONG in the object and writes a long report that holds no source.
+SEARCH_BUILD_PY = """import os, re, sys
+src, obj = sys.argv[1], sys.argv[2]
+text = open(src).read()
+out = [text]
+for name in re.findall(r'#include "([^"]+)"', text):
+    beside = os.path.join(os.path.dirname(src), name)
+    if not os.path.exists(beside):
+        sys.exit("cannot open include file: " + name)
+    out.append(open(beside).read())
+if "SYNTAX_ERROR" in text:
+    sys.exit("error C2143: syntax error")
+open(obj, "w").write(chr(10).join(out))
+"""
+SEARCH_DIFF_PY = """import json, sys
+n = open(sys.argv[1]).read().count("WRONG")
+open(sys.argv[2], "w").write("".join("%04d mov eax, %s%s" % (i, "x" * 300, chr(10)) for i in range(400)))
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n}))
+"""
+SEARCH_CONFIG = {"build": PY + ' "{tools}/search_build.py" "{source}" "{obj}"',
+                 "diff": PY + ' "{tools}/search_diff.py" "{obj}" "{report}"'}
+SEARCH_FILES = {"tools/search_build.py": SEARCH_BUILD_PY, "tools/search_diff.py": SEARCH_DIFF_PY}
+STUCK = MARK + "int f(void) { int WRONG_now; return 1; }\n"  # the unit as the writer left it
+MATCHING = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int right_a;) "
+                   "PERM_GENERAL(int WRONG_b;, int WRONG_c; int WRONG_d;, int right_b;) return 1; }\n")
+NEVER = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a; int WRONG_b;, int WRONG_c;) "
+                "PERM_GENERAL(int WRONG_d;, int WRONG_e; int WRONG_f; int WRONG_g;) return 1; }\n")
+
+
+def search_project(base, **kw):
+    kw["config"] = dict(SEARCH_CONFIG, **kw.get("config", {}))
+    kw["files"] = dict(SEARCH_FILES, **kw.get("files", {}))
+    kw.setdefault("source", STUCK)
+    return Project(base, **kw)
+
+
+def search(p, template, *more):
+    """Run `search` on a template kept outside the tree. Returns (process, parsed summary or None)."""
+    path = p.base / "template.c"
+    path.write_text(template, encoding="utf-8")
+    r = p.run("search", TID, str(path), *more)
+    try:
+        return r, json.loads(r.stdout.splitlines()[0])
+    except (ValueError, IndexError):
+        return r, None
+
+
+def test_search_returns_the_matching_combination_and_a_plain_winner(base):
+    p = search_project(base)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 0 and out is not None, "search should print a summary", r)
+    expect(out["end"] == "match" and out["best"] == {"code": "A1 B2", "differ_bytes": 0},
+           "the summary should name the matching choices", r)
+    winner = Path(out["winner"])
+    expect(p.root.resolve() not in winner.resolve().parents, "the winner is written outside the tree", r)
+    expect(winner.read_text() == MARK + "int f(void) { int right_a; int right_b; return 1; }\n",
+           f"the winner should be plain C: {winner.read_text()!r}", r)
+
+
+def test_search_without_a_match_returns_the_closest_candidate_as_exhausted(base):
+    r, out = search(search_project(base), NEVER)
+    expect(r.returncode == 0 and out is not None, "search should print a summary", r)
+    expect(out["end"] == "exhausted" and out["best"] == {"code": "A1 B0", "differ_bytes": 4},
+           "the summary should name the candidate with the fewest differing bytes", r)
+    expect(out["counts"] == {"space": 4, "compiled": 4, "build_fail": 0, "guardrail": 0}, "every candidate is built", r)
+    expect("winner" not in out, "a round without a match writes no winner", r)
+
+
+def test_search_is_refused_when_the_contract_disallows_template_search(base):
+    r, out = search(search_project(base, config={"template_search": False}), MATCHING)
+    expect(r.returncode == 1 and out is None, "search should be refused", r)
+    expect("does not allow template search" in r.stderr, "the refusal should give the reason", r)
+
+
+def test_search_exits_6_when_the_doctor_checks_fail(base):
+    r, out = search(search_project(base, installed=()), MATCHING)
+    expect(r.returncode == ENV_EXIT and out is None and "ENVIRONMENT" in r.stderr, "search should exit 6", r)
+
+
+def test_search_candidate_builds_with_a_header_beside_the_unit(base):
+    p = search_project(base, files={"src/local.h": "/* beside the unit */\n"})
+    r, out = search(p, '#include "local.h"\n' + MATCHING)
+    expect(out is not None and out["end"] == "match" and out["counts"]["build_fail"] == 0,
+           "the include beside the unit should resolve for each candidate", r)
+
+
+def test_search_summary_stays_under_the_cap_and_holds_no_source(base):
+    r, out = search(search_project(base), NEVER)
+    expect(out is not None and len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+    expect(out["window"] and out["window"][0].startswith("0000 mov eax"), "the summary shows the report's first lines", r)
+    expect("WRONG" not in r.stdout and "int f" not in r.stdout, "the summary holds no candidate source", r)
+
+
+def test_search_reports_the_build_failure_when_no_candidate_builds(base):
+    r, out = search(search_project(base), MATCHING.replace("return 1;", "SYNTAX_ERROR"))
+    expect(out is not None and out["end"] == "exhausted" and out["best"] is None, "no candidate is the best", r)
+    expect(out["counts"]["build_fail"] == 6 and "C2143" in out["failure"], "the summary carries the compiler's error", r)
+
+
+def test_search_detail_returns_one_candidates_source_and_score(base):
+    p = search_project(base)
+    search(p, NEVER)
+    r = p.run("search", TID, "--detail", "A0 B1")
+    head, _, source = r.stdout.partition("\n")
+    expect(r.returncode == 0 and json.loads(head) == {"code": "A0 B1", "result": "differ", "differ_bytes": 10},
+           "the detail should give the candidate's score", r)
+    expect(source == MARK + "int f(void) { int WRONG_a; int WRONG_b; int WRONG_e; int WRONG_f; int WRONG_g; return 1; }\n",
+           "the detail should give the candidate's source", r)
+    r = p.run("search", TID, "--detail", "A0 B7")
+    expect(r.returncode == 1 and "B7" in r.stderr, "a code outside the template is refused", r)
+
+
+def test_search_refuses_a_macro_it_does_not_read(base):
+    r, out = search(search_project(base), MATCHING + "PERM_LINESWAP(a; b;)\n")
+    expect(r.returncode == 1 and out is None and "PERM_LINESWAP" in r.stderr and "line 3" in r.stderr,
+           "the refusal should name the macro and its line", r)
+
+
+def test_search_leaves_the_unit_the_ledger_and_frozen_files_unchanged(base):
+    p = search_project(base)
+    for template in (MATCHING, NEVER):
+        r, out = search(p, template)
+        expect(out is not None, "search should run", r)
+    expect((p.root / SOURCE).read_text() == STUCK, "the unit's source is as the writer left it")
+    expect(not (p.root / "ledger").exists(), "search records nothing in the ledger")
+    expect(p.git("status", "--porcelain") == "" and p.git("diff", "--name-only", "decomp-setup") == "",
+           "nothing tracked or frozen changed, and nothing new sits in the tree")
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)

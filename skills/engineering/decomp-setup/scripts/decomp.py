@@ -1698,6 +1698,307 @@ def cmd_sync(a):
     print(f"synced {len(units)} unit issues and progress issue #{n}")
 
 
+# ---------- template search ----------
+#
+# The stages, in the order a round runs them:
+#   parse_template   template text -> Template (the choice points and the text between them)
+#   candidates       Template -> the seeds to try, in order
+#   Worker.score     one candidate's source -> Score, through the build and diff adapters
+#   run_round        the loop over candidates: keeps the best, stops on a match
+#   summary          the round's result -> the capped JSON the writer reads
+# A round's template and results stay in this machine's folder, where the detail form reads them.
+
+SUMMARY_TOKENS = 600  # the summary's size cap
+TOKEN_CHARS = 4  # how the cap is measured: characters of the summary's JSON per token
+WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
+WINDOW_WIDTH = 120  # characters kept of each of those lines
+FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
+PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
+CHOICE_CODE = re.compile(r"([A-Z]+)(\d+)")
+Choice = collections.namedtuple("Choice", "label alternatives")
+Score = collections.namedtuple("Score", "result differ_bytes log")  # as build_and_diff returns them
+
+
+def choice_label(n):
+    """The label of the n-th choice point: A to Z, then AA, AB, and on."""
+    return (choice_label(n // 26 - 1) if n >= 26 else "") + chr(ord("A") + n % 26)
+
+
+def split_alternatives(code, text, start, end):
+    """The alternatives between start and end: text split at the commas that sit inside no bracket in code."""
+    out, depth, at = [], 0, start
+    for i in range(start, end):
+        depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(code[i], 0)
+        if code[i] == "," and depth == 0:
+            out.append(text[at:i].strip())
+            at = i + 1
+    return out + [text[at:end].strip()]
+
+
+class Template:
+    """A unit's source with choice points: parts holds the text between them and each Choice, in order.
+
+    A candidate is one alternative per choice point. It is named three ways: a vector (one index per
+    choice point), a seed (the vector as one mixed-radix integer, the first choice point lowest), and a
+    choice code (`A1 B0`). Seed 0 is the baseline: every first alternative.
+    """
+
+    def __init__(self, parts):
+        self.parts = parts
+        self.choices = [p for p in parts if isinstance(p, Choice)]
+
+    def space(self):
+        n = 1
+        for c in self.choices:
+            n *= len(c.alternatives)
+        return n
+
+    def vector(self, seed):
+        out = []
+        for c in self.choices:
+            seed, pick = divmod(seed, len(c.alternatives))
+            out.append(pick)
+        return out
+
+    def seed(self, vector):
+        seed = 0
+        for c, pick in reversed(list(zip(self.choices, vector))):
+            seed = seed * len(c.alternatives) + pick
+        return seed
+
+    def code(self, vector):
+        return " ".join(f"{c.label}{pick}" for c, pick in zip(self.choices, vector))
+
+    def from_code(self, code):
+        """The vector a choice code names. A choice point the code leaves out keeps its first alternative."""
+        picks = {}
+        for word in code.split():
+            m = CHOICE_CODE.fullmatch(word)
+            choice = m and next((c for c in self.choices if c.label == m.group(1)), None)
+            if not choice or int(m.group(2)) >= len(choice.alternatives):
+                die(f"'{word}' names no alternative of this template; a choice code looks like "
+                    f"'{self.code([0] * len(self.choices))}'")
+            picks[choice.label] = int(m.group(2))
+        return [picks.get(c.label, 0) for c in self.choices]
+
+    def render(self, vector):
+        """The candidate as plain source: each choice point replaced by its picked alternative."""
+        picks = iter(vector)
+        return "".join(p.alternatives[next(picks)] if isinstance(p, Choice) else p for p in self.parts)
+
+
+def parse_template(text):
+    """Read a template's choice points. Comments and literals cannot hold one. Stops on a malformed template."""
+    code, _ = lexed(text)
+    parts, at = [], 0
+
+    def where(i):
+        return f"line {text.count(chr(10), 0, i) + 1}"
+
+    for m in PERM_MACRO.finditer(code):
+        if m.start() < at:
+            die(f"template {where(m.start())}: a choice point inside another is not supported")
+        if m.group() != "PERM_GENERAL":
+            die(f"template {where(m.start())}: {m.group()} is not supported; write PERM_GENERAL(a, b, ...)")
+        inner = parenthesised(code, text, m.end())
+        if not inner:
+            die(f"template {where(m.start())}: PERM_GENERAL has no closing parenthesis")
+        end = inner[1]
+        alternatives = split_alternatives(code, text, end - 1 - len(inner[0]), end - 1)
+        if len(alternatives) < 2:
+            die(f"template {where(m.start())}: a choice point needs two or more alternatives")
+        parts += [text[at:m.start()], Choice(choice_label(len(parts) // 2), alternatives)]
+        at = end
+    return Template(parts + [text[at:]])
+
+
+def candidates(template):
+    """The seeds a round tries, in order: the whole space, baseline first."""
+    return range(template.space())
+
+
+def beside(tree, source, text):
+    """The tree's files a source at this path reaches through includes looked up beside the including file.
+
+    They are what a copy of the source elsewhere needs next to it. A header found only on the
+    compiler's include path is not listed: the build still finds it from the tree.
+    """
+    found, todo, seen = [], [(source, text)], {source.casefold()}
+    while todo:
+        rel, body = todo.pop()
+        for name in sorted(includes(body)):
+            spelled = name.replace("\\", "/")
+            if spelled.startswith("/") or re.match(r"[A-Za-z]:", spelled):
+                continue
+            parts = os.path.normpath(os.path.join(os.path.dirname(rel), spelled)).replace("\\", "/").split("/")
+            hit = None if parts[0] == ".." else in_tree(tree, parts)
+            hit = hit and hit.relative_to(tree).as_posix()
+            if hit and hit.casefold() not in seen:
+                seen.add(hit.casefold())
+                found.append(hit)
+                todo.append((hit, (Path(tree) / hit).read_text(encoding="utf-8", errors="replace")))
+    return found
+
+
+def source_text(data):
+    """Source bytes as text that source_bytes turns back into the same bytes, whatever their encoding."""
+    return data.decode("utf-8", errors="surrogateescape")
+
+
+def source_bytes(text):
+    return text.encode("utf-8", errors="surrogateescape")
+
+
+class Worker:
+    """One build slot: a scratch copy of the unit's folder layout, its file names fixed and overwritten per candidate.
+
+    The candidate sits at the unit's own path under the scratch folder, with every header the template
+    includes beside itself, so those includes still resolve. Adapters run in tree, as for `check`.
+    """
+
+    def __init__(self, folder, environment, t, compiler, tree, template_text):
+        self.environment, self.t, self.compiler, self.tree = environment, t, compiler, tree
+        self.source = Path(folder) / "unit" / t["source"]
+        self.objdir = Path(folder) / "obj"
+        self.report = Path(folder) / "diff.txt"
+        self.objdir.mkdir(parents=True)
+        for rel in beside(tree, t["source"], template_text):
+            dest = Path(folder) / "unit" / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(tree) / rel, dest)
+        self.source.parent.mkdir(parents=True, exist_ok=True)
+
+    def score(self, text):
+        """Build and diff one candidate's source. The diff report of this candidate is left in self.report."""
+        marks = marker_count(text, self.t["id"])
+        if marks != 1:
+            return Score("guardrail", None, f"expected one '@decomp {self.t['id']}' marker comment, found {marks}")
+        bad = scan(text)
+        if bad:
+            return Score("guardrail", None, "\n".join(bad))
+        self.source.write_bytes(source_bytes(text))
+        self.report.unlink(missing_ok=True)
+        args = (self.environment, self.t, self.compiler, self.tree, str(self.source))
+        obj, failure = build_unit(*args, self.objdir, str(self.report))
+        if failure:
+            return Score("build-fail", None, failure)
+        return Score(*diff_unit(*args, obj, str(self.report)))
+
+
+def rank(score):
+    """A score's sort key, lower being closer to the original. None when the candidate gave no score."""
+    if score.result not in ("bytes-match", "differ") or score.differ_bytes is None or score.differ_bytes < 0:
+        return None
+    return (score.differ_bytes,)
+
+
+def window(report):
+    """The lines of a diff report the summary shows: its first ones, each cut to a fixed width."""
+    try:
+        with open(report, encoding="utf-8", errors="replace") as f:
+            return [line.rstrip("\n")[:WINDOW_WIDTH] for _, line in zip(range(WINDOW_LINES), f)]
+    except OSError:
+        return []
+
+
+def run_round(template, score, report):
+    """Try each candidate until one matches or none is left. Returns (end reason, best, counts, results).
+
+    score turns a candidate's source into a Score and leaves its diff report at report.
+    best is a dict: seed, score, and diff window of the closest candidate, or only the first failure
+    log when no candidate was scored. results holds one record per candidate tried.
+    """
+    counts = {"space": template.space(), "compiled": 0, "build_fail": 0, "guardrail": 0}
+    best, results, failure = None, [], ""
+    for seed in candidates(template):
+        vector = template.vector(seed)
+        s = score(template.render(vector))
+        counts["guardrail" if s.result == "guardrail" else "compiled"] += 1
+        counts["build_fail"] += s.result == "build-fail"
+        results.append({"seed": seed, "code": template.code(vector), "result": s.result, "differ_bytes": s.differ_bytes})
+        if rank(s) is None:
+            failure = failure or s.log
+        elif best is None or rank(s) < rank(best["score"]):
+            best = {"seed": seed, "score": s, "window": window(report)}
+        if s.result == "bytes-match":
+            return "match", best, counts, results
+    return "exhausted", best or {"failure": failure}, counts, results
+
+
+def summary(template, end, best, counts, winner):
+    """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
+    out = {"end": end, "best": None, "counts": counts}
+    if "score" in best:
+        out["best"] = {"code": template.code(template.vector(best["seed"])), "differ_bytes": best["score"].differ_bytes}
+    if winner:
+        out["winner"] = str(winner)
+    elif "score" in best:
+        out["window"] = list(best["window"])
+    else:
+        out["failure"] = best["failure"][-FAILURE_CHARS:]
+    cap = SUMMARY_TOKENS * TOKEN_CHARS
+    while len(json.dumps(out)) > cap and out.get("window"):
+        out["window"].pop()
+    over = len(json.dumps(out)) - cap
+    if over > 0 and out.get("failure"):
+        out["failure"] = out["failure"][over:]
+    return out
+
+
+def search_dir(tid):
+    """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
+    return checkout_dir() / "search" / tid
+
+
+def cmd_search(a):
+    t, _ = read_ticket(a.id)
+    if a.detail is not None:
+        return search_detail(t, a.detail)
+    if not a.template:
+        die("search <id> <template file>, or search <id> --detail '<choice code>' for one candidate of the last round")
+    environment, compiler = prepare(t)
+    if not contract_rules()[0]:
+        die("the contract does not allow template search (`template_search` is false in decomp.json); "
+            "nothing was built.")
+    try:
+        data = Path(a.template).read_bytes()
+    except OSError as e:
+        die(f"cannot read the template: {e}")
+    text = source_text(data)
+    template = parse_template(text)
+    tree = os.getcwd()
+    scratch = tempfile.mkdtemp(prefix="decomp-search-")
+    try:
+        worker = Worker(Path(scratch) / "w0", environment, t, compiler, tree, text)
+        end, best, counts, results = run_round(template, worker.score, worker.report)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    state = search_dir(t["id"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "template").write_bytes(data)
+    (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
+    winner = None
+    if end == "match":
+        winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
+        winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
+    print(json.dumps(summary(template, end, best, counts, winner)))
+
+
+def search_detail(t, code):
+    """Print one candidate of the ticket's last round: a JSON line with its score, then its source."""
+    state = search_dir(t["id"])
+    if not (state / "template").exists():
+        die(f"no template round is kept for {t['id']} on this machine; run search with a template first")
+    template = parse_template(source_text((state / "template").read_bytes()))
+    vector = template.from_code(code)
+    seed = template.seed(vector)
+    tried = [json.loads(x) for x in (state / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+    hit = next((r for r in tried if r["seed"] == seed), {"result": "not-tried", "differ_bytes": None})
+    print(json.dumps({"code": template.code(vector), "result": hit["result"], "differ_bytes": hit["differ_bytes"]}))
+    sys.stdout.flush()
+    sys.stdout.buffer.write(source_bytes(template.render(vector)))
+
+
 def main():
     global ROOT, CFG
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
@@ -1730,6 +2031,8 @@ def main():
     x = s.add_parser("similar"); x.add_argument("id"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_similar)
     x = s.add_parser("lock"); x.add_argument("name"); x.add_argument("--by", required=True); x.set_defaults(f=cmd_lock)
     x = s.add_parser("unlock"); x.add_argument("name"); x.set_defaults(f=cmd_unlock)
+    x = s.add_parser("search"); x.add_argument("id"); x.add_argument("template", nargs="?")
+    x.add_argument("--detail", metavar="CODE"); x.set_defaults(f=cmd_search)
     s.add_parser("link").set_defaults(f=cmd_link)
     s.add_parser("report").set_defaults(f=cmd_report)
     s.add_parser("sync").set_defaults(f=cmd_sync)

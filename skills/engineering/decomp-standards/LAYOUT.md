@@ -7,7 +7,7 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 | `DECOMP.md` | The contract: target, compiler, flags, scope, policies, model roster | `/decomp-setup` only |
 | `decomp.json` | The contract's machine-readable part (commands, guarded paths, the pragma and attribute allowlists, `template_search` and `fakematch` (the contract's template-search and fakematch rules, which `doctor` prints and stops without), the default compiler and each unit that names its own, `link_milestone` (see below), and `link_unavailable` when the target cannot be linked whole) | `/decomp-setup` only |
 | `toolchain.json` | The accepted target editions (hashes, probes, the functions each holds differently), the known-wrong editions, host prerequisites, and each required tool (per host, where hosts differ): version banner, required files, source, size, hash, unpack steps | `/decomp-setup` only |
-| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary) | `/decomp-setup`, `decomp.py` |
+| `.decomp/` | This machine only, never committed: `local.json` (target path, user-installed tool folders), `toolchain/`, `downloads/`, locks, `link/` (the linked binary), `search/<ticket id>/` (the ticket's last template round: its template and each candidate's score) | `/decomp-setup`, `decomp.py` |
 | `IDENTIFY.md` | The compiler investigation: facts, inferences, ranked candidates, toolchain requirements | `decomp-identify` |
 | `docs/adr/` | Hard-to-reverse decisions (scope, relocation policy, fakematch rule, an accepted edition) | `domain-modeling` |
 | `tools/` | `decomp.py` plus the project's adapters, the tool wrapper, and any unpack scripts | `/decomp-setup` only |
@@ -92,6 +92,8 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `next [--n N] [--first ID --reason TEXT]` | List ready tickets smallest first (tier, then size, then address). `--first` lists that ready ticket first and records an `out-of-order` event |
 | `claim <id> --by <name>` / `release <id> [--to <status>]` | Take or give back a ticket |
 | `check <id>` | Writer's loop: build and diff in the current worktree, record nothing |
+| `search <id> <template file>` | One template round: try every candidate of a template and report the closest. See [Template search](#template-search). Records nothing and writes nothing in the tree |
+| `search <id> --detail '<choice code>'` | Print one candidate of the ticket's last round: a JSON line (`code`, `result`, `differ_bytes`), then its source as plain C. `result` is `not-tried` for a candidate the round did not reach |
 | `verify <id> --model <m> [--category <c>]` | Rebuild the writer's branch in a clean worktree, compare bytes, record the attempt |
 | `audit <id> pass\|fail --auditor <m>` | Record the auditor's verdict; `pass` records the match |
 | `integrate <id>` | Mark a merged match integrated |
@@ -104,11 +106,27 @@ Run from the project root: `python tools/decomp.py <command>`. `python` is the h
 | `report` | Progress, attribution, learning metrics, early warning; regenerates `OPEN.md`, checks `PATTERNS.md`. Prints one `claims:` line after the `status:` line: each `claimed`, `bytes-match` or `matched` ticket with its claimant (`<id> <claimant>`, comma-separated), or `none`. Prints one `state:` line computed from ticket statuses: `finished` (every in-scope ticket is `revalidated`), `stuck` (not finished, and every remaining ticket is `blocked-reference` or `regressed`), or `more` (anything else). Prints one `milestone:` line: `due` when the in-scope bytes of units fully matched (every in-scope ticket `integrated` or `revalidated`) and not in the last `link` event's `units` reach the link milestone, else `not due`, with those bytes and the milestone size. It never says `due` when `link_unavailable` is set. The milestone is `link_milestone` in `decomp.json`, mirrored in the contract's Tracking section: a percentage of the in-scope bytes (`"10%"`) or a byte count (`65536`), used as given; without it, 5% of the in-scope bytes with a floor of 16 KB (16384 B) |
 | `sync` | Push unit checklists and the progress issue to GitHub, when enabled |
 
-`inventory`, `disasm`, `check`, `verify`, `revalidate`, and `link` run the `doctor` checks first and run no adapter when they fail. `check` and `disasm` skip them while `toolchain.json`, the target, and the tools' files are unchanged since the last pass. Exit 6 always means the machine, not the source: no writer fixes it, and no attempt is recorded.
+`inventory`, `disasm`, `check`, `search`, `verify`, `revalidate`, and `link` run the `doctor` checks first and run no adapter when they fail. `check`, `search`, and `disasm` skip them while `toolchain.json`, the target, and the tools' files are unchanged since the last pass. Exit 6 always means the machine, not the source: no writer fixes it, and no attempt is recorded.
 
-`check` and `verify` also exit 6 for a ticket no result could count for on this machine: the recognised edition's `differs` list names it, or its unit's compiler is missing from `toolchain.json`, listed only for another host, or not provisioned. A compiler that builds only other units does not stop this one.
+`check`, `search`, and `verify` also exit 6 for a ticket no result could count for on this machine: the recognised edition's `differs` list names it, or its unit's compiler is missing from `toolchain.json`, listed only for another host, or not provisioned. A compiler that builds only other units does not stop this one.
 
 `revalidate` prints `SKIPPED` for each such ticket. On the integration branch it leaves that ticket's status alone and still exits 0. On a repair ref or a candidate ref it exits 6: a repair is accepted, and a candidate measured, only on a machine that rebuilt every match it could break. A candidate run with a skipped ticket exits 6 even when it also lists regressions.
+
+## Template search
+
+A **template** is the unit's whole source file, `@decomp` marker included, with **choice points**: `PERM_GENERAL(a, b, ...)`, each listing two or more alternative spellings of the text at that place. Keep the template file outside the project tree.
+
+- **Alternatives.** They are split at the commas that sit inside no bracket, so an alternative holding a bare comma (`int a, b;`) is written another way. Surrounding white space is dropped, and an empty alternative is allowed. A choice point inside a comment or a literal is not read. A choice point inside another, and any other `PERM_` macro, is refused.
+- **Choice code.** Choice points are labelled `A`, `B`, and on, in file order, and alternatives are numbered from 0. A candidate is one alternative per choice point, named by its choice code: `A1 B0`. All zeros is the baseline.
+- **A round.** `search` needs `template_search` to be true in `decomp.json` and refuses, with the reason, when it is false. It builds each candidate in a scratch copy of the unit's folder layout (the candidate at the unit's own path, with the headers the template includes beside itself), runs the adapters from the current worktree as `check` does, and scores each candidate with the `diff` adapter's `differ_bytes`. A candidate the guardrail scan refuses, or with no single marker, is not built. The round stops at the first exact match.
+- **Summary.** One JSON line, capped at about 600 tokens, that never holds candidate source:
+  - `end`: `match`, or `exhausted` when every candidate was tried without one.
+  - `best`: the closest candidate's `code` and `differ_bytes`, or `null` when none was scored.
+  - `window`: the first lines of the best candidate's diff report (no match only).
+  - `failure`: the end of the first failure log (only when none was scored).
+  - `counts`: `space` (candidates in the template), `compiled`, `build_fail`, `guardrail`.
+  - `winner`: on a match, the path of the matching candidate as plain C with no macros, in a temporary folder outside the tree.
+- **Not a match claim.** A `match` is a search result. The writer copies the winner into the unit and still passes `check`, `verify`, and the audit.
 
 ## Change flow
 
