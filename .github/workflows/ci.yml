@@ -32,3 +32,15 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:decomp
+
+  # Windows is the main target for the decomp tool, so its suite runs here too.
+  # Tests that cannot run on Windows skip themselves with a stated reason.
+  test-decomp-windows:
+    name: Decomp suite on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm run test:decomp
