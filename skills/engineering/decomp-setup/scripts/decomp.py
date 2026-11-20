@@ -3949,6 +3949,7 @@ class Memo:
         self.lock = threading.Lock()
         self.seen, self.objects = {}, set()  # seen: source key to its entry, or to an Event while a worker builds it
         self.src_hits = self.cache_hits = self.object_hits = 0
+        self.unhashed = 0  # scored entries that carry no object key: with `function` hashing, no `function_sha256`
 
     def key(self, kind, data):
         h = hashlib.sha256(self.ctx.encode() + b"\0" + kind.encode() + b"\0")
@@ -3964,6 +3965,7 @@ class Memo:
     def new_object(self, e):
         """Whether the entry's object is the first of its hash this round. Call with the lock held."""
         new = bool(e.get("o")) and e["o"] not in self.objects
+        self.unhashed += not e.get("o") and e["r"] in ("differ", "bytes-match")
         if new:
             self.objects.add(e["o"])
         return new
@@ -4032,10 +4034,26 @@ class Memo:
                 self.cache["obj"][okey] = e
         return e
 
+    def blind(self):
+        """Whether the round has no object identity: objects are not repeatable, and no diff result carried `function_sha256`.
+
+        Nothing is then deduped by object and no choice point is frozen as inert. No identity is made
+        up from the score or the report: equal reports would freeze choices that are not inert.
+        """
+        with self.lock:
+            return self.hashing == "function" and not self.objects and self.unhashed > 0
+
     def counts(self):
-        """What the layers did, for the summary."""
-        return {"src_dedupe_hits": self.src_hits, "cache_hits": self.cache_hits, "object_hits": self.object_hits,
-                "unique_objects": len(self.objects), "hashing": self.hashing}
+        """What the layers did, for the summary. The two object counts are None when nothing was hashed (see blind)."""
+        blind = self.blind()
+        return {"src_dedupe_hits": self.src_hits, "cache_hits": self.cache_hits,
+                "object_hits": None if blind else self.object_hits,
+                "unique_objects": None if blind else len(self.objects), "hashing": self.hashing}
+
+
+NO_IDENTITY = ("no-object-identity: object dedupe and the inert freeze are off, because the compiler's objects differ "
+               "between two compiles and the diff adapter prints no function_sha256. The fix is a diff adapter that "
+               "prints it: a contract change, made through /decomp-setup's upgrade.")
 
 
 PERF = "perf.jsonl"  # the performance log: this machine only, never committed, shared by every worktree
@@ -4773,6 +4791,8 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
+    if memo.blind():
+        notices = [NO_IDENTITY] + notices
     out = summary(template, end, best, counts, winner, results, history_line(past, category), notices,
                   stop_advice(trail(t["id"])))
     if found:
