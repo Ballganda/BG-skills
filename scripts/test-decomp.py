@@ -4200,6 +4200,86 @@ def test_a_foreground_block_gets_its_slots_back_from_a_background_search(base):
         stop_background(two, env=shared)
 
 
+def kept_log(p):
+    return p.root / ".decomp" / "search" / TID / "background.log"
+
+
+def forget_latency(p):
+    """Drop when the last round ended, so the next round's ceiling is the setting and not the seconds since."""
+    (p.root / ".decomp" / "search" / TID / "ended").unlink()
+
+
+def waits_on(p, name):
+    """Whether the running background search has logged that it waits on the foreground search `name`."""
+    log = background_folder(p) / "log"
+    return log.exists() and name in log.read_text(encoding="utf-8", errors="replace")
+
+
+def test_a_background_search_that_built_nothing_leaves_its_log(base):
+    p = background_project(base)
+    try:
+        writer(p, "4242-feed", -600)  # another search's foreground block, for as long as the test runs
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: waits_on(p, "4242-feed")), "the background search should wait on the foreground block")
+        r, found = stop_background(p)
+        expect(found is not None and found["tried"] == 0, f"it should have built nothing: {r.stdout}", r)
+        expect(found.get("log") and Path(found["log"]) == kept_log(p) and kept_log(p).exists(),
+               f"the report names the kept log, beside the round's files: {found}", r)
+        first = kept_log(p).read_text(encoding="utf-8", errors="replace")
+        expect("4242-feed" in first, f"the log names the foreground search it waited on: {first}", r)
+        expect(not background_folder(p).exists(), "the background search's other files are cleared away", r)
+
+        (slot_folder(p) / "4242-feed.writer").unlink()
+        forget_latency(p)
+        r, out = search(p, wide(7))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: background_tried(p) >= 2), "with no foreground block the background search builds")
+        r, found = stop_background(p)
+        expect(found is not None and found["tried"] >= 2 and "log" not in found,
+               f"a background search that tried candidates keeps no log: {found}", r)
+        expect(kept_log(p).read_text(encoding="utf-8", errors="replace") == first, "the last kept log stays as it was", r)
+
+        writer(p, "4343-beef", -600)
+        forget_latency(p)
+        r, out = search(p, wide(6))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: waits_on(p, "4343-beef")), "the background search should wait on the foreground block")
+        r, found = stop_background(p)
+        expect(found is not None and found["tried"] == 0 and found.get("log"), f"it should have built nothing: {r.stdout}", r)
+        last = kept_log(p).read_text(encoding="utf-8", errors="replace")
+        expect("4343-beef" in last and "4242-feed" not in last, f"the new log replaces the last kept one: {last}", r)
+    finally:
+        stop_background(p)
+
+
+def test_a_background_search_does_not_yield_to_the_call_that_started_it(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        caller = json.loads((background_folder(p) / "spawn.json").read_text()).get("writer")
+        expect(caller, "the background search is told the name its caller had in the pool", r)
+        beat = writer(p, caller, -600)  # the call has exited, and its heartbeat in the pool is still fresh
+        before = background_tried(p)
+        expect(wait_for(lambda: background_tried(p) >= before + 2, seconds=out["continues_s"]),
+               "the background search should build candidates within its budget", r)
+        expect(beat.exists(), "the caller's heartbeat stayed in the pool all the while", r)
+    finally:
+        stop_background(p)
+
+
+def test_collecting_a_background_search_stuck_in_a_compile_is_bounded(base):
+    p, beat = hung_background(base)
+    began = time.time()
+    r, found = stop_background(p)
+    took = time.time() - began
+    expect(r.returncode == 0 and found is not None and found["end"] == "stopped",
+           f"the stop form returns what the background search had: {r.stdout}", r)
+    expect(took < 15, f"collecting should wait no longer than its 10 s bound, it took {took:.1f} s", r)
+    expect_background_dead(p, beat, r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
