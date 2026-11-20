@@ -126,7 +126,7 @@ class Project:
         for name, text in (files or {}).items():
             self.write(name, text)
         self.write(f"tickets/{UNIT}/{TID}.md", ticket_text(TID, ADDRESS, SOURCE, status))
-        self.write(".decomp/local.json", json.dumps({"target": str(self.target)}))
+        self.write(".decomp/local.json", json.dumps({"target": str(self.target), "search": {"background": 0}}))
         for name in installed:
             self.write(f".decomp/toolchain/{name}/cc.py", FAKE_TOOL)
         self.git("init", "-q", "-b", "main")
@@ -2665,6 +2665,7 @@ open(sys.argv[2], "w").write(re.sub(r"/[*].*?[*]/", "", open(sys.argv[1]).read()
 def tune(p, **search):
     """Override block constants in the project's local.json, as a user would for this machine."""
     path = p.root / ".decomp" / "local.json"
+    search.setdefault("background", 0)  # a test that wants a search to go on in the background asks for it
     path.write_text(json.dumps(dict(json.loads(path.read_text()), search=search)))
 
 
@@ -3044,6 +3045,219 @@ def test_search_starts_no_wineserver_when_the_toolchain_does_not_use_wine(base):
     p, log = wine_project(base, wine=False)
     r, out = search_with_env(p, MATCHING)
     expect(out["end"] == "match" and not log.exists(), "no wine prerequisite, no wineserver", r)
+
+
+# ---------- template search: background search ----------
+
+# A fake compiler that takes 0.3 s and logs when each build starts and ends, with the TAG_ word its
+# source holds. On a candidate holding HANG it first starts a grandchild that keeps adding to a
+# heartbeat file for up to 30 seconds, then hangs.
+BG_BUILD_PY = """import os, re, subprocess, sys, time
+src, obj, folder = sys.argv[1:4]
+text = open(src).read()
+tag = (re.findall(r"TAG_([a-z]+)", text) or ["none"])[0]
+os.makedirs(folder, exist_ok=True)
+def note(what):
+    open(os.path.join(folder, "builds.log"), "a").write("%s %s %.3f%s" % (tag, what, time.time(), chr(10)))
+note("start")
+if "HANG" in text:
+    code = "import sys, time" + chr(10) + "for i in range(300):" + chr(10) + "    open(sys.argv[1], 'a').write('x')" + chr(10) + "    time.sleep(0.1)"
+    subprocess.Popen([sys.executable, "-c", code, os.path.join(folder, "beat")])
+    time.sleep(60)
+time.sleep(0.3)
+open(obj, "w").write(text)
+note("end")
+"""
+# The sweep builds the baseline, then each alternative in turn: the one that hangs is the fourth build.
+HANGING = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, "
+                  "int WRONG_d; int WRONG_e; int WRONG_f;, int HANG;) return 1; }\n")
+
+
+def background_project(base, folder=None, **search):
+    """A search project with the slow fake compiler, whose blocks end after half a second and search on in the background."""
+    folder = Path(folder or Path(base) / "bg")
+    build = PY + f' "{{tools}}/bg_build.py" "{{source}}" "{{obj}}" "{folder.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/bg_build.py": BG_BUILD_PY})
+    tune(p, **dict({"workers": 1, "deadline_s": 0.5, "ceiling_s": 30, "background": 1}, **search))
+    return p
+
+
+def background_folder(p):
+    return p.root / ".decomp" / "search" / TID / "background"
+
+
+def background_tried(p):
+    """How many candidates the running background search has written down."""
+    f = background_folder(p) / "results.jsonl"
+    return len(f.read_text().splitlines()) if f.exists() else 0
+
+
+def wait_for(cond, seconds=40):
+    end = time.time() + seconds
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def stop_background(p, **kw):
+    """Stop a project's background search. Returns (process, what it reports or None)."""
+    r = p.run("search", TID, "--stop", **kw)
+    try:
+        return r, json.loads(r.stdout.splitlines()[0])["background"]
+    except (ValueError, IndexError, KeyError):
+        return r, None
+
+
+def test_search_returns_while_its_background_search_goes_on(base):
+    p = background_project(base)
+    began = time.time()
+    r, out = search(p, wide(8))
+    took = time.time() - began
+    try:
+        expect(out is not None and out["end"] == "deadline", f"the block should end on its deadline: {out}", r)
+        expect(0 < out.get("continues_s", 0) <= 30, f"the summary says the search goes on, up to the ceiling: {out}", r)
+        expect(took < 20, f"search should return long before the 30 s ceiling, it took {took:.1f} s", r)
+        before = background_tried(p)
+        expect(wait_for(lambda: background_tried(p) >= before + 2), "the background search should keep building candidates")
+        expect(not (background_folder(p) / "done.json").exists(), "and still be running")
+    finally:
+        stop_background(p)
+
+
+def test_the_next_search_reports_what_the_background_search_found(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: background_tried(p) >= 2), "the background search should build candidates")
+        tune(p, workers=1)
+        r, out = search(p, NEVER)
+        expect(out is not None and out["end"] == "exhausted" and out["best"] == {"code": "A1 B0", "differ_bytes": 4},
+               f"the new template is searched as usual: {out}", r)
+        found = out.get("background")
+        expect(found is not None and found["end"] == "stopped" and found["tried"] >= 2,
+               f"the summary reports the background search, stopped by this call: {out}", r)
+        picks = [int(word[1:]) for word in found["best"]["code"].split()]
+        expect(found["best"]["differ_bytes"] == 20 and len(picks) == 8 and sum(picks) == 1,
+               f"its best is a one-change candidate of the old template: {found}", r)
+        expect(not background_folder(p).exists(), "the background search's files are cleared away")
+        r, out = search(p, NEVER)
+        expect(out is not None and "background" not in out, f"a background search is reported once: {out}", r)
+    finally:
+        stop_background(p)
+
+
+def test_a_natural_match_found_in_the_background_is_returned_and_the_new_template_dropped(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, MATCHING)
+        expect(out is not None and out["end"] == "deadline" and out.get("continues_s"),
+               f"the block should end before it reaches the match: {out}", r)
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search should end on the match")
+        attempts = len(trail(p))
+        tune(p, workers=1)
+        r, out = search(p, NEVER)
+        expect(out is not None and out["end"] == "match" and out["best"] == {"code": "A1 B2", "differ_bytes": 0},
+               f"the call returns the background's match, named in the old template's choices: {out}", r)
+        expect(Path(out["winner"]).read_text() == MARK + "int f(void) { int right_a; int right_b; return 1; }\n",
+               "the winner is the old template's matching candidate", r)
+        expect(out["background"]["natural"] is True and "discarded" in out["background"],
+               f"the summary says the new template was not searched: {out}", r)
+        expect(len(trail(p)) == attempts, "the dropped template is no attempt")
+        r = p.run("search", TID, "--detail", "A1 B2")
+        expect(r.returncode == 0 and json.loads(r.stdout.splitlines()[0])["result"] == "bytes-match",
+               "the kept round is still the old template's, with the background's results", r)
+    finally:
+        stop_background(p)
+
+
+def hung_background(base):
+    """A project whose background search is stuck in a compile that hangs. Returns (project, the grandchild's heartbeat)."""
+    p = background_project(base)
+    beat = Path(base) / "bg" / "beat"
+    r, out = search(p, HANGING)
+    expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+    if not wait_for(lambda: beat.exists() and beat.stat().st_size > 0):
+        stop_background(p)
+        expect(False, "the background search should reach the compile that hangs")
+    return p, beat
+
+
+def expect_background_dead(p, beat, r):
+    size = beat.stat().st_size
+    time.sleep(0.6)
+    expect(beat.stat().st_size == size, "the compile's grandchild should be dead: its heartbeat still grows", r)
+    expect(not background_folder(p).exists(), "the background search's files are cleared away", r)
+    left = sorted(f.name for f in slot_folder(p).iterdir())
+    expect(left == [], f"the background search should hold no slot and no heartbeat in the pool: {left}", r)
+
+
+def test_search_stop_ends_the_background_search_and_its_children(base):
+    p, beat = hung_background(base)
+    r, found = stop_background(p)
+    expect(r.returncode == 0 and found is not None and found["end"] == "stopped" and found["tried"] >= 1,
+           f"the stop form reports what the background search found: {r.stdout}", r)
+    expect_background_dead(p, beat, r)
+    r, found = stop_background(p)
+    expect(r.returncode == 0 and found is None and '"background": null' in r.stdout, "with none running it says so", r)
+
+
+def test_release_ends_the_background_search_and_its_children(base):
+    p = background_project(base)
+    r = p.run("claim", TID, "--by", "w1")
+    expect(r.returncode == 0, "claim should pass", r)
+    beat = Path(base) / "bg" / "beat"
+    try:
+        r, out = search(p, HANGING)
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: beat.exists() and beat.stat().st_size > 0), "the background search should reach the hang")
+        r = p.run("release", TID)
+        expect(r.returncode == 0 and f"{TID} -> open" in r.stdout, "release to open", r)
+        expect_background_dead(p, beat, r)
+    finally:
+        stop_background(p)
+
+
+def build_starts(folder, tag):
+    """When each build of the sources tagged `tag` started, in order."""
+    lines = [x.split() for x in (Path(folder) / "builds.log").read_text().splitlines()]
+    return sorted(float(x[2]) for x in lines if len(x) == 3 and x[0] == tag and x[1] == "start")
+
+
+def test_a_foreground_block_gets_its_slots_back_from_a_background_search(base):
+    folder = Path(base) / "bg"
+    one = background_project(sub(base, "one"), folder, workers=2, slots=2, ceiling_s=60)
+    two = background_project(sub(base, "two"), folder)
+    shared = {"DECOMP_LOCAL": str(one.root / ".decomp")}  # one machine folder: its settings and its pool
+
+    def run(p, tag):
+        path = p.base / "template.c"
+        path.write_text(wide(8).replace("int f(void) {", f"int f(void) {{ /* TAG_{tag} */"), encoding="utf-8")
+        r = p.run("search", TID, str(path), env=shared)
+        return r, json.loads(r.stdout.splitlines()[0]) if r.stdout.startswith("{") else None
+
+    try:
+        r, out = run(one, "one")
+        expect(out is not None and out.get("continues_s"), f"the first search should go on in the background: {out}", r)
+        returned = time.time()
+        expect(wait_for(lambda: len([t for t in build_starts(folder, "one") if t > returned]) >= 2),
+               "the background search should be building on both slots")
+        r, out = run(two, "two")
+        expect(out is not None and out["end"] == "deadline", f"the second search should run its block: {out}", r)
+        built = out["counts"]["compiled"]
+        expect(built >= 2, f"the foreground block should get slots while a background search wants them all: {out}", r)
+        mine = build_starts(folder, "two")[:2 + built]  # the calibration's two builds, then the block's
+        yielded = [t for t in build_starts(folder, "one") if mine[0] < t < mine[-1]]
+        expect(len(yielded) <= 2, "the background search should start no build while the foreground block runs, beyond "
+               f"what it had in hand: it started {len(yielded)} in {mine[-1] - mine[0]:.1f} s", r)
+        ended = time.time()
+        expect(wait_for(lambda: any(t > ended for t in build_starts(folder, "one"))),
+               "the background search should take its slots again once the foreground block has ended")
+    finally:
+        stop_background(one, env=shared)
+        stop_background(two, env=shared)
 
 
 def rmtree(path):
