@@ -52,7 +52,7 @@ When the run ends, the closing message tells you to always start a new chat befo
 
 Chat work skips all of this. Its one implementer works in your current checkout with no worktree, builds with `tdd` the same way, and commits straight to the branch you are on.
 
-A pull request opens only if your tracker closes work through PRs or you ask for one. Otherwise the run stops on the integration branch with every ticket resolved, which works fully offline against a local markdown tracker.
+A pull request opens only if your tracker closes work through PRs or you ask for one. Otherwise the run stops on the integration branch with every ticket resolved, which works fully offline against a local markdown tracker. The PR closes only the spec: its body lists the tickets by reference, with no closing keyword. Each ticket closes as soon as it merges into the integration branch, with a comment naming the branch and the merge commit, so the tracker shows what has landed. Work from a review of that PR becomes new tickets under the same spec, built on the same integration branch, closed as they merge, and pushed as an update to the same PR. The draft is marked ready only when every sub-issue of the spec is closed.
 
 ## The orchestration script
 
@@ -76,7 +76,7 @@ On Claude Code, each subagent runs as one of the plugin's **restricted agents** 
 
 ## Lessons and the automatic retro
 
-An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). `implement` resolves the tickets. If at least one lesson came back, it calls [retro](retro.md) on those lines alone, without reading session logs. It then writes the final reply, with retro's suggestions listed when it ran, and cleans up the implementer worktrees last. Retro changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
+An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). If at least one lesson came back, it calls [retro](retro.md) on those lines alone, without reading session logs. It then writes the final reply, with retro's suggestions listed when it ran, and cleans up the implementer worktrees last. Retro changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
 
 ## Common questions
 
@@ -103,7 +103,7 @@ Give it a smaller batch. With no argument it builds only the next ready ticket. 
 
 **Blocked tickets never start, even after their blocker has merged.**
 
-The tracker's blocked-by count only drops when a blocker *closes*, and tickets typically close at the end of the run. The orchestrator tracks merges into the integration branch itself and computes the frontier from that. If you still see it, check whether the blocker is outside the batch: those are skipped by design, and the final reply lists them.
+The tracker's blocked-by count only drops when a blocker *closes*, and `implement` closes each ticket right after it merges into the integration branch, so the count follows the run. The orchestrator also tracks merges itself, and the ledger stays the source of truth for the frontier. If you still see it, check whether the blocker is outside the batch: those are skipped by design, and the final reply lists them.
 
 **Two implementers collided on the same file, or picked different names for the same thing.**
 
