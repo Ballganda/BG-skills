@@ -3164,6 +3164,8 @@ class Block:
     A block ends on, first that holds: a natural match; `abort-buildfail`, when most of its first builds
     fail; `exhausted`, when no candidate is left or nearly all of the last ones were repeats; `plateau`,
     when scored candidates stopped bringing a new best score or a new object; and `deadline`.
+    A block whose deadline comes with no more candidates left than it runs workers builds them
+    first, and so ends `exhausted` (see last_pass).
 
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. The rest waits for the sweep's last result: a choice point whose
@@ -3192,6 +3194,8 @@ class Block:
         self.scored = self.since_gain = 0
         self.stage, self.expanded, self.best_at = {"expand": 0.0, "score": 0.0}, 0, None  # the performance log's
         self.waited, self.handed, self.unserved = 0.0, None, []  # see asked: the waits for a candidate
+        self.running = lambda: self.workers  # how many workers run now: run_block asks its Tuner
+        self.last = False  # whether the deadline came with one pass of the workers left (see last_pass)
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -3228,7 +3232,7 @@ class Block:
             while True:
                 if self.end:
                     return None
-                if self.due():
+                if not self.last and self.due() and not self.last_pass():
                     self.end = "deadline"
                     return None
                 if self.sweep:
@@ -3242,6 +3246,28 @@ class Block:
             if seed is None:
                 self.end = "exhausted"
             return seed
+
+    def last_pass(self):
+        """Whether no more candidates are left than workers run now. Call with the lock held, at the deadline.
+
+        When so, the block goes on past its deadline until they are built: plateau and repeats end it
+        no more, a match and a run of failed builds still do, and a hung compile is still killed.
+        Before the sweep's results are in, what is left is counted as if no choice point were inert.
+        """
+        n = self.running()
+        if self.sweep or self.pending:
+            self.last = len(self.sweep) + self.counts["space"] - len(self.swept) <= n
+            return self.last
+        if self.seeds is None:
+            self.seeds = self.rest()
+        counts = dict(self.counts)  # a sampled space counts its picks: these are not tried if the block ends here
+        left = list(itertools.islice(self.seeds, n + 1))
+        self.last = len(left) <= n
+        if self.last:
+            self.seeds = iter(left)
+        else:
+            self.counts = counts
+        return self.last
 
     def take_batch(self, n):
         """Up to n seeds for a worker that builds them in one compiler call; none when the block has ended.
@@ -3319,6 +3345,8 @@ class Block:
             if how in ("built", "cached"):
                 self.scored += 1
                 self.since_gain = 0 if gain else self.since_gain + 1
+            if self.last:
+                return  # the last pass is built whole
             if len(self.recent) == self.recent.maxlen and sum(self.recent) > s["repeat_frac"] * len(self.recent):
                 self.end = self.end or "exhausted"
             if self.since_gain >= max(s["plateau_compiles"], s["plateau_frac"] * self.scored, 1):
@@ -3406,6 +3434,7 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     threads = [threading.Thread(target=block.work_batch if hasattr(w, "prebuild") else block.work,
                                 args=(memo, w, *a), daemon=True) for w, a in zip(workers, admits)]
     if tuner:
+        block.running = lambda: tuner.target
         tuner.begin(block)
     for th in threads:
         th.start()
