@@ -77,6 +77,7 @@ FIELDS = ["id", "unit", "address", "size", "tier", "source", "expected", "status
 
 
 def die(msg, code=1):
+    die.last = msg  # a background search that stops here quotes it in its report (see Background.died)
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -2846,6 +2847,7 @@ class SlotPool:
         self.closed = threading.Event()
         self.held, self.busy, self.reclaimed = set(), 0, 0  # slots held; workers holding or waiting for one
         self.writers = self.writers_at_start = 1
+        self.left = None  # the line for a heartbeat this search could not remove as it left (see close)
 
     def open(self):
         """Join the pool: start the heartbeat and count the active writers, this one included."""
@@ -2857,7 +2859,12 @@ class SlotPool:
         return self
 
     def close(self):
-        """Leave the pool: give back every slot and remove the heartbeat. Safe to call twice."""
+        """Leave the pool: give back every slot and remove the heartbeat. Safe to call twice.
+
+        A heartbeat that cannot be removed stays fresh for the stale time, and reads as a running
+        foreground block. That is not fatal: the failure is kept in `left`, and the background
+        search this call then starts copies it into its log.
+        """
         if self.closed.is_set():
             return
         self.closed.set()
@@ -2866,8 +2873,12 @@ class SlotPool:
                 with contextlib.suppress(OSError):
                     self.drop(i)
             self.held.clear()
-            with contextlib.suppress(OSError):
+            try:
                 self.beat.unlink()
+            except FileNotFoundError:  # cleared as stale by another search: it is gone all the same
+                pass
+            except OSError as err:
+                self.left = f"could not remove the heartbeat {self.beat.name}: {type(err).__name__}: {err}"
 
     def stale(self, path):
         """Whether a file was last written longer ago than the stale time, or is gone. By the wall clock: it spans processes."""
@@ -4410,6 +4421,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     return {
         "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
         **({"repeat": True} if repeat else {}), "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
+        "collect_s": counts.get("collect_s", 0.0),
         "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
         "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
         "starved_frac": tuning.get("starved_frac", 0.0),
@@ -4925,6 +4937,16 @@ def call_seconds(called, counts):
 
 
 def cmd_search(a):
+    """`search`. An error that ends a background search is told to it first, so that its report names it."""
+    try:
+        return search_call(a)
+    except BaseException as err:
+        if Background.current:
+            Background.current.died(err)
+        raise
+
+
+def search_call(a):
     called = time.perf_counter()  # call_s counts from here: calibration, probes and the block
     t, _ = read_ticket(a.id)
     if a.detail is not None:
@@ -4939,7 +4961,9 @@ def cmd_search(a):
     if not contract_rules()[0]:
         die("the contract does not allow template search (`template_search` is false in decomp.json); "
             "nothing was built.")
+    collecting = time.perf_counter()
     found = None if background else collect_background(t)  # before the gate: a match in hand outweighs the new template
+    collect_s = round(time.perf_counter() - collecting, 2)  # collect_s: stopping the background search and taking in its results
     if found and found["natural"]:
         return print(json.dumps(found["summary"]))
     is_open, reason = gate(t)
@@ -5021,7 +5045,7 @@ def cmd_search(a):
         if background:  # it is no round: nothing is printed, counted or logged, and the next call collects it
             return background.ended(end, best, memo.blind())
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
-        counts.update(call_s=call_seconds(called, counts))
+        counts.update(call_s=max(call_seconds(called, counts), collect_s), collect_s=collect_s)
         repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
         rounds = sum(r["by"] == "search" for r in trailed)  # a repeat adds none: it keeps the last counted round's number
         notices = log_block(compiler, block_record(
@@ -5051,7 +5075,7 @@ def cmd_search(a):
         out["background"] = found["report"]
     if repeat:
         out["repeat"] = True
-    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings, pool.id)
+    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings, pool.id, pool.left)
     if budget:
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
@@ -5079,12 +5103,12 @@ def search_detail(t, code):
 #
 # A round whose block ends on a plateau or at the floor leaves a detached process searching the same
 # template on, up to the ceiling. Its files are in the ticket's `background/` folder:
-#   spawn.json     written by the search that started it: its token and its time budget
+#   spawn.json     written by the search that started it: its token, its time budget and when it started
 #   pid            the process the search started
 #   run.json       written by the background search: its own process id and its scratch folder
 #   heartbeat      touched every few seconds while it lives
 #   results.jsonl  one line per candidate it tried, written as each comes, so a kill loses none
-#   done.json      written as it ends on its own: the end reason and the seed of a match
+#   done.json      written as it ends on its own: the end reason, the seed of a match, the error it died of
 #   log            its standard output and error, and a line for each step of its life
 # The next `search` call for the ticket, `search --stop`, and `release` end it. A search collected
 # with nothing tried leaves its log beside the round's files, as `background.log`.
@@ -5248,7 +5272,7 @@ def kill_background(token, pids, until, by_job=True):
             os.kill(pid, signal.SIGKILL)
 
 
-def start_background(t, end, counts, results, ceiling, settings, caller):
+def start_background(t, end, counts, results, ceiling, settings, caller, left=None):
     """Leave a detached process searching the round's template on. Returns the seconds it may run, or 0 when none was started.
 
     One is started when the block ended on a plateau or at its deadline with time left under the
@@ -5256,6 +5280,7 @@ def start_background(t, end, counts, results, ceiling, settings, caller):
     no console of this one's and in its own process group (elsewhere in its own session): otherwise
     this call, and the shell that ran it, would wait until it ended. `caller` is this call's name in
     the slot pool: the search does not take a heartbeat this call left behind for a foreground block.
+    `left` is the line for such a heartbeat, when this call could not remove its own (see SlotPool.close).
     """
     budget = round(ceiling - counts["wall_s"], 1)
     if (not settings["background"] or end not in ("plateau", "deadline") or budget < BACKGROUND_MIN_S
@@ -5269,8 +5294,10 @@ def start_background(t, end, counts, results, ceiling, settings, caller):
     try:
         d.mkdir(parents=True)
         (d / "heartbeat").write_text(token, encoding="utf-8")
-        (d / "spawn.json").write_text(json.dumps({"token": token, "budget_s": budget, "unix": now(), "writer": caller}),
-                                       encoding="utf-8")
+        spawn = {"token": token, "budget_s": budget, "unix": now(), "at": round(time.time(), 2), "writer": caller}
+        if left:
+            spawn["left"] = left
+        (d / "spawn.json").write_text(json.dumps(spawn), encoding="utf-8")
         with (d / "log").open("ab") as log:
             how = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
             if os.name == "nt":
@@ -5296,6 +5323,8 @@ class Background:
     ends the process. It stops by itself when the ticket's spawn.json no longer names it.
     """
 
+    current = None  # the one this process is, once it has started: cmd_search tells it the error it died of
+
     def __init__(self, t, token):
         self.tid, self.dir, self.token = t["id"], background_dir(t["id"]), token
         spawn = read_json(self.dir / "spawn.json")
@@ -5305,7 +5334,8 @@ class Background:
         self.caller = spawn.get("writer") if isinstance(spawn.get("writer"), str) else None
         self.began, self.waited, self.waiting_on = time.perf_counter(), 0.0, None
         self.lock, self.stopped = threading.Lock(), threading.Event()
-        self.known, self.end, self.seed, self.until = set(), "stopped", None, None
+        self.known, self.seed, self.until = set(), None, None
+        self.end, self.error = "error", "it ended before its block did"  # until `ended` or `died` says how
         self.blind = False  # whether its block had no object identity (see Memo.blind)
         self.job = own_job(token)
         # Every scratch folder of this process goes under one folder, which the call that kills it removes.
@@ -5313,7 +5343,10 @@ class Background:
         (self.dir / "run.json").write_text(json.dumps({"pid": os.getpid(), "scratch": self.scratch}), encoding="utf-8")
         self.results = (self.dir / "results.jsonl").open("a", encoding="utf-8", newline="\n")
         atexit.register(self.close)
+        Background.current = self
         self.say(f"started: process {os.getpid()}, budget {self.budget} s, started by {self.caller}")
+        if isinstance(spawn.get("left"), str):
+            self.say(f"the call that started this search {spawn['left']}")
         threading.Thread(target=self.heartbeat, args=(search_settings()["slot_heartbeat_s"],), daemon=True).start()
 
     def say(self, text):
@@ -5381,8 +5414,23 @@ class Background:
             self.results.flush()
 
     def ended(self, end, best, blind=False):
-        self.end, self.seed, self.blind = end, best.get("seed"), blind
+        self.end, self.error, self.seed, self.blind = end, None, best.get("seed"), blind
         self.say(f"ended: {end}, {round(self.waited, 1)} worker-seconds spent waiting on the foreground")
+
+    def died(self, err):
+        """Take the error the process is leaving by: the end reason is `error`, and the report holds its text.
+
+        The log gets the line here. The traceback of an error nothing caught follows it, written by
+        the interpreter before the process exits (the log is its standard error).
+        """
+        if isinstance(err, SystemExit):
+            if not err.code:
+                return
+            text = str(getattr(die, "last", None) or f"exit {err.code}")
+        else:
+            text = f"{type(err).__name__}: {err}"
+        self.end, self.error = "error", text
+        self.say(f"died of an error: {text}")
 
     def close(self):
         """Say how the search ended. Runs as the process ends, by any road but a kill."""
@@ -5390,8 +5438,10 @@ class Background:
             self.results.close()
         if read_json(self.dir / "spawn.json").get("token") == self.token:
             with contextlib.suppress(OSError):
-                (self.dir / "done.json").write_text(json.dumps({"end": self.end, "seed": self.seed, "blind": self.blind}),
-                                                     encoding="utf-8")
+                done = {"end": self.end, "seed": self.seed, "blind": self.blind}
+                if self.error:
+                    done["error"] = self.error
+                (self.dir / "done.json").write_text(json.dumps(done), encoding="utf-8")
         shutil.rmtree(self.scratch, ignore_errors=True)
 
 
@@ -5455,7 +5505,9 @@ def stop_background(tid):
     It waits no longer than BACKGROUND_STOP_S from its start: a process still there then is killed
     once more, by its process tree, and the stop goes on with what the search had written. Its
     slots, its heartbeat in the pool and its scratch folder are cleared away, since a killed search
-    cannot do that.
+    cannot do that. A search with no done.json whose process is gone before any kill, or whose
+    heartbeat is stale, died: nothing is killed, and what the stop saw says so. What it saw also
+    holds the seconds from the search's start to this stop, beside its budget.
     """
     d, began = background_dir(tid), time.perf_counter()
     until = began + BACKGROUND_STOP_S
@@ -5466,7 +5518,10 @@ def stop_background(tid):
             remove_tree(d)
         return None, {}
     run, done = read_json(d / "run.json"), read_json(d / "done.json")
-    saw = {"spawn": spawn, "run": run, "done": done, "unix": now(), "heartbeat_age_s": None, "killed": False}
+    saw = {"spawn": spawn, "run": run, "done": done, "unix": now(), "heartbeat_age_s": None, "killed": False, "died": False,
+           "ran_s": None, "budget_s": spawn.get("budget_s")}
+    with contextlib.suppress(TypeError, ValueError):  # by the wall clock: it spans processes
+        saw["ran_s"] = round(max(0.0, time.time() - float(spawn.get("at", spawn.get("unix")))), 1)
     with contextlib.suppress(OSError):
         saw["heartbeat_age_s"] = round(time.time() - (d / "heartbeat").stat().st_mtime, 1)  # by the wall clock: it spans processes
     if not (d / "done.json").exists():
@@ -5476,16 +5531,20 @@ def stop_background(tid):
             with contextlib.suppress(OSError, ValueError):
                 pids.append(int((d / "pid").read_text(encoding="utf-8")))
             pids = sorted({p for p in pids if isinstance(p, int) and not isinstance(p, bool) and p > 0})
-            kill_background(token, pids, until)
-            gone = False
-            while not gone:
-                gone = all(process_gone(p, until) for p in pids)
-                if gone or time.perf_counter() >= until:
-                    break
-                time.sleep(0.05)
-            if not gone:
-                kill_background(token, pids, time.perf_counter() + 2.0, by_job=False)
-            saw.update(killed=True, gone=gone, stop_s=round(time.perf_counter() - began, 2))
+            saw["died"] = all(process_gone(p, until) for p in pids)  # before any kill: it left by itself
+            if not saw["died"]:
+                kill_background(token, pids, until)
+                gone = False
+                while not gone:
+                    gone = all(process_gone(p, until) for p in pids)
+                    if gone or time.perf_counter() >= until:
+                        break
+                    time.sleep(0.05)
+                if not gone:
+                    kill_background(token, pids, time.perf_counter() + 2.0, by_job=False)
+                saw.update(killed=True, gone=gone, stop_s=round(time.perf_counter() - began, 2))
+        else:
+            saw["died"] = True
     scratch = run.get("scratch")
     if isinstance(scratch, str) and Path(scratch).name.startswith("decomp-background-"):
         remove_tree(scratch)
@@ -5532,6 +5591,26 @@ def keep_log(state, log, saw):
     return path
 
 
+def background_end(done, saw):
+    """The start of a collected search's report: its end reason, with `error` or `overrun` (see collect_background)."""
+    if done.get("end"):
+        report = {"end": str(done["end"])}
+        if done.get("error"):
+            report["error"] = str(done["error"])
+        return report
+    if not saw.get("killed"):
+        age = saw.get("heartbeat_age_s")
+        beat = "it has no heartbeat" if age is None else f"its heartbeat was {age} s old"
+        return {"end": "error", "error": f"the process was gone and left no report: {beat}"}
+    try:
+        overrun = saw["ran_s"] > float(saw["budget_s"]) + BACKGROUND_STOP_S
+    except (TypeError, ValueError):
+        overrun = False
+    if overrun:
+        return {"end": "killed", "overrun": True}
+    return {"end": "stopped" if saw.get("gone") else "killed"}
+
+
 def collect_background(t):
     """Stop the ticket's background search and take in what it found. Returns None when the ticket had none.
 
@@ -5543,6 +5622,13 @@ def collect_background(t):
     steered one the search reduced. With a natural match, `summary` is the whole summary to print in
     place of a new round. A search that tried nothing leaves its log (see keep_log), named in the
     report under `log`.
+
+    The end reason of a search that did not end by itself says which of three things happened.
+    `stopped`: this call cut it short while it was working. `killed`: it would not go within the
+    stop's bound, or it was alive past its budget plus that bound (the report then holds `overrun`).
+    `error`: it died, of an error it wrote down (the report's `error` is its text) or with no report
+    at all. The report holds `ran_s` and `budget_s`, the seconds from its start to this call and
+    the seconds it was given.
     """
     d, saw = stop_background(t["id"])
     if d is None:
@@ -5565,7 +5651,11 @@ def collect_background(t):
     results = [merged[seed] for seed in sorted(merged)]
     if new:
         (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
-    report = {"end": str(done.get("end") or "stopped"), "tried": len(new)}
+    report = background_end(done, saw)
+    report["tried"] = len(new)
+    for key in ("ran_s", "budget_s"):
+        if isinstance(saw.get(key), (int, float)) and not isinstance(saw[key], bool):
+            report[key] = saw[key]
     if not new:
         kept = keep_log(state, log, saw)
         if kept:

@@ -49,7 +49,7 @@ A search result is never a match claim. The winner is copied into the unit and s
 
 When two places must change together (a loop header and the expression that depends on it), the writer writes them as one choice: a paired `PERM_VAR`, whose second place follows the pick of the first and adds no candidates. The writer marks a construct written only to steer the compiler with a `steer` tag, so the tool prefers a natural match, and keeps a `fakematch:` comment on any steering line the winner needs. After a round it reads the summary's effects, inert points, pairs, project history line, and any advice to stop, and edits the template by label.
 
-Between rounds the tool keeps searching the last template in the background, while the writer reads the summary and writes the next one. The next round reports what that found, and when it found a match, returns it in place of searching the new template.
+Between rounds the tool keeps searching the last template in the background, while the writer reads the summary and writes the next one. The next round reports what that found, and when it found a match, returns it in place of searching the new template. The report says how that search ended: `stopped` when the next round cut it short while it was working, `error` when it died, `killed` when it outlived its time. A round's counts also say how many seconds of the call went to collecting it.
 
 ## Common questions
 

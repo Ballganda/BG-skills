@@ -567,16 +567,28 @@ A block ends on the first of these that holds:
   - A block has its slots back within one compile.
 - The call that started it is the one exception: that call left the pool before it started the search.
 - So a heartbeat still under its name is one it failed to remove, and the search does not wait on it.
+- A call that cannot remove its own heartbeat as it leaves the pool does not fail.
+  - It keeps a line with the heartbeat's name and the error.
+  - The background search it then starts copies that line into its log, at its start.
 - The next `search` call for the ticket stops it and reports it under `background`.
-  - `end`: `stopped` when the call cut it short.
+  - `end`: how it ended: a block's end reason when it ended by itself, or one of the three below.
+  - `stopped`: the call cut it short while it was working.
+  - `killed`: it would not go within the stop's bound, or it was still alive after its budget plus that bound.
+  - `error`: it died.
+  - `error` (the field): only with `end: error`, the error's text, or that the process was gone and left no report.
+  - `overrun`: `true`, only when it was still alive after its budget plus the stop's bound.
+  - `ran_s`: the seconds from its start to its collection.
+  - `budget_s`: the seconds it was given.
   - `tried`.
   - `best`: the fewest differing bytes, then the lowest seed, among the candidates it tried, named in the old template's choice codes.
 - When `tried` is 0, the report also holds `log`.
   - The search's log is kept as `.decomp/search/<ticket id>/background.log`, in place of the last kept one.
   - A search that tried candidates keeps none.
 - The kept log holds the search's own lines: when it started, when it was ready, which foreground searches it waited on, how it ended.
-- The kept log holds any error the search died of.
+- The kept log holds any error the search died of: a `died of an error:` line, then the traceback of an error nothing caught.
 - The kept log ends with a `collected:` line of what the collecting call saw.
+  - It holds `ran_s` and `budget_s` as the report does.
+  - It holds `died`: whether the search's process was gone, with no report written, before any kill.
 - Its results join the kept round, so `--detail` serves them until a new round replaces it.
 - When it found a match, the report holds `winner` and `natural`, and `verify --template-round` records that match.
 - When the match is natural, the call searches nothing.
@@ -588,6 +600,7 @@ A block ends on the first of these that holds:
 - The kill is asked for at once.
 - The stop then waits for the search's process to be gone, for no longer than 10 seconds from its start.
 - A process still there then is killed once more, by its process tree.
+- A search whose process is already gone is not killed: the stop reports it as `error`.
 - The stop returns what the search had written.
 - It inherits no standard handle, so the call that started it returns at once.
 - Its output goes to `background/log`, which is removed with the folder when the search is collected, unless it is kept as above.
@@ -726,6 +739,9 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - It covers calibration, probes, and the block.
   - It is never smaller than `wall_s`.
   - It is the number to compare with what the writer waited.
+- `collect_s`: the seconds of the call spent collecting the ticket's background search: stopping it and taking in its results.
+  - It is part of `call_s`, so a call far longer than its block names this part when it was the long one.
+  - It is near 0 when the ticket had none.
 - `killed`: adapter runs killed as hung.
 - `shell`: adapter runs that needed the shell.
 - `single_function`: whether candidates were built as the single-function source.
@@ -842,6 +858,7 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `call_s`: the seconds of the whole `search` call up to this record, calibration included.
   - It is never smaller than `wall_s`.
   - It is a little under the summary's `call_s`, which is taken at the call's end.
+- `collect_s`: the seconds of the call spent collecting the ticket's background search, as in the summary.
 - `workers_min`, `workers_max`, `workers_end`, `workers_floor`.
 - `starved_frac`: the share of the block's time the pool could give it fewer slots than its floor.
 - `t_ref_base_ms` and `t_ref_max_ms`: the reference compile's base and its slowest run, when one ran.
