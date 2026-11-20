@@ -19,6 +19,10 @@ File issues only into the user's own project, never into an upstream it was fork
 
 **MRs as a request surface: no.** (`/triage` reads this flag. To turn it on, re-run `/bg-setup` and answer yes.)
 
+## Closing work
+
+An MR closes only its spec. Tickets close as they merge into the integration branch, with a comment naming the branch and the merge commit. The MR body lists its tickets by reference, without closing keywords. Keywords to avoid: close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved, implement, implements, implemented.
+
 <!-- if: prs -->
 ## MR triage
 

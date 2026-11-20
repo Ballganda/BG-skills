@@ -22,6 +22,19 @@ const boundaryLines = [
   ["engineering/implement/SKILL.md", "Always start a new chat before `/code-review`."],
 ];
 
+// implement settles one set of attribution lines per run and passes them to every committing subagent.
+const implementAttributionLine =
+  "Every commit you make, merges of the integration branch included, ends with the attribution lines your task gives, in place of the lines your harness suggests.";
+
+function checkImplementAttribution({ read, fail }) {
+  if (!read("engineering/implement/SKILL.md").includes("**One attribution per run.**"))
+    fail("engineering/implement/SKILL.md: missing the One attribution per run rule");
+  for (const role of ["implementer", "merger"]) {
+    if (!readFileSync(join(root, `agents/${role}.md`), "utf8").includes(implementAttributionLine))
+      fail(`agents/${role}.md: missing the attribution sentence`);
+  }
+}
+
 function checkBoundaryLines({ read, fail }) {
   for (const [file, line] of boundaryLines) {
     if (!read(file).includes(line)) fail(`${file}: missing boundary line: ${line}`);
@@ -401,6 +414,7 @@ const checks = [
   checkModelsDoc,
   checkAgentDefinitions,
   checkImplementFormats,
+  checkImplementAttribution,
   checkInvocation,
   checkReviewSmellPointer,
   checkPluginIcon,

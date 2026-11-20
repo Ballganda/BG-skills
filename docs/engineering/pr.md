@@ -32,7 +32,7 @@ Not blindly, and that is the point of stating it. The agent that wrote the chang
 
 **Does it open the PR for me?**
 
-No. `pr` covers only the body. [implement](implement.md) ends by committing, to the current branch or to its integration branch. Requests for a skill or option that opens the PR (a `/to-pr`, or `implement` opening a PR instead of committing) are still open proposals. One user's workaround is a one-sentence local override of `implement` that tells it to open a PR. The exception is a ticket batch: `implement` opens a draft PR for its integration branch when your issue tracker closes work through PRs or when you ask for one. Because `pr` is model-invoked, the agent uses this shape for the body whenever you ask it to open a PR.
+No. `pr` covers only the body. [implement](implement.md) ends by committing, to the current branch or to its integration branch. Requests for a skill or option that opens the PR (a `/to-pr`, or `implement` opening a PR instead of committing) are still open proposals. One user's workaround is a one-sentence local override of `implement` that tells it to open a PR. The exception is a ticket batch: `implement` opens a draft PR for its integration branch when your issue tracker closes work through PRs or when you ask for one. Because `pr` is model-invoked, the agent uses this shape for the body whenever you ask it to open a PR. A PR body closes only its spec: tickets are listed by reference with no closing keyword, because they close as they merge into the integration branch (the Closing work section of your tracker doc lists the keywords to avoid).
 
 **Won't it just produce another wall of text and diagrams?**
 

@@ -53,7 +53,7 @@ Present a numbered list; per ticket: **Title**, **Tier**, **Blocked by**, **What
 Publish in dependency order (blockers first), using the tracker doc's operations:
 
 - **Local files**: one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, using the local template. Never one combined file.
-- **Real tracker**: one issue per ticket, using the issue template. Use native blocking links where available, otherwise the "Blocked by" section. If the source was an existing issue, make each ticket its sub-issue. Apply `ready-for-agent` unless told otherwise.
+- **Real tracker**: one issue per ticket, using the issue template. Use native blocking links where available, otherwise the "Blocked by" section. If the source was an existing issue, make each ticket its sub-issue. If the tickets come from a review of an open PR, make each one a sub-issue of that PR's spec. Apply `ready-for-agent` unless told otherwise.
 
 The **frontier** is every ticket whose blockers are all done. Do NOT close or modify any parent issue.
 
