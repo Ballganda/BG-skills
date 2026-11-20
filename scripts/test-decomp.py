@@ -3024,12 +3024,99 @@ def test_search_tries_first_the_alternative_written_as_the_closest_solved_functi
     other = "u0002-00402000"
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
              "src/u0002.c": f"// @decomp {other}\nint g(int n) {{ int k = 0; while (k < n) k++; return k; }}\n",
-             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated")}
-    template = in_function("int tag_a; PERM_GENERAL(tag_base = WRONG_x;, for (; tag_for < WRONG_n;) WRONG_k++;, "
-                           "while (tag_while < WRONG_n) WRONG_k++;)")
-    r, out, order = sampled_search(base, template, files=files)
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated"),
+             "ledger/matches.jsonl": matches_ledger(other)}
+    r, out, order = sampled_search(base, LOOP_SPELLINGS, files=files)
     expect([line.split()[1] for line in order] == ["tag_base", "tag_while", "tag_for"],
            f"the spelling the solved function uses should be tried before the other: {order}", r)
+
+
+# Read by every Python the tool starts: it writes down each ticket file that is opened.
+TICKET_READS_PY = """import os, sys
+def _hook(event, args):
+    if event == "open" and args:
+        path = str(args[0]).replace(os.sep, "/")
+        if "/tickets/" in path and path.endswith(".md"):
+            with open(os.environ["TICKET_READS"], "a") as f:
+                f.write(path.rsplit("/", 1)[1][:-3] + chr(10))
+sys.addaudithook(_hook)
+"""
+LOOP_SPELLINGS = in_function("int tag_a; PERM_GENERAL(tag_base = WRONG_x;, for (; tag_for < WRONG_n;) WRONG_k++;, "
+                             "while (tag_while < WRONG_n) WRONG_k++;)")
+WHILE_LOOP = "int g(int n) { int k = 0; while (k < n) k++; return k; }\n"
+
+
+def matches_ledger(*tids):
+    """The matches ledger as `audit pass` leaves it for these tickets."""
+    return "".join(json.dumps({"ticket": tid, "unix": 1789000000, "attempt": f"{tid}-a001", "model": "m", "size": 37,
+                               "auditor": "a1"}, sort_keys=True) + "\n" for tid in tids)
+
+
+def solved_ticket(n, status="integrated", source=WHILE_LOOP, expected="abcdefgx\n"):
+    """The files of one more ticket, u<n>, close to the project's own: its ticket, its unit and its expected bytes."""
+    tid = f"u{n:04d}-{0x00400000 + n * 0x1000:08x}"
+    files = {f"tickets/u{n:04d}/{tid}.md": ticket_text(tid, f"0x{tid.split('-')[1]}", f"src/u{n:04d}.c", status),
+             f"src/u{n:04d}.c": f"// @decomp {tid}\n{source}"}
+    if expected is not None:
+        files[f"expected/{tid.split('-')[1]}.bin"] = expected
+    return tid, files
+
+
+def ticket_reads(base, files):
+    """Search LOOP_SPELLINGS in a project of `files`. Returns (process, the candidates built in order, the ticket files read)."""
+    base = Path(base)
+    hook, reads, log = base / "hook", base / "reads.log", base / "order.log"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(TICKET_READS_PY, encoding="utf-8")
+    files = dict({"expected/00401000.bin": "abcdefgh\n",
+                  "tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))}, **files)
+    p = search_project(base, files=files)
+    tune(p, workers=1)
+    template = base / "template.c"
+    template.write_text(LOOP_SPELLINGS, encoding="utf-8")
+    r = p.run("search", TID, str(template), env={"PYTHONPATH": str(hook), "TICKET_READS": str(reads)})
+    expect(r.returncode == 0, "search should pass", r)
+    order = [line.split()[1] for line in log.read_text().splitlines()[-3:]]
+    return r, order, (reads.read_text().split() if reads.exists() else [])
+
+
+def test_search_reads_no_more_ticket_files_however_many_tickets_are_open(base):
+    counts = {}
+    for extra in (0, 40):
+        files, solved = {}, []
+        for n in (2, 3):
+            tid, more = solved_ticket(n)
+            solved.append(tid)
+            files.update(more)
+        for n in range(4, 4 + extra):
+            files.update(solved_ticket(n, status="open")[1])
+        files["ledger/matches.jsonl"] = matches_ledger(*solved)
+        r, order, reads = ticket_reads(sub(base, f"open{extra}"), files)
+        expect(order == ["tag_base", "tag_while", "tag_for"], f"the bonus should hold with {extra} open tickets: {order}", r)
+        expect(set(reads) == {TID, *solved}, f"only the ticket and the matched ones are read: {sorted(set(reads))}", r)
+        counts[extra] = len(reads)
+    expect(counts[0] == counts[40], f"the ticket files read should not grow with the open tickets: {counts}")
+
+
+def test_search_leaves_out_a_matched_ticket_it_cannot_read(base):
+    gone, files = solved_ticket(2)
+    del files[f"tickets/u0002/{gone}.md"]
+    bare, more = solved_ticket(3, expected=None)
+    files.update(more)
+    regressed, more = solved_ticket(4, status="regressed")
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(gone, bare, regressed)
+    r, order, reads = ticket_reads(base, files)
+    expect(order == ["tag_base", "tag_for", "tag_while"], f"no function is left to give a bonus: {order}", r)
+
+
+def test_search_reads_no_other_ticket_in_a_project_without_a_match(base):
+    files = {}
+    for n, status in ((2, "open"), (3, "claimed"), (4, "integrated")):  # the last was never recorded as a match
+        files.update(solved_ticket(n, status=status)[1])
+    r, order, reads = ticket_reads(base, files)
+    expect(order == ["tag_base", "tag_for", "tag_while"], f"no match gives no bonus: {order}", r)
+    expect(set(reads) == {TID}, f"only the ticket searched is read: {sorted(set(reads))}", r)
 
 
 # ---------- template search: the machine-wide slot pool ----------
@@ -3169,7 +3256,7 @@ def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails
     expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
 
 
-PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "workers_min", "workers_max", "workers_end", "expanded",
+PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "call_s", "workers_min", "workers_max", "workers_end", "expanded",
                "compiled", "unique_objects", "build_fail", "killed", "src_dedupe_hits", "t_compile_p50_ms",
                "t_compile_p95_ms", "t_ref_ms", "stage_ms", "idle_frac", "best_score_start", "best_score_end",
                "t_to_best_s", "end_reason", "model_latency_s", "writers_active"}
@@ -3215,7 +3302,14 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     expect(rec["best_score_end"] == 4 and set(rec["stage_ms"]) == {"write", "compile", "compare", "expand", "score"},
            f"the end score and the five stages: {rec}", r)
     expect(0.0 <= rec["idle_frac"] <= 1.0 and rec["t_compile_p95_ms"] >= rec["t_compile_p50_ms"] > 0, f"timings: {rec}", r)
+    probes = sum(x["wall_s"] for x in got[:4])
+    expect(probes > 0 and rec["call_s"] >= rec["wall_s"] + probes - 0.02,
+           f"call_s covers the calibration ({probes} s) and the block: {rec}", r)
+    c = out["counts"]
+    expect(c["call_s"] >= rec["call_s"] and c["call_s"] >= c["wall_s"] + probes - 0.02,
+           f"the summary's call_s covers the whole call: {c}", r)
     r, out = search(p, NEVER)
+    expect(out["counts"]["call_s"] >= out["counts"]["wall_s"], f"call_s is no smaller than wall_s: {out['counts']}", r)
     got = perf_log(p)
     expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 2 and got[5]["block"] == 2,
            f"a warm cache adds one block record and no calibration: {got}", r)

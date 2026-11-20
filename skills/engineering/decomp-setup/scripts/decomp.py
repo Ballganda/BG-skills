@@ -2177,15 +2177,28 @@ def closest_solved(t, n=SIMILAR_N):
     """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
 
     A function's source is its unit's text from its marker to the next marker. One that cannot be
-    read is left out, as is every one when the ticket's own expected bytes are missing.
+    read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
+    are the tickets the matches ledger names, so no other ticket file is read: a project's open
+    tickets can outnumber its matched ones by thousands.
     """
+    try:
+        solved = list(dict.fromkeys(m["ticket"] for m in records("matches.jsonl")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    solved = [tid for tid in solved if isinstance(tid, str) and tid != t["id"] and ticket_path(tid).is_file()]
+    if not solved:
+        return []
     try:
         mine = grams((ROOT / t["expected"]).read_bytes())
     except OSError:
         return []
     scored = []
-    for o in all_tickets():
-        if o["status"] not in MATCHED or o["id"] == t["id"]:
+    for tid in solved:
+        try:
+            o = read_ticket(tid)[0]
+        except (OSError, ValueError, KeyError):
+            continue
+        if o["status"] not in MATCHED:  # a match that has since regressed is no model
             continue
         try:
             g = grams((ROOT / o["expected"]).read_bytes())
@@ -4278,7 +4291,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     worker_s = tuning.get("worker_s") or workers * wall
     return {
         "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
-        "round": round_no, "block": block_no, "wall_s": round(wall, 3),
+        "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
         "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
         "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
         "starved_frac": tuning.get("starved_frac", 0.0),
@@ -4764,7 +4777,13 @@ def kept_round(tid):
             "nothing was recorded. Run verify on the machine that ran the round, or without the flag.")
 
 
+def call_seconds(called, counts):
+    """The seconds of the whole `search` call so far, never under the block's own `wall_s`."""
+    return max(round(time.perf_counter() - called, 2), counts["wall_s"])
+
+
 def cmd_search(a):
+    called = time.perf_counter()  # call_s counts from here: calibration, probes and the block
     t, _ = read_ticket(a.id)
     if a.detail is not None:
         return search_detail(t, a.detail)
@@ -4858,6 +4877,7 @@ def cmd_search(a):
         if background:  # it is no round: nothing is printed, counted or logged, and the next call collects it
             return background.ended(end, best)
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
+        counts.update(call_s=call_seconds(called, counts))
         notices = log_block(compiler, block_record(
             t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
             trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
@@ -4885,6 +4905,7 @@ def cmd_search(a):
     budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings)
     if budget:
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
+    out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
     print(json.dumps(out))
     (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
