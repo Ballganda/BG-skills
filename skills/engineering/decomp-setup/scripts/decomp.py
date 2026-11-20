@@ -4382,23 +4382,37 @@ def perf_flags(rec, past):
     return flags
 
 
-def perf_notices(flags, past):
+TUNER_FLAGS = ("contention-or-throttle", "starved-by-writers")  # raised with no minimum of compiles
+
+
+def could_measure(r):
+    """Whether a block record built enough compiles per worker to raise the four measured flags."""
+    return r.get("compiled", 0) >= PERF_COMPILES * r.get("workers_end", 1)
+
+
+def perf_notices(flags, past, unit):
     """What to tell the user now: the sentence for each flag raised in PERF_STREAK blocks in a row, once per streak.
 
     past is the log's earlier records of the same compiler, oldest first; each block record holds the
-    flags it raised and those it showed. Returns {flag: sentence}.
+    flags it raised and those it showed. A streak counts the blocks of this unit that could have raised
+    the flag: another unit's block is passed over, and so is a block that built fewer than PERF_COMPILES
+    per worker when the flag is one of the four measured ones (the tuner's flags have no such minimum).
+    A block that could have raised it and did not ends the streak. Returns {flag: sentence}.
     """
     out = {}
+    mine = [r for r in past if r.get("kind") == "block" and unit and r.get("unit") == unit]
     for flag, cost in flags.items():
         streak, shown = 1, False
-        for r in reversed([r for r in past if r.get("kind") == "block"]):
+        for r in reversed(mine):
+            if flag not in TUNER_FLAGS and not could_measure(r):
+                continue
             if flag not in (r.get("flags") or []):
                 break
             streak += 1
             shown = shown or flag in (r.get("shown") or [])
         if streak >= PERF_STREAK and not shown:
             fix = FLAG_FIXES.get(flag)
-            out[flag] = f"{flag} in {streak} blocks in a row: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
+            out[flag] = f"{flag} in {streak} blocks in a row of this unit: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
     return out
 
 
@@ -4438,7 +4452,7 @@ def log_block(compiler, rec):
     """Flag the block record against the log, append it, and return the sentences to tell the user."""
     past = perf_records(compiler)
     flags = perf_flags(rec, past)
-    notices = perf_notices(flags, past)
+    notices = perf_notices(flags, past, rec.get("unit"))
     rec.update(flags=sorted(flags), shown=sorted(notices))
     append_perf(rec)
     return list(notices.values())
