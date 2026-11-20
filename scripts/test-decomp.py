@@ -3427,7 +3427,7 @@ def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
     log = [x for x in log if x["kind"] == "block"]
     expect(all("slow-compile" in x["flags"] for x in log[-5:]), f"every block is slow: {[x.get('flags') for x in log]}", r)
     expect(notices[0] is None and notices[1] is None, f"a flag raised once or twice is logged, not shown: {notices}", r)
-    expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row")
+    expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row of this unit")
            and "percent fewer than the median" in notices[2][0] and "blocks of this unit" in notices[2][0]
            and "antivirus" in notices[2][0],
            f"the third in a row is shown with its cost against the unit's history and the user's fix: {notices}", r)
@@ -3493,6 +3493,52 @@ def test_search_raises_scorer_bound_for_a_slow_diff_adapter(base):
     expect("scorer-bound" in rec["flags"], f"a diff adapter that takes most of the stage time is flagged: {rec}", r)
     expect(stage["score"] < 0.05 * sum(stage.values()) and stage["compare"] > 0.2 * sum(stage.values()),
            f"the time is the adapter's, not the in-process scoring's: {stage}", r)
+
+
+def scorer_streak_project(base):
+    """A project whose diff adapter is slow, after one block of the unit that raised scorer-bound."""
+    p = search_project(base, files={"tools/search_diff.py": "import time\ntime.sleep(0.3)\n" + SEARCH_DIFF_PY})
+    tune(p, workers=1)
+    search(p, NEVER)
+    expect("scorer-bound" in perf_log(p)[-1]["flags"], "the first block should raise scorer-bound", perf_log(p))
+    return p
+
+
+def scorer_notices(p):
+    r, out = fresh(p, NEVER)
+    return [n for n in out.get("notice", []) if n.startswith("scorer-bound")], perf_log(p)[-1], r
+
+
+SCORER = {"flags": ["scorer-bound"]}
+
+
+def test_search_passes_over_a_block_that_measured_nothing_in_a_streak(base):
+    p = scorer_streak_project(base)
+    seed_perf(p, 1, **SCORER)
+    seed_perf(p, 1, compiled=0)  # a repeat served from the cache
+    got, rec, r = scorer_notices(p)
+    expect(len(got) == 1 and "scorer-bound in 3 blocks in a row of this unit" in got[0] and "scorer-bound" in rec["shown"],
+           f"a block that measured nothing neither adds nor ends: {got} {rec}", r)
+    seed_perf(p, 1, **SCORER)
+    got, rec, r = scorer_notices(p)
+    expect(got == [] and "scorer-bound" in rec["flags"] and "scorer-bound" not in rec["shown"],
+           f"a fourth flagged block after the notice is not told again: {got} {rec}", r)
+
+
+def test_search_passes_over_another_units_block_in_a_streak(base):
+    p = scorer_streak_project(base)
+    seed_perf(p, 1, **SCORER)
+    seed_perf(p, 1, unit=OTHER_UNIT)
+    got, rec, r = scorer_notices(p)
+    expect(len(got) == 1 and "scorer-bound" in rec["shown"], f"another unit's block is passed over: {got} {rec}", r)
+
+
+def test_search_ends_a_streak_at_a_measuring_block_that_raised_nothing(base):
+    p = scorer_streak_project(base)
+    seed_perf(p, 1, **SCORER)
+    seed_perf(p, 1)  # built enough compiles and raised no flag
+    got, rec, r = scorer_notices(p)
+    expect(got == [] and "scorer-bound" in rec["flags"], f"a block that could measure and did not flag ends it: {got}", r)
 
 
 def paired(n, tag):

@@ -849,6 +849,10 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `starved-by-writers`: raised when `starved_frac` is above one half.
 - Every raised flag is logged.
 - A flag raised in 3 blocks in a row is shown to the user once per streak, in the search summary's `notice` list.
+  - A streak counts the earlier blocks of the same compiler and the same unit; a block of another unit is passed over.
+  - For the four measured flags, a block that built fewer than 2 candidates per worker is passed over too: it neither adds to the streak nor ends it.
+  - The tuner's flags count every block of the unit.
+  - A block that could have raised the flag and did not ends the streak.
 - A shown flag comes with its measured cost and the fix only the user can make, where there is one.
 - The `no-object-identity` line (see [Result cache](#result-cache)) is no flag: it is shown in every round it holds.
 
