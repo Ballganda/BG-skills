@@ -11,6 +11,10 @@ Issues and specs live as markdown files under `.scratch/`.
 - **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked when every file it lists is `resolved`.
 - **Comment**: append under a `## Comments` heading at the bottom of the file.
 
+## Closing work
+
+Tickets are marked `resolved` as they merge into the integration branch.
+
 <!-- if: wayfinder -->
 ## Wayfinding operations
 

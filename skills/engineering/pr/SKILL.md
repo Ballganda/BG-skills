@@ -34,6 +34,8 @@ Use this template for writing the PR body:
 
 ## Sections
 
+A PR closes only its spec. List the tickets it delivers by reference with no closing keyword, following the tracker doc's Closing work section; tickets close as they merge into the integration branch.
+
 Skip all preambles and keep prose brief. Use the user's domain language from `GLOSSARY.md`.
 
 ### Summary

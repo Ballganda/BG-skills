@@ -78,15 +78,15 @@ Before the first command, find `<python>`: ask `python3`, then `python`, then `p
 
 1. Read the spec and the batch Tickets. When they build on work not yet in the default branch (an open PR, a named spec branch), that branch is the base; otherwise the base is the default branch tip. State the base with the resolved batch.
 2. (Optional) If Tickets need shared exploration, start one explorer with a fresh context window to save markdown notes to a directory outside the repo; pass its path to implementers.
-3. Run `begin` with the integration branch name, the batch Tickets with their tiers, and `--base` set to the step 1 base. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
+3. Run `begin` with the integration branch name, the batch Tickets with their tiers, and `--base` set to the step 1 base. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec only, with the Tickets listed by reference and no closing keyword (the tracker doc's Closing work section names the keywords). If the integration branch already has an open PR, update it instead of opening another.
 4. Run `ready --cap 3` (or the user's cap). For each Ticket it lists, run `start`, then start an implementer on the printed worktree, on its tier's model. The implementer:
    - calls the Skill tool with `tdd` at pre-agreed seams where possible;
    - typechecks and runs the single relevant test file as it goes, and the full suite once at the end (a run that would outlast the tool timeout runs in the background);
    - commits;
    - merges the integration branch tip into its branch before reporting done.
-5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window. On a failing report or a failing `test`, run `fail` and apply the retry rule.
+5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window. On a failing report or a failing `test`, run `fail` and apply the retry rule. After each successful `merge`, close that Ticket with the tracker doc's Close operation, the comment naming the integration branch and the merge commit; the tracker's blocked-by counts then agree with the ledger.
 6. Run `ready` again for newly ready batch Tickets, within the cap, and repeat from step 4 until it prints `ready: none` and no implementer is running.
-7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done).
+7. When the batch is done, update the PR body's Ticket list if a PR exists, and mark the draft PR ready only if every sub-issue of the spec is closed.
 8. If at least one lesson line came back, call the Skill tool with `retro`, passing the lesson-line mode and the collected lesson lines. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
 9. Write the final reply: integration branch, Tickets done, Tickets skipped or stopped and why, the lesson lines, and retro's suggestions when it ran.
 10. Run `clean`.
