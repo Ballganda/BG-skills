@@ -1459,14 +1459,7 @@ def grams(data):
 
 def cmd_similar(a):
     t, _ = read_ticket(a.id)
-    mine = grams((ROOT / t["expected"]).read_bytes())
-    scored = []
-    for o in all_tickets():
-        if o["status"] in MATCHED and o["id"] != a.id:
-            g = grams((ROOT / o["expected"]).read_bytes())
-            if mine and g:
-                scored.append((len(mine & g) / len(mine | g), o))
-    for s, o in sorted(scored, key=lambda x: -x[0])[: a.n]:
+    for s, o, _ in closest_solved(t, a.n):
         print(f"{s:.2f} {o['id']} {o['size']}B {o['source']}")
 
 
@@ -2229,11 +2222,13 @@ def shape(text):
                     for w in SHAPE_TOKEN.findall(lexed(text)[0]))
 
 
-def closest_solved(t, n=SIMILAR_N):
-    """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
+def closest_solved(t, n=SIMILAR_N, with_source=False):
+    """The matched functions closest to the ticket, as (closeness, ticket, the function's source) triples, closest first.
 
-    A function's source is its unit's text from its marker to the next marker. One that cannot be
-    read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
+    This is the one answer `similar` prints and the bonus of `search` reads. A function's source is
+    its unit's text from its marker to the next marker, read only with_source: the bonus leaves out
+    one whose source cannot be read, `similar` does not need it. A function whose ticket or expected
+    bytes cannot be read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
     are the tickets the matches ledger names, so no other ticket file is read: a project's open
     tickets can outnumber its matched ones by thousands.
     """
@@ -2258,25 +2253,29 @@ def closest_solved(t, n=SIMILAR_N):
             continue
         try:
             g = grams((ROOT / o["expected"]).read_bytes())
-            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace")
+            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace") if with_source else ""
         except OSError:
             continue
-        marks = list(MARKER.finditer(text))
-        at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
-        if mine and g and at is not None:
-            end = marks[at + 1].start() if at + 1 < len(marks) else len(text)
-            scored.append((len(mine & g) / len(mine | g), o["id"], text[marks[at].end():end]))
-    return [(s, text) for s, _, text in sorted(scored, key=lambda x: (-x[0], x[1]))[:n]]
+        body = ""
+        if with_source:
+            marks = list(MARKER.finditer(text))
+            at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
+            if at is None:
+                continue
+            body = text[marks[at].end():marks[at + 1].start() if at + 1 < len(marks) else len(text)]
+        if mine and g:
+            scored.append((len(mine & g) / len(mine | g), o, body))
+    return sorted(scored, key=lambda x: (-x[0], x[1]["id"]))[:n]
 
 
 def with_similar(template, near):
     """The template with each likelihood raised where the alternative is written as the closest solved functions are.
 
-    near is closest_solved's. An alternative gets the bonus when its shape, two tokens or more, stands
+    near is closest_solved's, with its sources. An alternative gets the bonus when its shape, two tokens or more, stands
     in such a function, by that function's closeness. A choice point whose alternatives all get the
     same bonus is left alone: the functions say nothing about it.
     """
-    near = [(s, f" {shape(text)} ") for s, text in near if s > 0]
+    near = [(s, f" {shape(text)} ") for s, _, text in near if s > 0]
     parts = []
     for p in template.parts:
         if near and isinstance(p, Choice):
@@ -4384,8 +4383,12 @@ def perf_notices(flags, past, unit):
     return out
 
 
-def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no):
-    """The performance log's record of one finished block."""
+def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no,
+                 repeat=False):
+    """The performance log's record of one finished block.
+
+    A repeat's record carries `repeat: true` and the number of the last counted round it repeated.
+    """
     ms = sorted(round(x * 1000, 2) for x in launcher.samples)
     workers, wall = counts["workers"], perf["wall"]
     stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
@@ -4394,7 +4397,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     worker_s = tuning.get("worker_s") or workers * wall
     return {
         "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
-        "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
+        **({"repeat": True} if repeat else {}), "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
         "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
         "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
         "starved_frac": tuning.get("starved_frac", 0.0),
@@ -4944,7 +4947,7 @@ def cmd_search(a):
     template = with_learned(written, read_learned(state))  # a kept choice point starts from what the last round learned
     parents = carried_parents(state, template)
     searched = template  # what the round learned is judged against its own priors, without the similar-function bonus
-    template = with_similar(template, closest_solved(t))
+    template = with_similar(template, closest_solved(t, with_source=True))
     if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
         die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
             "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
@@ -5007,16 +5010,17 @@ def cmd_search(a):
             return background.ended(end, best)
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
         counts.update(call_s=call_seconds(called, counts))
+        repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
+        rounds = sum(r["by"] == "search" for r in trailed)  # a repeat adds none: it keeps the last counted round's number
         notices = log_block(compiler, block_record(
             t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
-            trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
+            trailed[-1]["differ_bytes"] if trailed else None, rounds if repeat else rounds + 1, len(mine) + 1, repeat))
     finally:
         pool.close()
         shutil.rmtree(scratch, ignore_errors=True)
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
-    repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
     record_round(t, template, best, results, count=not repeat)
     save_learned(state, learned_weights(searched, results, written))
     winner = None
@@ -5036,7 +5040,8 @@ def cmd_search(a):
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
     print(json.dumps(out))
-    (state / "ended").write_text(str(time.time()), encoding="utf-8")
+    if not repeat:  # a repeat is no round: the next block's ceiling is measured from the last counted round
+        (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
 
 def search_detail(t, code):

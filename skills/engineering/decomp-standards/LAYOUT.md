@@ -159,7 +159,7 @@ Commands with detail link to their section below the table.
 | `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref; nonzero exit on any regression. See [revalidate](#revalidate) |
 | `revalidate --candidate <c/slug>` | Rebuild every matched ticket on a candidate ref. See [revalidate](#revalidate) |
 | `note <id> <text>` | Append an attempt note to a ticket |
-| `similar <id>` | Closest matched functions by byte pattern |
+| `similar <id>` | Closest matched functions by byte pattern, from the tickets `ledger/matches.jsonl` names |
 | `lock <name> --by <n>` / `unlock <name>` | Exclusive lock, used for shared header and symbol map repair. See [lock and unlock](#lock-and-unlock) |
 | `link` | Link the whole binary from the reconstructed source plus raw blocks of the target. See [link](#link) |
 | `report` | Progress, attribution, learning metrics, early warning. See [report](#report) |
@@ -815,6 +815,10 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 #### A block record
 
 - `unit`, `round`, `block`.
+- `repeat`: `true` on the record of a repeat, a round served wholly from the result cache; a counted round's record has no such field.
+  - A repeat's `round` is the number of the last counted round, the one it repeated.
+  - A repeat takes a `block` number like any block, and its `model_latency_s` is as measured.
+  - A repeat does not write the ticket's round-end time, so the next round's `model_latency_s` runs from the last counted round.
 - `call_s`: the seconds of the whole `search` call up to this record, calibration included.
   - It is never smaller than `wall_s`.
   - It is a little under the summary's `call_s`, which is taken at the call's end.

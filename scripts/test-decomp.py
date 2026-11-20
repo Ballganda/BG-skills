@@ -1972,7 +1972,8 @@ def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
              "expected/00403000.bin": "zzzzzzzz\n", "src/u0002.c": "x\n", "src/u0003.c": "x\n",
              f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated"),
-             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated")}
+             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated"),
+             "ledger/matches.jsonl": matches_ledger(other, third)}
     p = Project(base, files=files)
     r = p.run("similar", TID, "--n", "2")
     rows = r.stdout.splitlines()
@@ -1984,7 +1985,8 @@ def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
 def test_similar_ignores_tickets_that_are_not_matched(base):
     other = "u0002-00402000"
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgh\n", "src/u0002.c": "x\n",
-             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open")}
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open"),
+             "ledger/matches.jsonl": matches_ledger(other)}
     r = Project(base, files=files).run("similar", TID)
     expect(r.returncode == 0 and r.stdout.strip() == "", "an open ticket is never a model", r)
 
@@ -3196,6 +3198,80 @@ def test_search_reads_no_other_ticket_in_a_project_without_a_match(base):
     expect(set(reads) == {TID}, f"only the ticket searched is read: {sorted(set(reads))}", r)
 
 
+def similar_reads(base, files, *args):
+    """Run `similar` on the project's own ticket in a project of `files`. Returns (process, the ticket files read)."""
+    base = Path(base)
+    hook, reads = base / "hook", base / "reads.log"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(TICKET_READS_PY, encoding="utf-8")
+    p = Project(base, files=dict({"expected/00401000.bin": "abcdefgh\n"}, **files))
+    r = p.run("similar", TID, *args, env={"PYTHONPATH": str(hook), "TICKET_READS": str(reads)})
+    return r, (reads.read_text().split() if reads.exists() else [])
+
+
+def test_similar_reads_no_more_ticket_files_however_many_tickets_are_open(base):
+    counts = {}
+    for extra in (0, 40):
+        files, solved = {}, []
+        for n in (2, 3):
+            tid, more = solved_ticket(n)
+            solved.append(tid)
+            files.update(more)
+        for n in range(4, 4 + extra):
+            files.update(solved_ticket(n, status="open")[1])
+        files["ledger/matches.jsonl"] = matches_ledger(*solved)
+        r, reads = similar_reads(sub(base, f"open{extra}"), files)
+        got = [l.split()[1] for l in r.stdout.splitlines()]
+        expect(r.returncode == 0 and sorted(got) == sorted(solved), f"the matched tickets are listed: {got}", r)
+        expect(set(reads) == {TID, *solved}, f"only the ticket and the matched ones are read: {sorted(set(reads))}", r)
+        counts[extra] = len(reads)
+    expect(counts[0] == counts[40], f"the ticket files read should not grow with the open tickets: {counts}")
+
+
+def test_similar_leaves_out_a_matched_ticket_it_cannot_read(base):
+    gone, files = solved_ticket(2)
+    del files[f"tickets/u0002/{gone}.md"]
+    bare, more = solved_ticket(3, expected=None)
+    files.update(more)
+    regressed, more = solved_ticket(4, status="regressed")
+    files.update(more)
+    good, more = solved_ticket(5)
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(gone, bare, regressed, good)
+    r, reads = similar_reads(base, files)
+    got = [l.split()[1] for l in r.stdout.splitlines()]
+    expect(r.returncode == 0 and got == [good], f"only the readable matched ticket is listed: {got}", r)
+
+
+def test_similar_reads_no_other_ticket_in_a_project_without_a_match(base):
+    files = {}
+    for n, status in ((2, "open"), (3, "claimed"), (4, "integrated")):  # the last was never recorded as a match
+        files.update(solved_ticket(n, status=status)[1])
+    r, reads = similar_reads(base, files)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "no match prints nothing and passes", r)
+    expect(set(reads) == {TID}, f"only the ticket asked about is read: {sorted(set(reads))}", r)
+
+
+def test_similar_prints_nothing_for_a_ticket_without_expected_bytes(base):
+    tid, files = solved_ticket(2)
+    files["ledger/matches.jsonl"] = matches_ledger(tid)
+    p = Project(base, files=files)
+    r = p.run("similar", TID)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "no expected bytes prints nothing and passes", r)
+
+
+def test_similar_and_search_favour_the_same_function(base):
+    near, files = solved_ticket(2)
+    far, more = solved_ticket(3, source="int h(int n) { return n; }\n", expected="zzzzzzzz\n")
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(near, far)
+    r, order, _ = ticket_reads(sub(base, "search"), files)
+    expect(order == ["tag_base", "tag_while", "tag_for"], f"search favours the near function's spelling: {order}", r)
+    r, _ = similar_reads(sub(base, "similar"), files, "--n", "1")
+    got = [l.split()[1] for l in r.stdout.splitlines()]
+    expect(got == [near], f"similar names the same function: {got}", r)
+
+
 # ---------- template search: the machine-wide slot pool ----------
 
 def peak_project(base, folder, **search):
@@ -3388,8 +3464,8 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     r, out = search(p, NEVER)
     expect(out["counts"]["call_s"] >= out["counts"]["wall_s"], f"call_s is no smaller than wall_s: {out['counts']}", r)
     got = perf_log(p)
-    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 2 and got[5]["block"] == 2,
-           f"a warm cache adds one block record and no calibration: {got}", r)
+    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 1 and got[5]["repeat"] is True
+           and got[5]["block"] == 2, f"a warm cache adds one block record (a repeat) and no calibration: {got}", r)
 
 
 def test_search_perf_log_is_never_committed(base):
@@ -4138,6 +4214,38 @@ def test_search_round_that_builds_one_new_candidate_is_no_repeat(base):
     expect("repeat" not in out, f"a round that builds a candidate is no repeat: {out}", r)
     expect([e["by"] for e in trail(p)] == ["check", "search", "search"], f"it counts as an attempt: {trail(p)}", r)
     expect("no new best" in out.get("stop", ""), f"and towards stop advice, as before: {out}", r)
+
+
+def test_search_logs_a_repeat_marked_with_the_round_it_repeated(base):
+    p, builds = counting_project(base)
+    for template in (TWINS, TWINS, NEVER):
+        r, out = search(p, template)
+        expect(out is not None, "the round should run", r)
+    mine = [x for x in perf_log(p) if x["kind"] == "block"]
+    expect([(x["round"], x.get("repeat")) for x in mine] == [(1, None), (1, True), (2, None)],
+           f"round 1, its repeat (numbered 1, marked), then round 2: {[(x['round'], x.get('repeat')) for x in mine]}", r)
+    expect([x["block"] for x in mine] == [1, 2, 3], f"every record takes a block number: {mine}", r)
+    expect(len({x["round"] for x in mine if not x.get("repeat")}) == 2, "no two counted rounds share a number", r)
+    expect([e["by"] for e in trail(p)].count("search") == 2, f"the trail holds 2 search records: {trail(p)}", r)
+
+
+def test_search_repeat_leaves_the_round_end_time_so_the_next_block_is_not_shortened(base):
+    build = PY + ' "{tools}/slow_build.py" "{source}" "{obj}"'
+    p = search_project(base, config={"build": build}, files={"tools/slow_build.py": SLOW_BUILD_PY})
+    tune(p, workers=1, floor_s=1, floor_compiles=3, ceiling_s=60)
+    r, out = search(p, TWINS)
+    expect(out is not None and "repeat" not in out, f"round 1 builds: {out}", r)
+    ended = p.root / ".decomp" / "search" / TID / "ended"
+    ended.write_text(str(time.time() - 40), encoding="utf-8")  # round 1 ended 40 s ago
+    r, out = search(p, TWINS)
+    expect(out is not None and out.get("repeat") is True, f"the same template is a repeat: {out}", r)
+    expect(time.time() - float(ended.read_text(encoding="utf-8")) >= 40, "a repeat does not write the round-end time", r)
+    r, out = search(p, wide(4))
+    expect(out is not None, "round 2 runs", r)
+    rec = [x for x in perf_log(p) if x["kind"] == "block"][-1]
+    expect(rec["model_latency_s"] >= 40, f"the latency is measured from round 1's end: {rec}", r)
+    expect(rec["wall_s"] > 1 and out["counts"]["compiled"] >= 3,
+           f"the block runs past the floor's seconds, for the floor's compiles: {rec}", r)
 
 
 def test_search_repeat_starts_no_background_search(base):
