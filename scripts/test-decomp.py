@@ -2401,16 +2401,19 @@ body = re.sub(r"/[*].*?[*]/|STAMP .*", "", open(sys.argv[1]).read(), flags=re.S)
 body = "".join(body.split())
 n = body.count("WRONG")
 open(sys.argv[2], "w").write("report" + chr(10))
-print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+out = {"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}
+if "NOSHA" in sys.argv[3:]:
+    del out["function_sha256"]
+print(json.dumps(out))
 """
 TWINS = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_a;) PERM_GENERAL(int WRONG_b;, int WRONG_c;) return 1; }\n"
 COMMENTED = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_a; /* the same bytes */) return 1; }\n"
 
 
-def counting_project(base, stamp=False):
+def counting_project(base, stamp=False, sha=True):
     log = Path(base) / "builds.log"
     build = PY + f' "{{tools}}/count_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"' + (" STAMP" if stamp else "")
-    p = search_project(base, config={"build": build, "diff": PY + ' "{tools}/count_diff.py" "{obj}" "{report}"'},
+    p = search_project(base, config={"build": build, "diff": PY + ' "{tools}/count_diff.py" "{obj}" "{report}"' + ("" if sha else " NOSHA")},
                        files={"tools/count_build.py": COUNT_BUILD_PY, "tools/count_diff.py": COUNT_DIFF_PY})
     return p, lambda: len(log.read_text().splitlines()) if log.exists() else 0
 
@@ -2445,6 +2448,39 @@ def test_search_hashes_function_bytes_when_the_compiler_stamps_its_objects(base)
            "two sources with the same function bytes are one object", r)
     r, again = search(p, COMMENTED)
     expect(again["counts"]["compiled"] == 0 and again["counts"]["hashing"] == "function", "and the cache still serves them", r)
+    for o in (out, again):
+        expect(o["counts"]["unique_objects"] == 1 and isinstance(o["counts"]["object_hits"], int),
+               f"the counts are numbers: {o['counts']}", r)
+        expect(not any("function_sha256" in n for n in o.get("notice", [])), f"no notice is due: {o.get('notice')}", r)
+
+
+def test_search_reads_object_identity_as_unknown_without_function_sha256(base):
+    p, builds = counting_project(base, stamp=True, sha=False)
+    r, out = search(p, COMMENTED)
+    expect(out is not None and out["counts"]["hashing"] == "function", f"the stamp should be detected: {out}", r)
+    c = out["counts"]
+    expect("unique_objects" in c and c["unique_objects"] is None and "object_hits" in c and c["object_hits"] is None,
+           f"nothing was hashed, so both counts are unknown: {c}", r)
+    block = [x for x in perf_log(p) if x.get("kind") == "block"][-1]
+    expect("unique_objects" in block and block["unique_objects"] is None, f"the performance record says unknown too: {block}", r)
+    notices = [n for n in out.get("notice", []) if "function_sha256" in n]
+    expect(len(notices) == 1 and "diff adapter" in notices[0] and "/decomp-setup" in notices[0] and "upgrade" in notices[0],
+           f"one notice names the missing hash, the adapter and the upgrade: {out.get('notice')}", r)
+    expect(len(r.stdout.splitlines()[0]) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+    expect(c["compiled"] == 2 and out["inert"] == [] and "stop" not in out,
+           f"equal scores and reports freeze no choice as inert: {out}", r)
+    r, again = search(p, COMMENTED)
+    expect(again["counts"]["unique_objects"] is None and any("function_sha256" in n for n in again.get("notice", [])),
+           f"a round served from the cache knows no more: {again}", r)
+
+
+def test_search_counts_objects_and_gives_no_identity_notice_when_objects_are_stable(base):
+    p, builds = counting_project(base, sha=False)
+    r, out = search(p, COMMENTED)
+    c = out["counts"] if out else {}
+    expect(c.get("hashing") == "object" and isinstance(c["unique_objects"], int) and isinstance(c["object_hits"], int),
+           f"stable objects are hashed whole: {out}", r)
+    expect(not any("function_sha256" in n for n in out.get("notice", [])), f"no notice is due: {out.get('notice')}", r)
 
 
 # ---------- check trail and the template-search gate ----------
