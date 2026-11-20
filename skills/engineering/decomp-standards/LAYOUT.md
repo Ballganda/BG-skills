@@ -159,7 +159,7 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - **Summary.** One JSON line, capped at about 600 tokens, that never holds candidate source:
   - `end`: why the block ended (see above).
   - `best`: the closest candidate's `code` and `differ_bytes`, or `null` when none was scored.
-  - `window`: 7 lines of the best candidate's diff report (no match only). When the `diff` adapter reports `first_differ`, the window is centred on the first report line holding that offset, with 3 lines of context each side; otherwise, or when no line holds it, it is the report's first lines.
+  - `window`: 7 lines of the best candidate's diff report (no match only). When the `diff` adapter reports `first_differ`, the window is centred on the first report line holding that offset, with 3 lines of context each side; otherwise, or when no line holds it, it is the report's first lines. A report line longer than 120 characters is cut inside that width and ends in ` ...`, so a line without the mark is whole. When the report holds fewer than 2 lines, `notice` gains one line saying that the diff report holds no instruction diff and that the fix is the `diff` adapter (see its contract under Adapters).
   - `failure`: the end of the first failure log (only when none was scored).
   - `effects`: the choice points that change the score, at most 8, largest first, each with its alternatives' change in differing bytes against the baseline (`{"B": {"B1": -2}}`).
   - `inert`: the labels of the frozen choice points.
