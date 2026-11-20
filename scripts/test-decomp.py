@@ -4094,6 +4094,38 @@ def test_search_round_that_builds_one_new_candidate_is_no_repeat(base):
     expect("no new best" in out.get("stop", ""), f"and towards stop advice, as before: {out}", r)
 
 
+def test_search_logs_a_repeat_marked_with_the_round_it_repeated(base):
+    p, builds = counting_project(base)
+    for template in (TWINS, TWINS, NEVER):
+        r, out = search(p, template)
+        expect(out is not None, "the round should run", r)
+    mine = [x for x in perf_log(p) if x["kind"] == "block"]
+    expect([(x["round"], x.get("repeat")) for x in mine] == [(1, None), (1, True), (2, None)],
+           f"round 1, its repeat (numbered 1, marked), then round 2: {[(x['round'], x.get('repeat')) for x in mine]}", r)
+    expect([x["block"] for x in mine] == [1, 2, 3], f"every record takes a block number: {mine}", r)
+    expect(len({x["round"] for x in mine if not x.get("repeat")}) == 2, "no two counted rounds share a number", r)
+    expect([e["by"] for e in trail(p)].count("search") == 2, f"the trail holds 2 search records: {trail(p)}", r)
+
+
+def test_search_repeat_leaves_the_round_end_time_so_the_next_block_is_not_shortened(base):
+    build = PY + ' "{tools}/slow_build.py" "{source}" "{obj}"'
+    p = search_project(base, config={"build": build}, files={"tools/slow_build.py": SLOW_BUILD_PY})
+    tune(p, workers=1, floor_s=1, floor_compiles=3, ceiling_s=60)
+    r, out = search(p, TWINS)
+    expect(out is not None and "repeat" not in out, f"round 1 builds: {out}", r)
+    ended = p.root / ".decomp" / "search" / TID / "ended"
+    ended.write_text(str(time.time() - 40), encoding="utf-8")  # round 1 ended 40 s ago
+    r, out = search(p, TWINS)
+    expect(out is not None and out.get("repeat") is True, f"the same template is a repeat: {out}", r)
+    expect(time.time() - float(ended.read_text(encoding="utf-8")) >= 40, "a repeat does not write the round-end time", r)
+    r, out = search(p, wide(4))
+    expect(out is not None, "round 2 runs", r)
+    rec = [x for x in perf_log(p) if x["kind"] == "block"][-1]
+    expect(rec["model_latency_s"] >= 40, f"the latency is measured from round 1's end: {rec}", r)
+    expect(rec["wall_s"] > 1 and out["counts"]["compiled"] >= 3,
+           f"the block runs past the floor's seconds, for the floor's compiles: {rec}", r)
+
+
 def test_search_repeat_starts_no_background_search(base):
     p = search_project(base, config={"build": PY + ' "{tools}/bare_build.py" "{source}" "{obj}"'},
                        files={"tools/bare_build.py": BARE_BUILD_PY})
