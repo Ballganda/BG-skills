@@ -6,6 +6,7 @@ decomp-setup tag. It is the only writer of ticket statuses and ledger records.
 Standard library only. Run from the project root: python tools/decomp.py <cmd>.
 """
 import argparse
+import atexit
 import codecs
 import collections
 import contextlib
@@ -2506,17 +2507,26 @@ class Worker:
     def build(self, text):
         """Build one candidate's source. Returns (obj, failure log or ''). A build that passes is timed."""
         wait = self.environment.settings["lock_retry_s"]
+        began = time.perf_counter()
         retrying(lambda: self.source.write_bytes(source_bytes(text)), wait)
         retrying(lambda: self.report.unlink(missing_ok=True), wait)
-        start = time.perf_counter()
-        obj, failure = build_unit(*self.args(), self.objdir, str(self.report))
-        if not failure:
-            self.environment.sample(time.perf_counter() - start)
+        self.environment.add("write", time.perf_counter() - began)
+        with compile_slot(self):  # the wait for a slot is neither write time nor compile time
+            start = time.perf_counter()
+            obj, failure = build_unit(*self.args(), self.objdir, str(self.report))
+            took = time.perf_counter() - start
+            self.environment.add("compile", took)
+            if not failure:
+                self.environment.sample(took)
         return obj, failure
 
     def diff(self, obj, fields=None):
         """Diff a built object. The diff report of this candidate is left in self.report."""
-        return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
+        start = time.perf_counter()
+        try:
+            return Score(*diff_unit_first(*self.args(), obj, str(self.report), fields))
+        finally:
+            self.environment.add("compare", time.perf_counter() - start)
 
     def args(self):
         return (self.environment, self.t, self.compiler, self.tree, str(self.source))
@@ -2570,7 +2580,7 @@ def window(report, first_differ=None):
 
 
 SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.json overrides any of them
-    "workers": 0,  # worker threads; 0 is one per logical core
+    "workers": 0,  # worker threads; 0 is the physical cores divided by the active writers
     "deadline_s": 0,  # a fixed block deadline; 0 leaves it to the floor and the ceiling
     "floor_s": 10.0,  # a block runs at least this long,
     "floor_compiles": 200,  # and on until it has built this many candidates,
@@ -2586,6 +2596,10 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "lock_retry_s": 2.0,  # how long an overwrite retries on a file another process still holds
     "budget": 0,  # the compiles a block fits, and its end once it built them; 0 works it out from the deadline
     "seed": 0,  # seeds the random picks of a space too large to try whole
+    "cores": 0,  # the physical cores to plan for; 0 asks the platform
+    "slots": 0,  # compile slots in the machine-wide pool; 0 is the cores, or `workers` when that is set higher
+    "slot_heartbeat_s": 2.0,  # how often a running search renews its heartbeat in the pool,
+    "slot_stale_s": 30.0,  # and how old a heartbeat makes its search's slots free for the taking
 }
 
 
@@ -2665,6 +2679,259 @@ def kill_tree(proc, job):
         proc.kill()
 
 
+def physical_core_call():
+    """The physical core count as the platform reports it. Raises, or counts nothing, where the platform cannot say."""
+    if os.name == "nt":
+        import ctypes
+        k, size = ctypes.WinDLL("kernel32"), ctypes.c_ulong(0)
+        k.GetLogicalProcessorInformationEx(0, None, ctypes.byref(size))  # 0 is RelationProcessorCore: one record per core
+        buf = ctypes.create_string_buffer(size.value)
+        if not k.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(size)):
+            raise OSError("GetLogicalProcessorInformationEx failed")
+        raw, at, count = buf.raw[:size.value], 0, 0
+        while at < len(raw):
+            step = int.from_bytes(raw[at + 4:at + 8], "little")  # a record starts with its relationship, then its size
+            if step <= 0:
+                raise OSError("GetLogicalProcessorInformationEx returned a record of no size")
+            at, count = at + step, count + 1
+        return count
+    if sys.platform == "darwin":
+        import ctypes
+        n, size = ctypes.c_int(0), ctypes.c_size_t(ctypes.sizeof(ctypes.c_int))
+        if ctypes.CDLL(None).sysctlbyname(b"hw.physicalcpu", ctypes.byref(n), ctypes.byref(size), None, 0):
+            raise OSError("sysctlbyname hw.physicalcpu failed")
+        return n.value
+    usable, seen = os.sched_getaffinity(0), set()  # Linux has no such call: the kernel lists each core's threads
+    for cpu in usable:
+        seen.add(Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list").read_text().strip())
+    return len(seen)
+
+
+def cores():
+    """This machine's physical cores, or its logical ones when the platform's call fails."""
+    try:
+        count = physical_core_call()
+    except Exception:
+        count = 0
+    return count if isinstance(count, int) and count > 0 else os.cpu_count() or 1
+
+
+SLOT_HOLDER = re.compile(r"\d+-[0-9a-f]+")  # a search's name in the pool: its process id and a random part
+
+
+class SlotPool:
+    """The compile slots every search on this machine shares, so concurrent writers do not oversubscribe the CPU.
+
+    The pool is a folder under the machine-only .decomp/: `<n>.slot` is slot n, held by the search named
+    inside it, and `<name>.writer` is a running search's heartbeat, touched every few seconds. A build
+    runs only while its worker holds a slot, taken by creating the file and given back by removing it.
+    A slot whose holder's heartbeat is missing or stale is reclaimed, so a search that died frees its
+    slots within the stale time. No search holds more than its share (the slots divided by the active
+    writers, rounded up) at once, so a search that takes a slot back the moment it frees one cannot
+    starve another.
+    """
+
+    def __init__(self, settings):
+        self.dir = local_dir() / "slots"  # beside local.json, whose settings size the pool
+        self.cores = int(settings["cores"]) or cores()
+        self.size = int(settings["slots"]) or max(self.cores, int(settings["workers"]))
+        self.stale_s, self.beat_s, self.retry_s = settings["slot_stale_s"], settings["slot_heartbeat_s"], settings["lock_retry_s"]
+        self.id = f"{os.getpid()}-{os.urandom(4).hex()}"
+        self.beat = self.dir / f"{self.id}.writer"
+        self.lock = threading.Condition()
+        self.closed = threading.Event()
+        self.held, self.busy, self.reclaimed = set(), 0, 0  # slots held; workers holding or waiting for one
+        self.writers = self.writers_at_start = 1
+
+    def open(self):
+        """Join the pool: start the heartbeat and count the active writers, this one included."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.beat.write_text(self.id, encoding="utf-8")
+        self.writers = self.writers_at_start = self.count_writers()
+        atexit.register(self.close)  # a search that stops on an error still leaves the pool
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+        return self
+
+    def close(self):
+        """Leave the pool: give back every slot and remove the heartbeat. Safe to call twice."""
+        if self.closed.is_set():
+            return
+        self.closed.set()
+        with self.lock:
+            for i in sorted(self.held):
+                with contextlib.suppress(OSError):
+                    self.drop(i)
+            self.held.clear()
+            with contextlib.suppress(OSError):
+                self.beat.unlink()
+
+    def stale(self, path):
+        """Whether a file was last written longer ago than the stale time, or is gone. By the wall clock: it spans processes."""
+        try:
+            return time.time() - path.stat().st_mtime > self.stale_s
+        except OSError:
+            return True
+
+    def count_writers(self):
+        """The searches whose heartbeat is fresh, this one included. A stale heartbeat is cleared away."""
+        count = 1
+        for beat in self.dir.glob("*.writer"):
+            if beat == self.beat:
+                continue
+            if not self.stale(beat):
+                count += 1
+            else:
+                with contextlib.suppress(OSError):
+                    beat.unlink()
+        return count
+
+    def heartbeat(self):
+        while not self.closed.wait(self.beat_s):
+            with self.lock:
+                if self.closed.is_set():
+                    return
+                with contextlib.suppress(OSError):
+                    try:
+                        os.utime(self.beat)
+                    except FileNotFoundError:  # cleared as stale while this process stood still
+                        self.beat.write_text(self.id, encoding="utf-8")
+            writers = self.count_writers()
+            with self.lock:
+                self.writers = writers
+                self.lock.notify_all()
+
+    def start_workers(self):
+        """The worker count a search starts with: the cores divided by the active writers."""
+        return max(1, self.cores // self.writers_at_start)
+
+    def share(self):
+        """The slots this search may hold at once. Call with the lock held."""
+        return max(1, -(-self.size // self.writers))
+
+    def path(self, i):
+        return self.dir / f"{i}.slot"
+
+    def take(self, i):
+        try:
+            fd = os.open(self.path(i), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:  # held, or on Windows still being removed
+            return False
+        try:
+            os.write(fd, self.id.encode())
+        finally:
+            os.close(fd)
+        return True
+
+    def acquire(self, prefer=0):
+        """Wait for a free slot and take it, trying slot `prefer` first. Returns the slot's number."""
+        with self.lock:
+            while self.busy >= self.share():
+                self.lock.wait(0.1)
+            self.busy += 1
+        pause, reap_at = 0.002, 0.0
+        try:
+            while True:
+                for k in range(self.size):
+                    i = (prefer + k) % self.size
+                    if self.take(i):
+                        with self.lock:
+                            self.held.add(i)
+                        return i
+                if time.perf_counter() >= reap_at:
+                    reap_at = time.perf_counter() + min(1.0, self.stale_s / 4)
+                    if self.reap():
+                        continue
+                time.sleep(pause)
+                pause = min(pause * 2, 0.05)
+        except BaseException:
+            with self.lock:
+                self.busy -= 1
+                self.lock.notify_all()
+            raise
+
+    def drop(self, i):
+        """Remove slot i's file while it still names this search. Reclaimed from a search that stood still, it is another's."""
+        slot = self.path(i)
+
+        def remove():
+            try:
+                if slot.read_text(encoding="utf-8") == self.id:
+                    slot.unlink()
+            except FileNotFoundError:
+                pass
+        retrying(remove, self.retry_s)
+
+    def release(self, i):
+        try:
+            self.drop(i)
+            gone = True
+        except OSError:  # another process still holds the file: close() tries again, and the stale time frees it at the latest
+            gone = False
+        with self.lock:
+            self.busy -= 1
+            if gone:
+                self.held.discard(i)
+            self.lock.notify_all()
+
+    def abandoned(self, i):
+        """Whether slot i is held by a search that stopped beating."""
+        slot = self.path(i)
+        try:
+            holder = slot.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return False  # free, or being written
+        if holder == self.id:
+            return False
+        if SLOT_HOLDER.fullmatch(holder):
+            return self.stale(self.dir / f"{holder}.writer")
+        return slot.exists() and self.stale(slot)  # half written, or not a search's: judged by its own age
+
+    def reap(self):
+        """Free the slots of searches that stopped beating. Returns how many.
+
+        One search reclaims at a time, under a lock file, and looks again once it holds the lock:
+        without that, two waiting searches could each remove the slot the other had just taken.
+        """
+        found = [i for i in range(self.size) if self.abandoned(i)]
+        if not found:
+            return 0
+        lock = self.dir / "reclaim.lock"
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except OSError:
+            if self.stale(lock):  # its taker died while reclaiming
+                with contextlib.suppress(OSError):
+                    lock.unlink()
+            return 0
+        freed = 0
+        try:
+            for i in found:
+                if self.abandoned(i):
+                    with contextlib.suppress(OSError):
+                        self.path(i).unlink()
+                        freed += 1
+        finally:
+            with contextlib.suppress(OSError):
+                retrying(lock.unlink, self.retry_s)
+        with self.lock:
+            self.reclaimed += freed
+        return freed
+
+
+@contextlib.contextmanager
+def compile_slot(worker):
+    """Hold one of the machine's compile slots for the length of a worker's build. A launcher with no pool builds freely."""
+    pool = getattr(worker.environment, "pool", None)
+    if pool is None:
+        yield
+        return
+    worker.slot = pool.acquire(getattr(worker, "slot", 0))
+    try:
+        yield
+    finally:
+        pool.release(worker.slot)
+
+
 class Launcher:
     """How a search block runs its adapters, standing where `check` passes doctor's Environment.
 
@@ -2678,11 +2945,23 @@ class Launcher:
         self.lock = threading.Lock()
         self.times, self.programs = [], {}
         self.killed = self.shell = 0
+        self.samples, self.stage = [], dict.fromkeys(("write", "compile", "compare"), 0.0)  # the performance log's
 
     def sample(self, seconds):
         """Note the time one passing compile took."""
         with self.lock:
             self.times.append(seconds)
+            self.samples.append(seconds)
+
+    def add(self, stage, seconds):
+        """Add to the time a stage of the block has taken (write, compile, compare), across its workers."""
+        with self.lock:
+            self.stage[stage] += seconds
+
+    def restart_timing(self):
+        """Begin the performance log's counts anew; the hang limit keeps its compile times."""
+        with self.lock:
+            self.samples, self.stage = [], dict.fromkeys(self.stage, 0.0)
 
     def limit(self):
         """Seconds a run may take before it counts as hung."""
@@ -2815,6 +3094,7 @@ class Block:
         self.early = []  # the first 2 x workers builds: whether each failed
         self.recent = collections.deque(maxlen=max(1, int(settings["repeat_window"])))  # per candidate: was it a repeat
         self.scored = self.since_gain = 0
+        self.stage, self.busy, self.expanded, self.best_at = {"expand": 0.0, "score": 0.0}, 0.0, 0, None  # the performance log's
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -2886,6 +3166,8 @@ class Block:
                 self.failure = self.failure or score.log
             elif self.best is None or (rank(score), seed) < (rank(self.best["score"]), self.best["seed"]):
                 gain = gain or self.best is None or rank(score) < rank(self.best["score"])
+                if gain and (self.best is None or rank(score) < rank(self.best["score"])):
+                    self.best_at = self.elapsed()
                 self.best = {"seed": seed, "score": score, "window": e.get("w", [])}
             if score.result == "bytes-match" and self.template.steering(vector):
                 self.steered.append(seed)  # a match that needs steering: keep looking for a natural one
@@ -2909,12 +3191,21 @@ class Block:
 
     def attempt(self, seed, memo, worker):
         """Score one candidate in the worker's own folder and record it."""
+        began = time.perf_counter()
         text = self.template.render(self.template.vector(seed))
+        expanded = time.perf_counter()
         try:
             found = memo.entry(text, worker)
         except OSError as err:  # a file of the worker's stayed locked: this candidate is lost, not the block
             found = {"r": "build-fail", "d": None, "log": str(err)}, "built", False
+        scoring = time.perf_counter()
         self.record(seed, *found)
+        done = time.perf_counter()
+        with self.lock:
+            self.stage["expand"] += expanded - began
+            self.stage["score"] += done - scoring
+            self.busy += done - began
+            self.expanded += 1
 
     def result(self, seed, memo, worker):
         """A candidate's result, scored now when the block did not try it."""
@@ -2935,7 +3226,7 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-def run_block(template, memo, workers, settings, ceiling, boost=None):
+def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
 
     Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
@@ -2945,6 +3236,7 @@ def run_block(template, memo, workers, settings, ceiling, boost=None):
     per candidate tried, by seed.
     A block that ends with no natural match but with one that needs steering ends as a match: the
     steered match, reduced to the steering it needs.
+    A dict given as perf is filled with the block's timings for the performance log.
     """
     block = Block(template, settings, len(workers), ceiling, boost)
     threads = [threading.Thread(target=block.work, args=(memo, w), daemon=True) for w in workers]
@@ -2960,17 +3252,29 @@ def run_block(template, memo, workers, settings, ceiling, boost=None):
     if block.natural:
         best = block.natural
     elif block.steered:
-        seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]))
+        seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]), boost)
         end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
-    block.counts.update(workers=len(workers), wall_s=round(block.elapsed(), 2))
+    wall = block.elapsed()
+    block.counts.update(workers=len(workers), wall_s=round(wall, 2))
+    if perf is not None:
+        perf.update(wall=wall, busy=block.busy, expanded=block.expanded, stage=dict(block.stage), best_at=block.best_at)
     return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
 
 
-def reduce_steering(template, seeds, result):
+def reduce_steering(template, seeds, result, boost=None):
     """The seed of the steered match that keeps the fewest steer choices, each flipped to a natural alternative where
-    the match survives it. result gives a seed's result, building only a candidate not scored before."""
-    seed = min(seeds, key=lambda s: len(template.steering(template.vector(s))))
-    vector = template.vector(seed)
+    the match survives it. result gives a seed's result, building only a candidate not scored before.
+
+    Among steered matches the one with the fewest steer choices is kept, then the likeliest (boost is the
+    history's, see candidates), then the lowest seed: the order their builds ended in decides nothing.
+    """
+    weights = likelihoods(template, boost)
+
+    def order(seed):
+        vector = template.vector(seed)
+        return len(template.steering(vector)), -math.prod(w[pick] for w, pick in zip(weights, vector)), seed
+
+    vector = template.vector(min(seeds, key=order))
     for i, _ in template.steering(vector):
         for pick in range(len(template.choices[i].alternatives)):
             if steer(template.choices[i], pick) is not None:
@@ -3023,11 +3327,13 @@ def insights(template, results, best):
     return out
 
 
-def summary(template, end, best, counts, winner, results=(), history_line=""):
+def summary(template, end, best, counts, winner, results=(), history_line="", notices=()):
     """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
     out = {"end": end, "best": None, "counts": counts}
     if history_line:
         out["history"] = history_line
+    if notices:
+        out["notice"] = list(notices)  # for the user; the cap never drops it
     if "score" in best:
         out["best"] = {"code": template.code(template.vector(best["seed"])), "differ_bytes": best["score"].differ_bytes}
     if winner:
@@ -3224,6 +3530,141 @@ class Memo:
                 "unique_objects": len(self.objects), "hashing": self.hashing}
 
 
+PERF = "perf.jsonl"  # the performance log: this machine only, never committed, shared by every worktree
+PERF_WINDOW = 20  # blocks of the same compiler a flag is compared with
+PERF_MIN = 3  # blocks a median needs before it can raise a flag
+PERF_COMPILES = 2  # compiles per worker a block needs before it says anything about speed
+PERF_STREAK = 3  # blocks in a row a flag is raised before the user is told
+PERF_DROP = 0.3  # a fall this large in compiles per worker-second against the median raises slow-compile
+PERF_SHARE = 0.2  # idle share of the workers, or scoring share of the stage time, above which a flag is raised
+PERF_JITTER = 3.0  # p95 compile time, in median compile times, above which io-jitter is raised
+FLAG_FIXES = {  # the fix only the user can make, where there is one
+    "slow-compile": "exclude the project folder and the system temp folder from antivirus scanning, stop other "
+                    "CPU-heavy programs and check the power plan for throttling, or move the temp folder (TEMP) to a RAM disk",
+    "io-jitter": "exclude the project folder and the system temp folder from antivirus scanning and the file indexer, "
+                 "or move the temp folder (TEMP) to a RAM disk",
+}
+
+
+def perf_records(compiler=None):
+    """The performance log's records, oldest first, those of one compiler when it is given. A damaged line is skipped."""
+    p = checkout_dir() / PERF
+    out = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines() if p.exists() else []:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and (compiler is None or rec.get("compiler") == compiler):
+            out.append(rec)
+    return out
+
+
+def append_perf(rec):
+    """Add one record to the performance log. A log that cannot be written never stops a search."""
+    p = checkout_dir() / PERF
+    with contextlib.suppress(OSError):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def block_rate(rec):
+    """Compiles per worker-second of a block record, or None when it holds no rate."""
+    try:
+        rate = rec["compiled"] / (rec["workers_end"] * rec["wall_s"])
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
+
+
+def perf_flags(rec, past):
+    """The flags a block record raises: {flag: its measured cost as a sentence}.
+
+    past is the log's earlier records of the same compiler, oldest first. slow-compile and io-jitter
+    compare with the median of the last PERF_WINDOW blocks of them, once PERF_MIN exist.
+    expander-starved and scorer-bound are shares of this block's own time. A block that built fewer
+    than PERF_COMPILES per worker raises nothing.
+    """
+    past = [r for r in past if r.get("kind") == "block"][-PERF_WINDOW:]
+    flags = {}
+    if rec["compiled"] < PERF_COMPILES * rec["workers_end"]:  # served by the cache or ended at once: nothing to measure
+        return flags
+    rate = block_rate(rec)
+    rates = [x for x in map(block_rate, past) if x is not None]
+    if rate is not None and len(rates) >= PERF_MIN:
+        median = statistics.median(rates)
+        if rate <= (1 - PERF_DROP) * median:
+            flags["slow-compile"] = (f"each worker built {rate:.1f} compiles a second, {round(100 * (1 - rate / median))} "
+                                     f"percent fewer than the median of {median:.1f} over the last {len(rates)} blocks")
+    idle = rec.get("idle_frac")
+    if isinstance(idle, (int, float)) and idle > PERF_SHARE:
+        flags["expander-starved"] = f"the workers sat idle {round(100 * idle)} percent of the block, waiting for candidates"
+    stage = rec.get("stage_ms") or {}
+    total = sum(v for v in stage.values() if isinstance(v, (int, float)))
+    if total > 0 and stage.get("score", 0) / total > PERF_SHARE:
+        flags["scorer-bound"] = f"scoring took {round(100 * stage['score'] / total)} percent of the block's stage time"
+    p95 = rec.get("t_compile_p95_ms")
+    p50s = [r["t_compile_p50_ms"] for r in past if isinstance(r.get("t_compile_p50_ms"), (int, float))]
+    base = statistics.median(p50s) if len(p50s) >= PERF_MIN else rec.get("t_compile_p50_ms")
+    if isinstance(p95, (int, float)) and isinstance(base, (int, float)) and base > 0 and p95 > PERF_JITTER * base:
+        flags["io-jitter"] = (f"the slowest compiles took {p95:.0f} ms, {p95 / base:.1f} times the median compile "
+                              f"of {base:.0f} ms")
+    return flags
+
+
+def perf_notices(flags, past):
+    """What to tell the user now: the sentence for each flag raised in PERF_STREAK blocks in a row, once per streak.
+
+    past is the log's earlier records of the same compiler, oldest first; each block record holds the
+    flags it raised and those it showed. Returns {flag: sentence}.
+    """
+    out = {}
+    for flag, cost in flags.items():
+        streak, shown = 1, False
+        for r in reversed([r for r in past if r.get("kind") == "block"]):
+            if flag not in (r.get("flags") or []):
+                break
+            streak += 1
+            shown = shown or flag in (r.get("shown") or [])
+        if streak >= PERF_STREAK and not shown:
+            fix = FLAG_FIXES.get(flag)
+            out[flag] = f"{flag} in {streak} blocks in a row: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
+    return out
+
+
+def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no):
+    """The performance log's record of one finished block."""
+    ms = sorted(round(x * 1000, 2) for x in launcher.samples)
+    workers, wall = counts["workers"], perf["wall"]
+    stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
+    final = best["score"].differ_bytes if "score" in best else None
+    return {
+        "kind": "block", "unix": now(), "ticket": t["id"], "compiler": compiler, "round": round_no, "block": block_no,
+        "wall_s": round(wall, 3), "workers_min": workers, "workers_max": workers, "workers_end": workers,
+        "expanded": perf["expanded"], "compiled": counts["compiled"], "unique_objects": memo_counts["unique_objects"],
+        "build_fail": counts["build_fail"], "killed": launcher.killed, "src_dedupe_hits": memo_counts["src_dedupe_hits"],
+        "t_compile_p50_ms": statistics.median(ms) if ms else None,
+        "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
+        "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None,
+        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / (workers * wall)), 3) if wall > 0 else 0.0,
+        "best_score_start": start_best, "best_score_end": final,
+        "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
+        "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
+        "writers_active": counts.get("writers_active", 1),  # the searches in the slot pool when this one started
+    }
+
+
+def log_block(compiler, rec):
+    """Flag the block record against the log, append it, and return the sentences to tell the user."""
+    past = perf_records(compiler)
+    flags = perf_flags(rec, past)
+    notices = perf_notices(flags, past)
+    rec.update(flags=sorted(flags), shown=sorted(notices))
+    append_perf(rec)
+    return list(notices.values())
+
+
 def search_dir(tid):
     """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
     return checkout_dir() / "search" / tid
@@ -3333,8 +3774,10 @@ def cmd_search(a):
     state = search_dir(t["id"])
     latency = model_latency(state)
     ceiling = settings["ceiling_s"] if latency is None else min(latency, settings["ceiling_s"])
-    count = max(1, min(int(settings["workers"]) or os.cpu_count() or 1, template.space()))
+    pool = SlotPool(settings).open()
+    count = max(1, min(int(settings["workers"]) or pool.start_workers(), template.space()))
     launcher = Launcher(environment, settings, count)
+    launcher.pool = pool
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
     try:
@@ -3344,16 +3787,30 @@ def cmd_search(a):
         if ctx not in cache["stable"]:
             spare = workers[1] if count > 1 else Worker(Path(scratch) / "spare", launcher, t, compiler, tree, text)
         baseline = template.render(template.vector(0))
+        calibrating, began = spare is not None, time.perf_counter()
         hashing = "object" if objects_repeat(workers[0], spare, baseline, cache, ctx) else "function"
+        if calibrating:
+            append_perf({"kind": "calibration", "unix": now(), "ticket": t["id"], "compiler": compiler,
+                         "wall_s": round(time.perf_counter() - began, 3),
+                         "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None})
+        launcher.restart_timing()
         memo = Memo(cache, ctx, hashing)
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
         category = (trail(t["id"]) or [{}])[-1].get("category")
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
+        trailed = trail(t["id"])
+        timing = {}
         with persistent_wineserver(launcher):
-            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost)
+            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
+        counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)
+        mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
+        notices = log_block(compiler, block_record(
+            t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
+            trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
     finally:
+        pool.close()
         shutil.rmtree(scratch, ignore_errors=True)
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
@@ -3363,7 +3820,7 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category))))
+    print(json.dumps(summary(template, end, best, counts, winner, results, history_line(past, category), notices)))
     (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
 

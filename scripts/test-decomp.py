@@ -2266,6 +2266,22 @@ def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
     expect(text == in_function("int right_a; /* fakematch: pin it */"), f"the winner should carry the reason: {text!r}", r)
 
 
+# A fake compiler that takes longer over a source holding a SLOW_ tag, so that candidate's result comes in last.
+SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
+    import time
+    time.sleep(1)
+open(obj, "w")''')
+
+
+def test_search_picks_the_likelier_steering_match_whichever_build_ends_first(base):
+    p = search_project(base, files={"tools/search_build.py": SLOW_BUILD_PY}, **ALLOWED)
+    tune(p, workers=3)  # the three candidates build at once, the likelier match the slowest
+    r, out = search(p, in_function(
+        "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: likely */ int SLOW_a;, %0.2 /* steer: other */ int right_b;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "r1",
+           "the likelier steering match should win, though its build ended last", r)
+
+
 # A fake compiler that logs each compile's WRONG_ tags in order, and ignores every IGNORED_ tag.
 SWEEP_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "order.log")
 open(log, "a").write(" ".join(re.findall(r"WRONG_([a-z0-9]+)", text)) + chr(10))
@@ -2844,6 +2860,243 @@ def test_search_tries_first_the_alternative_written_as_the_closest_solved_functi
     r, out, order = sampled_search(base, template, files=files)
     expect([line.split()[1] for line in order] == ["tag_base", "tag_while", "tag_for"],
            f"the spelling the solved function uses should be tried before the other: {order}", r)
+
+
+# ---------- template search: the machine-wide slot pool ----------
+
+def peak_project(base, folder, **search):
+    """A search project whose fake compiler logs how many of itself run at once into `folder`."""
+    build = PY + f' "{{tools}}/peak_build.py" "{{source}}" "{{obj}}" "{Path(folder).as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/peak_build.py": PEAK_BUILD_PY})
+    tune(p, **search)
+    return p
+
+
+def peak_of(folder):
+    return max(int(x) for x in (Path(folder) / "peak.log").read_text().split())
+
+
+def slot_folder(p):
+    d = p.root / ".decomp" / "slots"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def writer(p, name, age):
+    """Leave another writer's heartbeat in the pool, last beaten `age` seconds ago (below zero: it stays fresh)."""
+    beat = slot_folder(p) / f"{name}.writer"
+    beat.write_text(name)
+    os.utime(beat, (time.time() - age,) * 2)
+    return beat
+
+
+def hold_slot(p, index, name):
+    slot = slot_folder(p) / f"{index}.slot"
+    slot.write_text(name)
+    return slot
+
+
+def test_two_concurrent_searches_never_compile_more_at_once_than_the_pool_has_slots(base):
+    import threading
+    folder = Path(base) / "peak"
+    one = peak_project(sub(base, "one"), folder, workers=3, slots=2, slot_heartbeat_s=0.2)
+    two = peak_project(sub(base, "two"), folder)
+    shared = {"DECOMP_LOCAL": str(one.root / ".decomp")}  # one machine folder: its settings and its pool
+    got = {}
+
+    def run(name, p):
+        path = p.base / "template.c"
+        path.write_text(wide(2), encoding="utf-8")
+        got[name] = p.run("search", TID, str(path), env=shared)
+
+    threads = [threading.Thread(target=run, args=a) for a in (("one", one), ("two", two))]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    outs = []
+    for name in ("one", "two"):
+        expect(got[name].returncode == 0 and got[name].stdout, f"search {name} should finish", got[name])
+        outs.append(json.loads(got[name].stdout.splitlines()[0]))
+    for out in outs:
+        c = out["counts"]
+        expect(out["end"] == "exhausted" and c["compiled"] == 4, f"every candidate is built: {out}")
+        expect(c["workers"] == 3 and c["slots"] == 2, f"3 workers each, on a pool of 2 slots: {c}")
+    expect(max(o["counts"]["writers_active"] for o in outs) == 2, f"the later search should count both writers: {outs}")
+    expect(peak_of(folder) == 2, f"6 workers on 2 slots should build 2 at once, the peak was {peak_of(folder)}")
+    left = sorted(f.name for f in slot_folder(one).iterdir())
+    expect(left == [], f"both searches should leave the pool empty: {left}")
+
+
+def test_search_reclaims_the_slots_of_a_holder_whose_heartbeat_is_stale(base):
+    folder = Path(base) / "peak"
+    p = peak_project(base, folder, workers=3, slots=2)
+    beat = writer(p, "111-dead", 3600)
+    hold_slot(p, 0, "111-dead")
+    hold_slot(p, 1, "222-beef")  # a holder with no heartbeat at all
+    r, out = search(p, wide(2))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 4,
+           f"the search should build on the reclaimed slots: {out}", r)
+    c = out["counts"]
+    expect(c["slots_reclaimed"] == 2 and c["writers_active"] == 1, f"both stale slots are reclaimed: {c}", r)
+    expect(peak_of(folder) == 2, f"both slots should be in use again, the peak was {peak_of(folder)}", r)
+    expect(not beat.exists(), "the stale heartbeat should be cleared away")
+
+
+def test_search_leaves_the_slot_of_a_holder_whose_heartbeat_is_fresh(base):
+    folder = Path(base) / "peak"
+    p = peak_project(base, folder, workers=3, slots=2)
+    writer(p, "333-cafe", -3600)
+    slot = hold_slot(p, 1, "333-cafe")
+    r, out = search(p, wide(2))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 4,
+           f"the search should build on the slot that is free: {out}", r)
+    c = out["counts"]
+    expect(c["slots_reclaimed"] == 0 and c["writers_active"] == 2, f"a live holder keeps its slot: {c}", r)
+    expect(peak_of(folder) == 1, f"one free slot builds one at a time, the peak was {peak_of(folder)}", r)
+    expect(slot.read_text() == "333-cafe", "the live holder's slot is untouched")
+
+
+def test_search_starts_with_the_cores_divided_by_the_active_writers(base):
+    p = search_project(base)
+    tune(p, cores=8)
+    r, out = search(p, wide(4))
+    c = out["counts"] if out else {}
+    expect(c.get("workers") == 8 and c.get("slots") == 8 and c.get("writers_active") == 1,
+           f"one writer on 8 cores starts 8 workers: {c}", r)
+    writer(p, "111-dead", 3600)  # stale: not an active writer
+    writer(p, "333-cafe", -3600)
+    r, out = search(p, wide(4))
+    c = out["counts"] if out else {}
+    expect(c.get("workers") == 4 and c.get("writers_active") == 2, f"two writers on 8 cores start 4 workers each: {c}", r)
+    writer(p, "444-f00d", -3600)
+    r, out = search(p, wide(4))
+    c = out["counts"] if out else {}
+    expect(c.get("workers") == 2 and c.get("writers_active") == 3, f"three writers on 8 cores start 2 workers each: {c}", r)
+    tune(p, cores=8, workers=5)
+    r, out = search(p, wide(4))
+    expect(out is not None and out["counts"]["workers"] == 5, f"a set worker count is kept: {out}", r)
+
+
+def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails(base):
+    # The one case that reaches into the tool: no command line can make the platform's call fail.
+    import importlib.util
+    kept, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec = importlib.util.spec_from_file_location("decomp_tool", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+    finally:
+        sys.dont_write_bytecode = kept
+    logical = os.cpu_count()
+    expect(1 <= tool.cores() <= logical, f"the physical count is {tool.cores()} of {logical} logical cores")
+
+    def fails():
+        raise OSError("no such call")
+    tool.physical_core_call = fails
+    expect(tool.cores() == logical, f"a failing call should give the logical count: {tool.cores()}")
+    tool.physical_core_call = lambda: 0
+    expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
+
+
+PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "workers_min", "workers_max", "workers_end", "expanded",
+               "compiled", "unique_objects", "build_fail", "killed", "src_dedupe_hits", "t_compile_p50_ms",
+               "t_compile_p95_ms", "t_ref_ms", "stage_ms", "idle_frac", "best_score_start", "best_score_end",
+               "t_to_best_s", "end_reason", "model_latency_s", "writers_active"}
+
+
+def perf_log(p):
+    f = p.root / ".decomp" / "perf.jsonl"
+    return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+
+
+def fresh(p, template):
+    """Search with the result cache emptied, so the block compiles. Returns (process, summary)."""
+    (p.root / ".decomp" / "search-cache.json").unlink(missing_ok=True)
+    return search(p, template)
+
+
+def seed_perf(p, n, **fields):
+    """Append n block records of the last record's compiler, as an earlier machine history, each with the given fields."""
+    compiler = perf_log(p)[-1]["compiler"]
+    base = {"kind": "block", "compiler": compiler, "ticket": "other", "compiled": 1000000, "wall_s": 1.0, "workers_end": 1,
+            "t_compile_p50_ms": 10, "t_compile_p95_ms": 12, "idle_frac": 0.0, "stage_ms": {"compile": 1000, "score": 1},
+            "flags": [], "shown": []}
+    with (p.root / ".decomp" / "perf.jsonl").open("a") as f:
+        for _ in range(n):
+            f.write(json.dumps(dict(base, **fields)) + "\n")
+
+
+def test_search_writes_one_record_per_block_and_one_per_calibration(base):
+    p = search_project(base)
+    tune(p, workers=2)
+    r, out = search(p, NEVER)
+    expect(out is not None, "the round should run", r)
+    got = perf_log(p)
+    expect([x["kind"] for x in got] == ["calibration", "block"], f"a cold cache calibrates once, then one block: {got}", r)
+    rec = got[1]
+    expect(PERF_FIELDS <= set(rec), f"the block record lacks {PERF_FIELDS - set(rec)}", r)
+    expect(rec["ticket"] == TID and rec["round"] == 1 and rec["block"] == 1 and rec["workers_end"] == 2, f"identity: {rec}", r)
+    expect(rec["compiled"] == out["counts"]["compiled"] and rec["end_reason"] == "exhausted", f"counts and end: {rec}", r)
+    expect(rec["best_score_end"] == 4 and set(rec["stage_ms"]) == {"write", "compile", "compare", "expand", "score"},
+           f"the end score and the five stages: {rec}", r)
+    expect(0.0 <= rec["idle_frac"] <= 1.0 and rec["t_compile_p95_ms"] >= rec["t_compile_p50_ms"] > 0, f"timings: {rec}", r)
+    r, out = search(p, NEVER)
+    got = perf_log(p)
+    expect([x["kind"] for x in got] == ["calibration", "block", "block"] and got[2]["round"] == 2 and got[2]["block"] == 2,
+           f"a warm cache adds one block record and no calibration: {got}", r)
+
+
+def test_search_perf_log_is_never_committed(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(perf_log(p), "the round should log", r)
+    tracked = subprocess.run(["git", "ls-files"], cwd=p.root, capture_output=True, text=True).stdout
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=p.root, capture_output=True, text=True).stdout
+    expect("perf.jsonl" not in tracked and "perf.jsonl" not in status, f"the log stays out of git: {status}", r)
+
+
+def test_search_raises_slow_compile_for_a_block_30_percent_slower_per_worker(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 3)  # 1,000,000 compiles per worker-second
+    r, out = fresh(p, NEVER)
+    rec = perf_log(p)[-1]
+    expect("slow-compile" in rec["flags"], f"a block far below the median should raise slow-compile: {rec}", r)
+    seed_perf(p, 3, compiled=1, wall_s=1000.0)  # a median so slow the next block is faster than it
+    fresh(p, NEVER)
+    expect("slow-compile" not in perf_log(p)[-1]["flags"], "a block faster than the median raises nothing", r)
+
+
+def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 12)  # enough fast blocks that the slow ones the loop adds leave the median where it is
+    notices = []
+    for _ in range(5):
+        r, out = fresh(p, NEVER)
+        notices.append([n for n in out.get("notice", []) if n.startswith("slow-compile")] or None)
+    log = perf_log(p)
+    log = [x for x in log if x["kind"] == "block"]
+    expect(all("slow-compile" in x["flags"] for x in log[-5:]), f"every block is slow: {[x.get('flags') for x in log]}", r)
+    expect(notices[0] is None and notices[1] is None, f"a flag raised once or twice is logged, not shown: {notices}", r)
+    expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row")
+           and "percent fewer than the median" in notices[2][0] and "antivirus" in notices[2][0],
+           f"the third in a row is shown with its cost and the user's fix: {notices}", r)
+    expect(notices[3] is None and notices[4] is None, f"it is shown once: {notices}", r)
+    expect("slow-compile" in log[-3]["shown"] and "slow-compile" not in log[-4]["shown"] + log[-2]["shown"], f"the record says what was shown: {log[-4:]}", r)
+
+
+def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 3, t_compile_p50_ms=0.001)  # a median compile far below this block's p95
+    r, out = fresh(p, NEVER)
+    rec = perf_log(p)[-1]
+    expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
 
 
 # A fake `wineserver` that logs each start and then idles until it is killed. Linux and macOS only: Windows
