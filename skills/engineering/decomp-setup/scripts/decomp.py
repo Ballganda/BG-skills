@@ -2177,15 +2177,28 @@ def closest_solved(t, n=SIMILAR_N):
     """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
 
     A function's source is its unit's text from its marker to the next marker. One that cannot be
-    read is left out, as is every one when the ticket's own expected bytes are missing.
+    read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
+    are the tickets the matches ledger names, so no other ticket file is read: a project's open
+    tickets can outnumber its matched ones by thousands.
     """
+    try:
+        solved = list(dict.fromkeys(m["ticket"] for m in records("matches.jsonl")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    solved = [tid for tid in solved if isinstance(tid, str) and tid != t["id"] and ticket_path(tid).is_file()]
+    if not solved:
+        return []
     try:
         mine = grams((ROOT / t["expected"]).read_bytes())
     except OSError:
         return []
     scored = []
-    for o in all_tickets():
-        if o["status"] not in MATCHED or o["id"] == t["id"]:
+    for tid in solved:
+        try:
+            o = read_ticket(tid)[0]
+        except (OSError, ValueError, KeyError):
+            continue
+        if o["status"] not in MATCHED:  # a match that has since regressed is no model
             continue
         try:
             g = grams((ROOT / o["expected"]).read_bytes())
