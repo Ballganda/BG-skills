@@ -1972,7 +1972,8 @@ def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
              "expected/00403000.bin": "zzzzzzzz\n", "src/u0002.c": "x\n", "src/u0003.c": "x\n",
              f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated"),
-             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated")}
+             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated"),
+             "ledger/matches.jsonl": matches_ledger(other, third)}
     p = Project(base, files=files)
     r = p.run("similar", TID, "--n", "2")
     rows = r.stdout.splitlines()
@@ -1984,7 +1985,8 @@ def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
 def test_similar_ignores_tickets_that_are_not_matched(base):
     other = "u0002-00402000"
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgh\n", "src/u0002.c": "x\n",
-             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open")}
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open"),
+             "ledger/matches.jsonl": matches_ledger(other)}
     r = Project(base, files=files).run("similar", TID)
     expect(r.returncode == 0 and r.stdout.strip() == "", "an open ticket is never a model", r)
 
@@ -3194,6 +3196,80 @@ def test_search_reads_no_other_ticket_in_a_project_without_a_match(base):
     r, order, reads = ticket_reads(base, files)
     expect(order == ["tag_base", "tag_for", "tag_while"], f"no match gives no bonus: {order}", r)
     expect(set(reads) == {TID}, f"only the ticket searched is read: {sorted(set(reads))}", r)
+
+
+def similar_reads(base, files, *args):
+    """Run `similar` on the project's own ticket in a project of `files`. Returns (process, the ticket files read)."""
+    base = Path(base)
+    hook, reads = base / "hook", base / "reads.log"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(TICKET_READS_PY, encoding="utf-8")
+    p = Project(base, files=dict({"expected/00401000.bin": "abcdefgh\n"}, **files))
+    r = p.run("similar", TID, *args, env={"PYTHONPATH": str(hook), "TICKET_READS": str(reads)})
+    return r, (reads.read_text().split() if reads.exists() else [])
+
+
+def test_similar_reads_no_more_ticket_files_however_many_tickets_are_open(base):
+    counts = {}
+    for extra in (0, 40):
+        files, solved = {}, []
+        for n in (2, 3):
+            tid, more = solved_ticket(n)
+            solved.append(tid)
+            files.update(more)
+        for n in range(4, 4 + extra):
+            files.update(solved_ticket(n, status="open")[1])
+        files["ledger/matches.jsonl"] = matches_ledger(*solved)
+        r, reads = similar_reads(sub(base, f"open{extra}"), files)
+        got = [l.split()[1] for l in r.stdout.splitlines()]
+        expect(r.returncode == 0 and sorted(got) == sorted(solved), f"the matched tickets are listed: {got}", r)
+        expect(set(reads) == {TID, *solved}, f"only the ticket and the matched ones are read: {sorted(set(reads))}", r)
+        counts[extra] = len(reads)
+    expect(counts[0] == counts[40], f"the ticket files read should not grow with the open tickets: {counts}")
+
+
+def test_similar_leaves_out_a_matched_ticket_it_cannot_read(base):
+    gone, files = solved_ticket(2)
+    del files[f"tickets/u0002/{gone}.md"]
+    bare, more = solved_ticket(3, expected=None)
+    files.update(more)
+    regressed, more = solved_ticket(4, status="regressed")
+    files.update(more)
+    good, more = solved_ticket(5)
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(gone, bare, regressed, good)
+    r, reads = similar_reads(base, files)
+    got = [l.split()[1] for l in r.stdout.splitlines()]
+    expect(r.returncode == 0 and got == [good], f"only the readable matched ticket is listed: {got}", r)
+
+
+def test_similar_reads_no_other_ticket_in_a_project_without_a_match(base):
+    files = {}
+    for n, status in ((2, "open"), (3, "claimed"), (4, "integrated")):  # the last was never recorded as a match
+        files.update(solved_ticket(n, status=status)[1])
+    r, reads = similar_reads(base, files)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "no match prints nothing and passes", r)
+    expect(set(reads) == {TID}, f"only the ticket asked about is read: {sorted(set(reads))}", r)
+
+
+def test_similar_prints_nothing_for_a_ticket_without_expected_bytes(base):
+    tid, files = solved_ticket(2)
+    files["ledger/matches.jsonl"] = matches_ledger(tid)
+    p = Project(base, files=files)
+    r = p.run("similar", TID)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "no expected bytes prints nothing and passes", r)
+
+
+def test_similar_and_search_favour_the_same_function(base):
+    near, files = solved_ticket(2)
+    far, more = solved_ticket(3, source="int h(int n) { return n; }\n", expected="zzzzzzzz\n")
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(near, far)
+    r, order, _ = ticket_reads(sub(base, "search"), files)
+    expect(order == ["tag_base", "tag_while", "tag_for"], f"search favours the near function's spelling: {order}", r)
+    r, _ = similar_reads(sub(base, "similar"), files, "--n", "1")
+    got = [l.split()[1] for l in r.stdout.splitlines()]
+    expect(got == [near], f"similar names the same function: {got}", r)
 
 
 # ---------- template search: the machine-wide slot pool ----------
