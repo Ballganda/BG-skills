@@ -2997,6 +2997,102 @@ def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
     expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
 
 
+# ---------- template search: self-tuning workers and the reference compile ----------
+
+# A fake compiler that is fast until more than `limit` workers run: each build marks its worker's folder
+# as it starts and as it ends, and a build that starts with more than `limit` folders marked in the last
+# 1.5 seconds takes ten times as long.
+LIMIT_BUILD_PY = """import hashlib, os, sys, time
+src, obj, folder, limit = sys.argv[1:5]
+os.makedirs(folder, exist_ok=True)
+me = os.path.join(folder, hashlib.sha256(os.path.dirname(os.path.abspath(obj)).encode()).hexdigest())
+open(me, "w").close()
+ages = []
+for name in os.listdir(folder):
+    try:
+        ages.append(time.time() - os.path.getmtime(os.path.join(folder, name)))
+    except OSError:
+        pass
+time.sleep(1.0 if sum(age < 1.5 for age in ages) > int(limit) else 0.1)
+open(me, "w").close()
+open(obj, "w").write(open(src).read())
+"""
+# A fake compiler that throttles the baseline of `wide(10)`: its first two builds (the start-of-search
+# double compile) are fast like every other candidate, and each later one takes 1.5 seconds longer.
+THROTTLE_BUILD_PY = """import re, sys, time
+src, obj, log = sys.argv[1:4]
+text = open(src).read()
+if "WRONG_j0" in text and not re.search(r"WRONG_[a-j]1", text):
+    open(log, "a").write("baseline" + chr(10))
+    if len(open(log).read().splitlines()) > 2:
+        time.sleep(1.5)
+open(obj, "w").write(text)
+"""
+
+
+def test_search_worker_count_settles_near_the_count_the_compiler_is_fast_at(base):
+    folder = Path(base) / "limit"
+    build = PY + f' "{{tools}}/limit_build.py" "{{source}}" "{{obj}}" "{folder.as_posix()}" 4'
+    p = search_project(base, config={"build": build}, files={"tools/limit_build.py": LIMIT_BUILD_PY})
+    # 3 cores start 3 workers on a pool of 8 slots. The wide noise band and the long spread keep the
+    # count from moving on anything but the tenfold slowdown, whatever else this machine is doing.
+    tune(p, cores=3, slots=8, tune_s=1, tune_gain=0.15, tune_loss=0.3, tune_spread=50, reference_s=0, deadline_s=9)
+    r, out = search(p, wide(10))
+    expect(out is not None and out["end"] == "deadline" and out["counts"]["workers"] == 3, f"the block starts 3 workers: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["workers_min"] >= 1 and rec["workers_max"] >= 4, f"the count should climb from 3 to the 4 the compiler is fast at: {rec}", r)
+    expect(3 <= rec["workers_end"] <= 5, f"the count should end near 4, it ended at {rec['workers_end']}: {rec}", r)
+    expect("starved-by-writers" not in rec["flags"] and "contention-or-throttle" not in rec["flags"],
+           f"a block with the pool to itself and no reference compile raises neither tuning flag: {rec}", r)
+
+
+def test_search_sheds_workers_and_flags_contention_when_the_reference_compile_slows(base):
+    log = Path(base) / "baseline.log"
+    build = PY + f' "{{tools}}/throttle_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/throttle_build.py": THROTTLE_BUILD_PY})
+    tune(p, cores=4, tune_s=60, reference_s=0.5, deadline_s=4)  # the tick never comes: only the reference moves the count
+    r, out = search(p, wide(10))
+    expect(out is not None and out["end"] == "deadline", f"the block should run to its deadline: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(len(log.read_text().splitlines()) >= 4, "the baseline is built again as the reference, after the block built it", r)
+    expect("contention-or-throttle" in rec["flags"], f"a reference compile far slower than the block's first compiles is flagged: {rec}", r)
+    expect(rec["t_ref_max_ms"] > 1.3 * rec["t_ref_base_ms"] > 0 and rec["t_ref_ms"] >= 1500, f"the record holds both times: {rec}", r)
+    expect(rec["workers_max"] == 4 and rec["workers_end"] == 2 and rec["workers_min"] == 2,
+           f"the 4 workers should be halved: {rec}", r)
+
+
+def test_search_flags_a_block_the_pool_holds_below_its_worker_floor(base):
+    p = search_project(base)
+    tune(p, cores=8)
+    writer(p, "333-cafe", -3600)
+    held = [hold_slot(p, i, "333-cafe") for i in range(1, 8)]  # another live writer holds 7 of the 8 slots
+    r, out = search(p, wide(4))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["workers"] == 4, f"two writers on 8 cores: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["workers_floor"] == 2 and rec["starved_frac"] > 0.5, f"one free slot is below the floor of 2 workers: {rec}", r)
+    expect("starved-by-writers" in rec["flags"], f"the block should be flagged as starved: {rec}", r)
+    for slot in held:
+        slot.unlink()
+    r, out = fresh(p, wide(4))
+    rec = perf_log(p)[-1]
+    expect(rec["starved_frac"] == 0 and "starved-by-writers" not in rec["flags"], f"with its share free it is not starved: {rec}", r)
+
+
+def test_search_shows_a_tuning_flag_with_the_fix_only_the_user_can_make(base):
+    p = search_project(base)
+    tune(p, cores=8)
+    writer(p, "333-cafe", -3600)
+    for i in range(1, 8):
+        hold_slot(p, i, "333-cafe")
+    notices = []
+    for _ in range(3):
+        r, out = fresh(p, wide(3))
+        notices.append([n for n in out.get("notice", []) if n.startswith("starved-by-writers")])
+    expect(notices[0] == [] and notices[1] == [] and len(notices[2]) == 1, f"the third starved block in a row is shown: {notices}", r)
+    expect("floor of 2 workers" in notices[2][0] and "concurrent writer count" in notices[2][0],
+           f"with its cost and the user's fix: {notices[2]}", r)
+
+
 # A fake `wineserver` that logs each start and then idles until it is killed. Linux and macOS only: Windows
 # has no Wine and no `sh` to run it.
 FAKE_WINESERVER = "#!/bin/sh" + chr(10) + 'echo "$@" >> "$WINESERVER_LOG"' + chr(10) + "exec sleep 60" + chr(10)
