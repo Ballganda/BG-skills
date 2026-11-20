@@ -4,3 +4,5 @@ evals/results/*
 !evals/results/baseline/
 evals/results/baseline/report.html
 evals-staged
+__pycache__/
+*.pyc
