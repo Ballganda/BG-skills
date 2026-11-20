@@ -3207,7 +3207,8 @@ class Block:
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. The rest waits for the sweep's last result: a choice point whose
     alternatives all gave the baseline's object is inert, and stays at its first alternative from
-    then on. A match that needs steering does not end the block: it is kept while the rest is tried
+    then on. It does not wait once the round has no object identity (see Memo.blind), as nothing
+    can then be frozen. A match that needs steering does not end the block: it is kept while the rest is tried
     for a natural one (see run_block). boost is the history's (see candidates).
     """
 
@@ -3233,6 +3234,7 @@ class Block:
         self.waited, self.handed, self.unserved = 0.0, None, []  # see asked: the waits for a candidate
         self.running = lambda: self.workers  # how many workers run now: run_block asks its Tuner
         self.last = False  # whether the deadline came with one pass of the workers left (see last_pass)
+        self.blind = lambda: False  # whether nothing can be frozen as inert: run_block sets the Memo's (see Memo.blind)
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -3274,7 +3276,7 @@ class Block:
                     return None
                 if self.sweep:
                     return self.sweep.popleft()
-                if not self.pending:
+                if not self.held():
                     break
                 self.lock.wait(0.05)  # the sweep's last builds are still out: what is inert is not known yet
             if self.seeds is None:
@@ -3284,6 +3286,10 @@ class Block:
                 self.end = "exhausted"
             return seed
 
+    def held(self):
+        """Whether the rest waits for the sweep's results. It does not once no choice point can be frozen. Call with the lock held."""
+        return bool(self.pending) and not self.blind()
+
     def last_pass(self):
         """Whether no more candidates are left than workers run now. Call with the lock held, at the deadline.
 
@@ -3292,7 +3298,7 @@ class Block:
         Before the sweep's results are in, what is left is counted as if no choice point were inert.
         """
         n = self.running()
-        if self.sweep or self.pending:
+        if self.sweep or self.held():
             self.last = len(self.sweep) + self.counts["space"] - len(self.swept) <= n
             return self.last
         if self.seeds is None:
@@ -3321,7 +3327,7 @@ class Block:
                 if self.sweep:
                     seeds.append(self.sweep.popleft())
                     continue
-                seed = None if self.pending or self.seeds is None else next(self.seeds, None)
+                seed = None if self.held() or self.seeds is None else next(self.seeds, None)
                 if seed is None:
                     break
                 seeds.append(seed)
@@ -3488,6 +3494,7 @@ def run_block(template, memo, options):
     if tuner:
         block.running = lambda: tuner.target
         tuner.begin(block)
+    block.blind = memo.blind
     for th in threads:
         th.start()
     for th in threads:
@@ -4386,23 +4393,37 @@ def perf_flags(rec, past):
     return flags
 
 
-def perf_notices(flags, past):
+TUNER_FLAGS = ("contention-or-throttle", "starved-by-writers")  # raised with no minimum of compiles
+
+
+def could_measure(r):
+    """Whether a block record built enough compiles per worker to raise the four measured flags."""
+    return r.get("compiled", 0) >= PERF_COMPILES * r.get("workers_end", 1)
+
+
+def perf_notices(flags, past, unit):
     """What to tell the user now: the sentence for each flag raised in PERF_STREAK blocks in a row, once per streak.
 
     past is the log's earlier records of the same compiler, oldest first; each block record holds the
-    flags it raised and those it showed. Returns {flag: sentence}.
+    flags it raised and those it showed. A streak counts the blocks of this unit that could have raised
+    the flag: another unit's block is passed over, and so is a block that built fewer than PERF_COMPILES
+    per worker when the flag is one of the four measured ones (the tuner's flags have no such minimum).
+    A block that could have raised it and did not ends the streak. Returns {flag: sentence}.
     """
     out = {}
+    mine = [r for r in past if r.get("kind") == "block" and unit and r.get("unit") == unit]
     for flag, cost in flags.items():
         streak, shown = 1, False
-        for r in reversed([r for r in past if r.get("kind") == "block"]):
+        for r in reversed(mine):
+            if flag not in TUNER_FLAGS and not could_measure(r):
+                continue
             if flag not in (r.get("flags") or []):
                 break
             streak += 1
             shown = shown or flag in (r.get("shown") or [])
         if streak >= PERF_STREAK and not shown:
             fix = FLAG_FIXES.get(flag)
-            out[flag] = f"{flag} in {streak} blocks in a row: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
+            out[flag] = f"{flag} in {streak} blocks in a row of this unit: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
     return out
 
 
@@ -4443,7 +4464,7 @@ def log_block(compiler, rec):
     """Flag the block record against the log, append it, and return the sentences to tell the user."""
     past = perf_records(compiler)
     flags = perf_flags(rec, past)
-    notices = perf_notices(flags, past)
+    notices = perf_notices(flags, past, rec.get("unit"))
     rec.update(flags=sorted(flags), shown=sorted(notices))
     append_perf(rec)
     return list(notices.values())

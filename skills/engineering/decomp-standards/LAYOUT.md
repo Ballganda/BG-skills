@@ -436,6 +436,7 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 
 - A round runs its candidates as one block, on worker threads.
 - The candidates after the one-change sweep wait for its last result, which settles the inert choice points.
+  - They do not wait once the round has no object identity: from the first diffed result without `function_sha256` (with hashing on the function's bytes), no choice point can be frozen, so every free worker takes the next candidate.
 - Each worker drives one adapter process at a time in its own scratch folder.
 - The scratch folder's file names are fixed and overwritten per candidate (an overwrite retries briefly on a file another process still holds).
 - A worker takes its next candidate only when it is free.
@@ -868,6 +869,8 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
   - `compare` is the diff adapter run.
   - `score` is the scoring in the tool's own process.
 - `idle_frac`: the share of the workers' time spent waiting for a candidate, counted up to the moment the block's last candidate was handed to a worker.
+  - The wait for the sweep's results is part of it.
+  - That wait is absent when the round has no object identity.
 - `best_score_start`: the `differ_bytes` of the ticket's latest attempt before the block, from the check trail; `null` without one.
 - `best_score_end`: the `differ_bytes` of this block's own best candidate; `null` when none was scored.
   - It is the block's best, not the ticket's, so it can be worse than `best_score_start`.
@@ -890,6 +893,10 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `starved-by-writers`: raised when `starved_frac` is above one half.
 - Every raised flag is logged.
 - A flag raised in 3 blocks in a row is shown to the user once per streak, in the search summary's `notice` list.
+  - A streak counts the earlier blocks of the same compiler and the same unit; a block of another unit is passed over.
+  - For the four measured flags, a block that built fewer than 2 candidates per worker is passed over too: it neither adds to the streak nor ends it.
+  - The tuner's flags count every block of the unit.
+  - A block that could have raised the flag and did not ends the streak.
 - A shown flag comes with its measured cost and the fix only the user can make, where there is one.
 - The `no-object-identity` line (see [Result cache](#result-cache)) is no flag: it is shown in every round it holds, in full or by name (see [Adapter notices](#adapter-notices)).
 
