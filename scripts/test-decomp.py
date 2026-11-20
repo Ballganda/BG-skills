@@ -20,6 +20,14 @@ Each case receives its scratch folder in resolved (long) form. A Windows temp fo
 can be given in short form (8.3 names), and the tool prints the long form, so a path
 a case builds from a short-form folder would not equal the path the tool prints for
 the same file.
+
+Template search is bounded by wall-clock time, so a case must hold on a machine many
+times slower than yours: it never asserts an outcome that a deadline, a ceiling or a
+timeout can change (a match found, an exhausted space reached) unless its subject is
+that deadline, and then its name says so. Assert an exhaustive result only on a space
+small enough to finish many times over: wide(n) has 2**n candidates. Set the time a
+round is given, never inherit it from the seconds since the last round: call
+forget_latency(p) before the next round.
 """
 import ast
 import hashlib
@@ -2863,7 +2871,7 @@ def tune(p, **search):
 
 
 def wide(n, alternatives=("int WRONG_{c}0;", "int WRONG_{c}1; int WRONG_{c}2;")):
-    """A template of n choice points that never matches."""
+    """A template of n choice points that never matches: with two alternatives each, 2**n candidates."""
     return MARK + "int f(void) { int WRONG_now; " + " ".join(
         "PERM_GENERAL(" + ", ".join(a.format(c=chr(97 + i)) for a in alternatives) + ")" for i in range(n)) + " return 1; }\n"
 
@@ -4094,7 +4102,7 @@ def test_search_repeat_starts_no_background_search(base):
     r, out = search(p, template)
     expect(out is not None and out["end"] == "plateau" and out["counts"]["compiled"] == 9,
            f"the first round ends on a plateau after its sweep: {out}", r)
-    time.sleep(2)  # the time the model took: what a background search would have to run in
+    forget_latency(p)  # the round's ceiling is the setting, not the seconds since the first round
     tune(p, workers=1, plateau_compiles=8, background=1)
     try:
         r, out = search(p, template)
