@@ -3100,6 +3100,102 @@ def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
     expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
 
 
+# ---------- template search: self-tuning workers and the reference compile ----------
+
+# A fake compiler that is fast until more than `limit` workers run: each build marks its worker's folder
+# as it starts and as it ends, and a build that starts with more than `limit` folders marked in the last
+# 1.5 seconds takes ten times as long.
+LIMIT_BUILD_PY = """import hashlib, os, sys, time
+src, obj, folder, limit = sys.argv[1:5]
+os.makedirs(folder, exist_ok=True)
+me = os.path.join(folder, hashlib.sha256(os.path.dirname(os.path.abspath(obj)).encode()).hexdigest())
+open(me, "w").close()
+ages = []
+for name in os.listdir(folder):
+    try:
+        ages.append(time.time() - os.path.getmtime(os.path.join(folder, name)))
+    except OSError:
+        pass
+time.sleep(1.0 if sum(age < 1.5 for age in ages) > int(limit) else 0.1)
+open(me, "w").close()
+open(obj, "w").write(open(src).read())
+"""
+# A fake compiler that throttles the baseline of `wide(10)`: its first two builds (the start-of-search
+# double compile) are fast like every other candidate, and each later one takes 1.5 seconds longer.
+THROTTLE_BUILD_PY = """import re, sys, time
+src, obj, log = sys.argv[1:4]
+text = open(src).read()
+if "WRONG_j0" in text and not re.search(r"WRONG_[a-j]1", text):
+    open(log, "a").write("baseline" + chr(10))
+    if len(open(log).read().splitlines()) > 2:
+        time.sleep(1.5)
+open(obj, "w").write(text)
+"""
+
+
+def test_search_worker_count_settles_near_the_count_the_compiler_is_fast_at(base):
+    folder = Path(base) / "limit"
+    build = PY + f' "{{tools}}/limit_build.py" "{{source}}" "{{obj}}" "{folder.as_posix()}" 4'
+    p = search_project(base, config={"build": build}, files={"tools/limit_build.py": LIMIT_BUILD_PY})
+    # 3 cores start 3 workers on a pool of 8 slots. The wide noise band and the long spread keep the
+    # count from moving on anything but the tenfold slowdown, whatever else this machine is doing.
+    tune(p, cores=3, slots=8, tune_s=1, tune_gain=0.15, tune_loss=0.3, tune_spread=50, reference_s=0, deadline_s=9)
+    r, out = search(p, wide(10))
+    expect(out is not None and out["end"] == "deadline" and out["counts"]["workers"] == 3, f"the block starts 3 workers: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["workers_min"] >= 1 and rec["workers_max"] >= 4, f"the count should climb from 3 to the 4 the compiler is fast at: {rec}", r)
+    expect(3 <= rec["workers_end"] <= 5, f"the count should end near 4, it ended at {rec['workers_end']}: {rec}", r)
+    expect("starved-by-writers" not in rec["flags"] and "contention-or-throttle" not in rec["flags"],
+           f"a block with the pool to itself and no reference compile raises neither tuning flag: {rec}", r)
+
+
+def test_search_sheds_workers_and_flags_contention_when_the_reference_compile_slows(base):
+    log = Path(base) / "baseline.log"
+    build = PY + f' "{{tools}}/throttle_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/throttle_build.py": THROTTLE_BUILD_PY})
+    tune(p, cores=4, tune_s=60, reference_s=0.5, deadline_s=4)  # the tick never comes: only the reference moves the count
+    r, out = search(p, wide(10))
+    expect(out is not None and out["end"] == "deadline", f"the block should run to its deadline: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(len(log.read_text().splitlines()) >= 4, "the baseline is built again as the reference, after the block built it", r)
+    expect("contention-or-throttle" in rec["flags"], f"a reference compile far slower than the block's first compiles is flagged: {rec}", r)
+    expect(rec["t_ref_max_ms"] > 1.3 * rec["t_ref_base_ms"] > 0 and rec["t_ref_ms"] >= 1500, f"the record holds both times: {rec}", r)
+    expect(rec["workers_max"] == 4 and rec["workers_end"] == 2 and rec["workers_min"] == 2,
+           f"the 4 workers should be halved: {rec}", r)
+
+
+def test_search_flags_a_block_the_pool_holds_below_its_worker_floor(base):
+    p = search_project(base)
+    tune(p, cores=8)
+    writer(p, "333-cafe", -3600)
+    held = [hold_slot(p, i, "333-cafe") for i in range(1, 8)]  # another live writer holds 7 of the 8 slots
+    r, out = search(p, wide(4))
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["workers"] == 4, f"two writers on 8 cores: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["workers_floor"] == 2 and rec["starved_frac"] > 0.5, f"one free slot is below the floor of 2 workers: {rec}", r)
+    expect("starved-by-writers" in rec["flags"], f"the block should be flagged as starved: {rec}", r)
+    for slot in held:
+        slot.unlink()
+    r, out = fresh(p, wide(4))
+    rec = perf_log(p)[-1]
+    expect(rec["starved_frac"] == 0 and "starved-by-writers" not in rec["flags"], f"with its share free it is not starved: {rec}", r)
+
+
+def test_search_shows_a_tuning_flag_with_the_fix_only_the_user_can_make(base):
+    p = search_project(base)
+    tune(p, cores=8)
+    writer(p, "333-cafe", -3600)
+    for i in range(1, 8):
+        hold_slot(p, i, "333-cafe")
+    notices = []
+    for _ in range(3):
+        r, out = fresh(p, wide(3))
+        notices.append([n for n in out.get("notice", []) if n.startswith("starved-by-writers")])
+    expect(notices[0] == [] and notices[1] == [] and len(notices[2]) == 1, f"the third starved block in a row is shown: {notices}", r)
+    expect("floor of 2 workers" in notices[2][0] and "concurrent writer count" in notices[2][0],
+           f"with its cost and the user's fix: {notices[2]}", r)
+
+
 # A fake `wineserver` that logs each start and then idles until it is killed. Linux and macOS only: Windows
 # has no Wine and no `sh` to run it.
 FAKE_WINESERVER = "#!/bin/sh" + chr(10) + 'echo "$@" >> "$WINESERVER_LOG"' + chr(10) + "exec sleep 60" + chr(10)
@@ -3147,6 +3243,122 @@ def test_search_starts_no_wineserver_when_the_toolchain_does_not_use_wine(base):
     p, log = wine_project(base, wine=False)
     r, out = search_with_env(p, MATCHING)
     expect(out["end"] == "match" and not log.exists(), "no wine prerequisite, no wineserver", r)
+
+
+# ---------- template search: learning across rounds, mutation, crossover, and stop advice ----------
+
+def learn_template(b="tag_b", note=""):
+    """Two choice points. Alternative 2 of each has one WRONG, alternative 0 two, alternative 1 three: 2 is the one that helps."""
+    return in_function(
+        "PERM_GENERAL(tag_a0 WRONG_1 WRONG_2, tag_a1 WRONG_1 WRONG_2 WRONG_3, tag_a2 WRONG_1) "
+        f"PERM_GENERAL({b}0 WRONG_4 WRONG_5, {b}1 WRONG_4 WRONG_5 WRONG_6, {b}2 WRONG_4) {note}")
+
+
+def two_rounds(base, second, first=None, **constants):
+    """Run two rounds on one worker. Returns (the second summary, the candidates the second round built, in order)."""
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    tune(p, workers=1, **constants)
+    r, out = search(p, first or learn_template())
+    expect(out is not None, "the first round should print a summary", r)
+    built = len(log.read_text().splitlines())
+    cache = p.root / ".decomp" / "search-cache.json"
+    if cache.exists():
+        cache.unlink()  # the second round builds what it tries instead of reading the first's results
+    r, out = search(p, second)
+    expect(out is not None, "the second round should print a summary", r)
+    return r, out, log.read_text().splitlines()[built:]
+
+
+def singles(order):
+    """The alternative each one-change candidate of a round changes, in build order."""
+    return [next(x for x in line.split() if not x.endswith("0")) for line in order[1:] if len([x for x in line.split() if not x.endswith("0")]) == 1]
+
+
+def test_search_second_round_starts_a_kept_label_from_what_the_first_learned(base):
+    r, out, order = two_rounds(base, learn_template(note="/* round two */"))
+    got = singles(order)[:4]
+    expect(got.index("tag_a2") < got.index("tag_a1") and got.index("tag_b2") < got.index("tag_b1"),
+           f"both kept choice points should try the alternative that helped before the one that hurt: {got}", r)
+    expect(got[:2] and {got[0], got[1]} == {"tag_a2", "tag_b2"}, f"the helpful alternatives lead the sweep: {got}", r)
+
+
+def test_search_second_round_resets_an_edited_label_to_its_priors(base):
+    r, out, order = two_rounds(base, learn_template(b="tag_e", note="/* round two */"))
+    got = singles(order)[:4]
+    expect(got == ["tag_a2", "tag_e1", "tag_e2", "tag_a1"],
+           f"A keeps what it learned and the edited B is back at uniform priors, in template order: {got}", r)
+
+
+def test_search_mutation_and_crossover_only_combine_the_written_alternatives(base):
+    r, out, order = two_rounds(base, grid(6), first=grid(6), budget=60)
+    arms = out["counts"].get("arm_picks")
+    expect(arms and arms["mutate"] > 0 and arms["cross"] > 0, f"the second round should mutate and cross over: {out['counts']}", r)
+    for line in order:
+        words = line.split()
+        expect([w[4] for w in words] == list("abcdef") and all(w[5] in "012" for w in words),
+               f"every candidate holds one written alternative of each choice point: {line}", r)
+
+
+def test_search_first_round_of_a_template_neither_mutates_nor_crosses_over(base):
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    tune(p, workers=1, budget=40)
+    r, out = search(p, grid(6))
+    expect(out is not None and "arm_picks" not in out["counts"], f"a first block has no parents: {out}", r)
+
+
+def load_tool():
+    """decomp.py as a module, for the one rule no command line can set up: how the samplers' shares move."""
+    import importlib.util
+    kept, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec = importlib.util.spec_from_file_location("decomp_tool", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+    finally:
+        sys.dont_write_bytecode = kept
+    return tool
+
+
+def share_of_arms(tool, rewarded, picks=150):
+    """Run the arms for `picks` picks where only candidates of the `rewarded` sampler bring the best score down."""
+    import random
+    template = tool.parse_template(grid(6))
+    rng = random.Random(3)
+    sampler = tool.Sampler(template, set(), [0], None, rng)
+    parents = [(1000.0, f"o{i}", v) for i, v in enumerate(([1] * 6, [2] * 6, [0, 1, 2, 0, 1, 2]))]
+    arms = tool.Arms(sampler, parents, rng)
+    results, best = [{"seed": 0, "differ_bytes": 1000.0, "object": "o-base"}], 1000.0
+    for _ in range(picks):
+        sampler.learn(results)
+        arms.learn(results)
+        seed = arms.pick()
+        d = best * 0.95 if arms.owner[seed] == rewarded else 5000.0
+        best = min(best, d)
+        # A rewarded candidate carries no object hash, so it never becomes a parent: the parents stay
+        # as diverse as they began, and only the share each sampler earns by its gains is measured.
+        results.append({"seed": seed, "differ_bytes": d, "object": None if d < 5000.0 else f"s{seed}"})
+    return arms.picked
+
+
+def test_search_gives_a_sampler_that_keeps_finding_gains_a_larger_share_of_the_compiles(base):
+    tool = load_tool()
+    for winner in ("mutate", "cross"):
+        got = share_of_arms(tool, winner)
+        others = [n for a, n in got.items() if a != winner]
+        expect(got[winner] > 1.5 * max(others), f"the sampler that finds gains should lead: {got}")
+        expect(min(others) >= 0.05 * sum(got.values()), f"a sampler that fell behind keeps a share: {got}")
+
+
+def test_search_advises_stopping_after_two_rounds_with_no_new_best_score(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and "stop" not in out, f"one flat round is no reason to stop: {out}", r)
+    r, out = search(p, NEVER)
+    expect(out is not None and "no new best" in out.get("stop", ""), f"two flat rounds should carry stop advice: {out}", r)
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and "stop" not in out, f"a round that matches carries none: {out}", r)
 
 
 # ---------- template search: background search ----------

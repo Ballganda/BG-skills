@@ -2393,8 +2393,11 @@ def sampled(block, inert):
     Sampler's picks, each made from every result in so far. The random generator is seeded from
     the block constants, so one worker tries the same candidates in the same order on every run.
     Take each seed with the block's lock held. The counts gain `budget`, `pairwise`, `sampled`, and `explored`.
+    A block with parents (a later block) shares its picks between the Sampler, mutation and crossover (Arms).
     """
-    sampler = Sampler(block.template, set(inert), block.swept, block.boost, random.Random(int(block.settings["seed"])))
+    rng = random.Random(int(block.settings["seed"]))
+    sampler = Sampler(block.template, set(inert), block.swept, block.boost, rng)
+    arms = Arms(sampler, block.parents, rng)
     budget = block_budget(block)
     block.counts.update(budget=budget, pairwise=0, sampled=0, explored=0)
     for seed in (pairwise_cover(sampler) or []) if budget < PAIRWISE_BELOW else []:
@@ -2403,10 +2406,13 @@ def sampled(block, inert):
         yield seed
     while True:
         sampler.learn(block.results)
-        seed = sampler.pick()
+        arms.learn(block.results)
+        seed = arms.pick()
         if seed is None:
             return
         block.counts.update(sampled=sampler.picks, explored=sampler.explored)
+        if arms.active:
+            block.counts.update(arm_picks=dict(arms.picked))
         yield seed
 
 
@@ -2602,6 +2608,11 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "slot_heartbeat_s": 2.0,  # how often a running search renews its heartbeat in the pool,
     "slot_stale_s": 30.0,  # and how old a heartbeat makes its search's slots free for the taking
     "background": 1,  # 1 searches on in the background after a block that ends on a plateau or at the floor; 0 never does
+    "tune_s": 2.0,  # the tuning tick: how often a block adjusts its worker count; 0 keeps the count it started with
+    "tune_gain": 0.05,  # a rise this large in compiles per second, against the tick before, adds a worker,
+    "tune_loss": 0.1,  # a fall this large takes one back,
+    "tune_spread": 2.0,  # as does a p95 compile time above this many times the tick's median
+    "reference_s": 30.0,  # how often a block recompiles its reference candidate, the baseline; 0 is never
 }
 
 
@@ -3083,9 +3094,10 @@ class Block:
     for a natural one (see run_block). boost is the history's (see candidates).
     """
 
-    def __init__(self, template, settings, workers, ceiling, boost=None):
+    def __init__(self, template, settings, workers, ceiling, boost=None, parents=None):
         self.template, self.settings, self.workers, self.ceiling = template, settings, workers, ceiling
         self.boost = boost
+        self.parents = parents or []  # an earlier block's best candidates (see Arms); none in a template's first block
         self.lock = threading.Condition()
         self.sweep = collections.deque(one_change(template, boost))  # the opening seeds, not yet handed out
         self.swept = set(self.sweep)
@@ -3219,10 +3231,13 @@ class Block:
             self.attempt(seed, memo, worker)
         return self.by_seed[seed]
 
-    def work(self, memo, worker):
-        """One worker's loop: take a seed, score it, record it."""
+    def work(self, memo, worker, admit=None):
+        """One worker's loop: take a seed, score it, record it. admit, when given, is asked before each
+        candidate: it holds the worker back while the block runs fewer workers, and is false once the block ended."""
         try:
             while True:
+                if admit and not admit():
+                    return
                 seed = self.take()
                 if seed is None:
                     return
@@ -3232,7 +3247,7 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, block_type=None):
+def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
 
     Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
@@ -3242,15 +3257,23 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     per candidate tried, by seed.
     A block that ends with no natural match but with one that needs steering ends as a match: the
     steered match, reduced to the steering it needs.
-    A dict given as perf is filled with the block's timings for the performance log.
+    A dict given as perf is filled with the block's timings for the performance log. parents are an
+    earlier block's best candidates, which open mutation and crossover (see Arms).
+    A Tuner given as tuner sets how many of the workers run at once, from its starting count on;
+    without one they all run.
     block_type is the kind of Block to run, for a background search.
     """
-    block = (block_type or Block)(template, settings, len(workers), ceiling, boost)
-    threads = [threading.Thread(target=block.work, args=(memo, w), daemon=True) for w in workers]
+    block = (block_type or Block)(template, settings, tuner.start if tuner else len(workers), ceiling, boost, parents)
+    admits = [(lambda i=i: tuner.admit(i),) if tuner else () for i in range(len(workers))]
+    threads = [threading.Thread(target=block.work, args=(memo, w, *a), daemon=True) for w, a in zip(workers, admits)]
+    if tuner:
+        tuner.begin(block)
     for th in threads:
         th.start()
     for th in threads:
         th.join()
+    if tuner:
+        tuner.finish()
     if block.error:
         raise block.error
     end, best = block.end, block.best or {"failure": block.failure}
@@ -3262,10 +3285,199 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
         seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]), boost)
         end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
     wall = block.elapsed()
-    block.counts.update(workers=len(workers), wall_s=round(wall, 2))
+    block.counts.update(workers=block.workers, wall_s=round(wall, 2))
     if perf is not None:
         perf.update(wall=wall, busy=block.busy, expanded=block.expanded, stage=dict(block.stage), best_at=block.best_at)
+        if tuner:
+            perf.update(tuning=tuner.report())
     return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
+
+
+REF_SLOW = 0.3  # a reference compile this much slower than its base is contention or throttling
+TUNE_RETRY_TICKS = 10  # judged ticks before the tuner tries again a worker count it had to give up
+
+
+def pool_capacity(pool):
+    """The slots the pool could give this search now: its share, or what the other searches leave free when that is less."""
+    with pool.lock:
+        share = pool.share()
+    others = 0
+    for i in range(pool.size):
+        try:
+            others += pool.path(i).read_text(encoding="utf-8") != pool.id
+        except (OSError, ValueError):
+            pass  # free, or being written
+    return min(share, pool.size - others)
+
+
+def reference_compile(worker, text):
+    """Seconds one build of the reference source takes in worker's folder, the wait for a slot left out. None when it fails.
+
+    It holds a compile slot like any build, and stays out of the block's compile times.
+    """
+    wait = worker.environment.settings["lock_retry_s"]
+    try:
+        retrying(lambda: worker.source.write_bytes(source_bytes(text)), wait)
+    except OSError:
+        return None
+    with compile_slot(worker):
+        start = time.perf_counter()
+        _, failure = build_unit(*worker.args(), worker.objdir, str(worker.report))
+        return None if failure else time.perf_counter() - start
+
+
+class Tuner:
+    """Sets how many of a block's workers run at once, and watches what the machine gives the block.
+
+    The count starts at `start` (the cores divided by the active writers) and stays between the
+    floor, half of that, and `most`, the worker threads the block has; it never rises past the
+    pool's share. Every tuning tick it is judged on unique compiles per second against the tick
+    before: the first judged tick adds a worker to try, a gain above `tune_gain` adds another, and a
+    loss above `tune_loss`, or a p95 compile time above `tune_spread` medians, takes one back.
+    Inside the noise band it holds. A tick with fewer than two compiles per worker is joined to the
+    next. The tick after a cut only sets the new base, because it still holds compiles started
+    before the cut, and a count the tuner gave up is not tried again for TUNE_RETRY_TICKS ticks.
+
+    With a reference (a spare Worker and the baseline's source) it recompiles the baseline every
+    `reference_s`. The base is the median of the block's first 2 x start compile times, or the
+    first reference compile when the block has built nothing. A reference compile more than
+    REF_SLOW over the base halves the worker count, down to the floor.
+
+    At each tick it also notes whether the pool could give the block its floor: a block that spent
+    over half its time below it was starved by the other writers.
+
+    fixed (a worker count set in local.json) and a `tune_s` of 0 keep the count as it started.
+    """
+
+    def __init__(self, pool, launcher, settings, start, most, fixed=False, reference=None):
+        self.pool, self.launcher, self.settings = pool, launcher, settings
+        self.start = self.target = self.low = self.high = start
+        self.most, self.floor = most, max(1, start // 2)
+        self.adjusts = not fixed and settings["tune_s"] > 0
+        self.tick_s = settings["tune_s"] or SEARCH_DEFAULTS["tune_s"]
+        self.reference = reference if settings["reference_s"] > 0 else None
+        self.lock = threading.Condition()
+        self.stop = threading.Event()
+        self.threads, self.block = [], None
+        self.prev = None  # the compiles per second of the judged tick before
+        self.moved = 0  # the last change to the count: below zero after a cut
+        self.gave_up, self.gave_up_at, self.ticks = None, 0, 0
+        self.compiled = self.seen = 0  # the block's compiles and compile times already counted
+        self.span, self.built, self.times = 0.0, 0, []  # the tick being judged: seconds, compiles, compile times
+        self.at = None  # when the block was last looked at
+        self.short = False  # whether the pool then gave it less than the floor
+        self.worker_s = self.starved_s = self.watched_s = 0.0
+        self.refs, self.base = [], None
+
+    def admit(self, index):
+        """Hold worker `index` back while the count is at or under it. False once the block has ended."""
+        with self.lock:
+            while index >= self.target:
+                if self.block.end or self.stop.is_set():
+                    return False
+                self.lock.wait(0.05)
+        return True
+
+    def set(self, count):
+        """Change the count. Call with the lock held."""
+        self.target = count
+        self.low, self.high = min(self.low, count), max(self.high, count)
+        self.lock.notify_all()
+
+    def begin(self, block):
+        self.block, self.at = block, time.perf_counter()
+        self.short = pool_capacity(self.pool) < self.floor
+        runs = [self.tune] + ([self.watch] if self.reference else [])
+        self.threads = [threading.Thread(target=run, daemon=True) for run in runs]
+        for th in self.threads:
+            th.start()
+
+    def finish(self):
+        """Stop tuning. A reference compile still running is waited for: it builds in the block's scratch folder."""
+        self.stop.set()
+        for th in self.threads:
+            th.join()
+        self.look()
+
+    def look(self):
+        """Add the time since the last look to the block's totals, and note what the pool gives now. Returns that time."""
+        now = time.perf_counter()
+        took, self.at = now - self.at, now
+        with self.lock:
+            self.worker_s += took * self.target
+        self.watched_s += took
+        if self.short:
+            self.starved_s += took
+        self.short = pool_capacity(self.pool) < self.floor
+        return took
+
+    def tune(self):
+        while not self.stop.wait(self.tick_s):
+            took = self.look()
+            if self.adjusts and not self.block.end:
+                self.judge(took)
+
+    def judge(self, took):
+        """One tuning tick: move the count by what the compiles since the last judged tick show."""
+        s = self.settings
+        with self.block.lock:
+            compiled = self.block.counts["compiled"]
+        with self.launcher.lock:
+            times = self.launcher.samples[self.seen:]
+            self.seen += len(times)
+        self.span, self.built, self.compiled = self.span + took, self.built + compiled - self.compiled, compiled
+        self.times += times
+        with self.pool.lock:
+            room = min(self.most, self.pool.share())
+        with self.lock:
+            if self.built < 2 * self.target:
+                return  # too few compiles to say anything: this tick is judged with the next
+            self.ticks += 1
+            rate, times = self.built / self.span, sorted(self.times)
+            self.span, self.built, self.times = 0.0, 0, []
+            prev, self.prev = self.prev, rate
+            p95 = times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)] if times else 0.0
+            spread = bool(times) and p95 > s["tune_spread"] * statistics.median(times)
+            waited = self.ticks - self.gave_up_at >= TUNE_RETRY_TICKS
+            may_add = self.target < room and (self.gave_up is None or self.target + 1 < self.gave_up or waited)
+            if self.moved < 0:
+                move = 0
+            elif prev is not None and (rate < (1 - s["tune_loss"]) * prev or spread):
+                move = -1 if self.target > self.floor else 0
+            elif prev is None or rate > (1 + s["tune_gain"]) * prev:
+                move = 1 if may_add else 0
+            else:
+                move = 0
+            if move < 0:
+                self.gave_up, self.gave_up_at = self.target, self.ticks
+            self.moved = move
+            if move:
+                self.set(self.target + move)
+
+    def watch(self):
+        worker, text = self.reference
+        while not self.stop.wait(self.settings["reference_s"]):
+            took = reference_compile(worker, text)
+            if took is None:
+                continue
+            with self.launcher.lock:
+                first = self.launcher.samples[:2 * self.start]
+            with self.lock:
+                if self.base is None:
+                    self.base = statistics.median(first) if first else took
+                self.refs.append(took)
+                if took > (1 + REF_SLOW) * self.base and self.adjusts and self.target > self.floor:
+                    self.gave_up, self.gave_up_at, self.moved = self.target, self.ticks, -1
+                    self.set(max(self.floor, self.target // 2))
+
+    def report(self):
+        """What the block's record keeps of the tuning."""
+        ms = [round(x * 1000, 2) for x in self.refs]
+        return {"workers_min": self.low, "workers_max": self.high, "workers_end": self.target,
+                "workers_floor": self.floor, "worker_s": self.worker_s,
+                "starved_frac": round(self.starved_s / self.watched_s, 3) if self.watched_s > 0 else 0.0,
+                "t_ref_ms": round(statistics.median(ms), 2) if ms else None, "t_ref_max_ms": max(ms) if ms else None,
+                "t_ref_base_ms": None if self.base is None else round(self.base * 1000, 2)}
 
 
 def reduce_steering(template, seeds, result, boost=None):
@@ -3291,6 +3503,237 @@ def reduce_steering(template, seeds, result, boost=None):
                 vector = flipped
                 break
     return template.seed(vector)
+
+
+# ---------- template search: learning across rounds, mutation, crossover, and stop advice ----------
+# Kept apart from the sampler and the block: cmd_search carries what a round learned to the next with
+# with_learned and learned_weights, hands carried_parents to run_block, and asks stop_advice last.
+
+LEARNED = "learned.json"  # a ticket's learned likelihoods by choice label, in its search folder
+PARENTS = 4  # the best distinct objects mutation and crossover start from
+MUTATE_COUNTS = (1, 2)  # choice points one mutation changes: one of these
+CHILD_TRIES = 24  # draws a mutation or crossover makes for a candidate not tried before
+ARM_WEIGHT = {"sample": 2.0, "mutate": 1.0, "cross": 1.0}  # the samplers' starting shares: the Sampler's, mutation's, crossover's
+ARM_FLOOR = 0.1  # the least share of the picks a live sampler keeps, so one that fell behind can recover
+ARM_DECAY = 0.9  # per pick, what remains of every sampler's gain and pulls: recent gains count most
+ARM_PRIOR = (0.02, 1.0)  # a sampler's gain and pulls before any pick, so a fresh one is not trusted nor ignored
+FLAT_ROUNDS = 2  # template rounds in a row with no new best score that make the summary advise stopping
+
+
+def choice_sig(choice):
+    """What the writer wrote for a choice point, apart from its label: a kept choice point has the same one in the next round."""
+    data = json.dumps([choice.kind, choice.alternatives, choice.likelihoods, list(choice.steers)])
+    return hashlib.sha256(data.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def read_learned(state):
+    """The learned likelihoods the ticket's last round kept, {label: {sig, weights}}. Empty when there are none."""
+    try:
+        data = json.loads((state / LEARNED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def with_learned(template, learned):
+    """The template with each kept choice point's likelihoods replaced by what the last round learned.
+
+    A choice point is kept when its label is in learned and the signature of what the writer wrote
+    for it is the same; one that is new or was edited keeps the writer's likelihoods, its priors.
+    """
+    parts = []
+    for p in template.parts:
+        got = learned.get(p.label) if isinstance(p, Choice) else None
+        if isinstance(got, dict) and got.get("sig") == choice_sig(p) and isinstance(got.get("weights"), list) \
+                and len(got["weights"]) == len(p.alternatives):
+            p = p._replace(likelihoods=[float(w) for w in got["weights"]])
+        parts.append(p)
+    return Template(parts)
+
+
+def learned_weights(template, results, written):
+    """What a round's results show about each choice point, as likelihoods for the next round: {label: {sig, weights}}.
+
+    The belief in each alternative is the Sampler's: its prior (the template's likelihoods, as a share
+    of the choice point's) weighing PRIOR_WEIGHT results, moved by how far each scored candidate holding
+    it fell below the baseline's differing bytes (toward helps) or rose above (toward hurts); a
+    candidate that did not build counts as the worst. A choice point no result varies keeps its priors.
+    Each is signed as written (the template as the writer wrote it, before with_learned). Empty when
+    the baseline was not scored.
+    """
+    base = next((r["differ_bytes"] for r in results if r["seed"] == 0 and r["differ_bytes"] is not None
+                 and r["differ_bytes"] >= 0), None)
+    if base is None:
+        return {}
+    sizes = [len(c.alternatives) for c in template.choices]
+    helped, hurt = [[0.0] * n for n in sizes], [[0.0] * n for n in sizes]
+    for r in results:
+        d = r["differ_bytes"]
+        gain = -1.0 if d is None or d < 0 else (base - d) / max(base, d, 1)
+        for i, pick in enumerate(template.vector(r["seed"])):
+            (helped if gain > 0 else hurt)[i][pick] += abs(gain)
+    out = {}
+    for i, (c, weights) in enumerate(zip(written.choices, likelihoods(template))):
+        if not any(helped[i]) and not any(hurt[i]):
+            continue
+        prior = [w / sum(weights) for w in weights]
+        mean = [(PRIOR_WEIGHT * p + helped[i][a]) / (PRIOR_WEIGHT + helped[i][a] + hurt[i][a]) for a, p in enumerate(prior)]
+        out[c.label] = {"sig": choice_sig(c), "weights": [round(m / max(mean), 6) for m in mean]}
+    return out
+
+
+def save_learned(state, learned):
+    """Keep the learned likelihoods for the next round. A round that learned none keeps the earlier ones."""
+    if learned:
+        (state / LEARNED).write_text(json.dumps(learned, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def carried_parents(state, template):
+    """The best distinct objects of the ticket's last round as (differ_bytes, object, vector) in this template, best first.
+
+    A candidate of the last round is read in this template choice point by choice point: by label,
+    taking the alternative whose text is the same. A choice point that is new, or whose alternative
+    was rewritten, takes its first alternative. Empty when this machine keeps no earlier round.
+    """
+    try:
+        old = parse_template(source_text((state / "template").read_bytes()))
+        rows = [json.loads(x) for x in (state / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+    except (OSError, ValueError):
+        return []
+    best = {}
+    for r in rows:
+        if r.get("object") and r.get("differ_bytes") is not None and r["differ_bytes"] >= 0:
+            best[r["object"]] = min(best.get(r["object"], (r["differ_bytes"], r["seed"])), (r["differ_bytes"], r["seed"]))
+    out = []
+    for obj, (d, seed) in best.items():
+        said = {c.label: c.alternatives[pick] for c, pick in zip(old.choices, old.vector(seed))}
+        vector = [c.alternatives.index(said[c.label]) if said.get(c.label) in c.alternatives else 0 for c in template.choices]
+        out.append((d, obj, vector))
+    return sorted(out)[:PARENTS]
+
+
+class Arms:
+    """Shares a later block's picks between three samplers by their recent gain per pick.
+
+    The samplers: the Sampler (Thompson sampling with its exploratory picks); mutation, which changes
+    1 or 2 free choice points of one of the best distinct objects to another written alternative;
+    and crossover, which takes each free choice point's alternative from one of two of those objects.
+    Every candidate is built only from the template's alternatives. Mutation and crossover need
+    parents carried from an earlier block (a template's first block has none: only the Sampler runs),
+    and crossover needs two. A sampler's gain is how far its candidates brought the best differing
+    bytes down, as a share of the best at the time; gains and pulls both decay at every pick. A live
+    sampler's share of the picks is its weight times gain per pull, held to at least ARM_FLOOR.
+    A mutation or crossover that finds no candidate not tried before falls back to the Sampler.
+    """
+
+    def __init__(self, sampler, parents, rng):
+        self.sampler, self.rng, self.carried = sampler, rng, [p for p in parents if sampler.in_space(p[2])]
+        self.active = bool(self.carried)
+        self.gain = dict.fromkeys(ARM_WEIGHT, 0.0)
+        self.pulls = dict.fromkeys(ARM_WEIGHT, 0.0)
+        self.picked = dict.fromkeys(ARM_WEIGHT, 0)
+        self.owner, self.read, self.best, self.found = {}, 0, None, []
+
+    def learn(self, results):
+        """Credit each sampler with the gains of its candidates among the results not read before."""
+        for r in results[self.read:]:
+            d = r["differ_bytes"]
+            if d is None or d < 0:
+                continue
+            if self.best is not None and d < self.best and r["seed"] in self.owner:
+                self.gain[self.owner[r["seed"]]] += (self.best - d) / max(self.best, 1)
+            self.best = d if self.best is None else min(self.best, d)
+            if r.get("object"):
+                self.found.append((d, r["seed"], r["object"]))
+        self.read = len(results)
+
+    def parents(self):
+        """The best distinct objects as vectors: the carried ones and this block's, best first, in the free space."""
+        pool = {obj: (d, vector) for d, obj, vector in self.carried}
+        for d, seed, obj in self.found:
+            if obj not in pool or (d, self.sampler.template.vector(seed)) < pool[obj]:
+                pool[obj] = (d, self.sampler.template.vector(seed))
+        return [v for _, v in sorted((d, v) for d, v in pool.values()) if self.sampler.in_space(v)][:PARENTS]
+
+    def shares(self, live):
+        """Each live sampler's share of the picks."""
+        rate = {a: ARM_WEIGHT[a] * (self.gain[a] + ARM_PRIOR[0]) / (self.pulls[a] + ARM_PRIOR[1]) for a in live}
+        spare = 1 - ARM_FLOOR * len(live)
+        return {a: ARM_FLOOR + spare * rate[a] / sum(rate.values()) for a in live}
+
+    def mutate(self, parents):
+        """An untried candidate: a parent with 1 or 2 free choice points set to another alternative. None when none was found."""
+        free, sizes = self.sampler.free, self.sampler.sizes
+        movable = [i for i in free if sizes[i] > 1]
+        for _ in range(CHILD_TRIES):
+            if not movable:
+                return None
+            vector = list(self.rng.choice(parents))
+            for i in self.rng.sample(movable, min(len(movable), self.rng.choice(MUTATE_COUNTS))):
+                vector[i] = self.rng.choice([a for a in range(sizes[i]) if a != vector[i]])
+            seed = self.sampler.template.seed(vector)
+            if seed not in self.sampler.tried:
+                return seed
+        return None
+
+    def cross(self, parents):
+        """An untried candidate: each free choice point's alternative from one of two parents. None when none was found."""
+        for _ in range(CHILD_TRIES):
+            one, two = self.rng.sample(parents, 2)
+            vector = [self.rng.choice((a, b)) if i in self.sampler.free else 0 for i, (a, b) in enumerate(zip(one, two))]
+            seed = self.sampler.template.seed(vector)
+            if vector not in (one, two) and seed not in self.sampler.tried:
+                return seed
+        return None
+
+    def pick(self):
+        """The next seed to try, or None when the free space is spent."""
+        parents = self.parents() if self.active else []
+        live = ["sample"] + (["mutate"] if parents else []) + (["cross"] if len(parents) > 1 else [])
+        arm = "sample"
+        if len(live) > 1:
+            shares, draw = self.shares(live), self.rng.random()
+            arm = live[-1]
+            for a in live:
+                draw -= shares[a]
+                if draw < 0:
+                    arm = a
+                    break
+        seed = self.mutate(parents) if arm == "mutate" else self.cross(parents) if arm == "cross" else None
+        if seed is None:
+            arm, seed = "sample", self.sampler.pick()
+            if seed is None:
+                return None
+        else:
+            self.sampler.mark(seed)
+        for a in ARM_WEIGHT:
+            self.gain[a] *= ARM_DECAY
+            self.pulls[a] *= ARM_DECAY
+        self.pulls[arm] += 1
+        self.picked[arm] += 1
+        self.owner[seed] = arm
+        return seed
+
+
+def stop_advice(entries):
+    """The summary's advice to stop after FLAT_ROUNDS template rounds in a row with no new best score, or '' otherwise.
+
+    entries is the ticket's check trail, the round just ended last. A round brought a new best score
+    when its differ_bytes is below every earlier attempt's, checks included; a round that scored
+    nothing brought none.
+    """
+    flat = 0
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i]["by"] != "search":
+            break
+        earlier = [e["differ_bytes"] for e in entries[:i] if e["differ_bytes"] is not None and e["differ_bytes"] >= 0]
+        mine = entries[i]["differ_bytes"]
+        if mine is not None and mine >= 0 and (not earlier or mine < min(earlier)):
+            break
+        flat += 1
+    if flat >= FLAT_ROUNDS:
+        return f"{flat} rounds in a row brought no new best score: stop, release the ticket with a note, or change approach"
+    return ""
 
 
 EFFECT_ROWS = 8  # choice points the effect table lists
@@ -3334,7 +3777,7 @@ def insights(template, results, best):
     return out
 
 
-def summary(template, end, best, counts, winner, results=(), history_line="", notices=()):
+def summary(template, end, best, counts, winner, results=(), history_line="", notices=(), stop=""):
     """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
     out = {"end": end, "best": None, "counts": counts}
     if history_line:
@@ -3351,6 +3794,8 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
         out["failure"] = best["failure"][-FAILURE_CHARS:]
     if results:
         out.update(insights(template, results, best))
+    if stop and not out.get("stop"):
+        out["stop"] = stop
     cap = SUMMARY_TOKENS * TOKEN_CHARS
     for key in ("window", "next", "effects"):  # what the cap drops first, a row at a time
         while len(json.dumps(out)) > cap and out.get(key):
@@ -3545,11 +3990,14 @@ PERF_STREAK = 3  # blocks in a row a flag is raised before the user is told
 PERF_DROP = 0.3  # a fall this large in compiles per worker-second against the median raises slow-compile
 PERF_SHARE = 0.2  # idle share of the workers, or scoring share of the stage time, above which a flag is raised
 PERF_JITTER = 3.0  # p95 compile time, in median compile times, above which io-jitter is raised
+PERF_STARVED = 0.5  # share of a block's time below its worker floor above which starved-by-writers is raised
 FLAG_FIXES = {  # the fix only the user can make, where there is one
     "slow-compile": "exclude the project folder and the system temp folder from antivirus scanning, stop other "
                     "CPU-heavy programs and check the power plan for throttling, or move the temp folder (TEMP) to a RAM disk",
     "io-jitter": "exclude the project folder and the system temp folder from antivirus scanning and the file indexer, "
                  "or move the temp folder (TEMP) to a RAM disk",
+    "contention-or-throttle": "stop other CPU-heavy programs, and check the power plan and the cooling for throttling",
+    "starved-by-writers": "lower the concurrent writer count in the contract, or stop the other searches on this machine",
 }
 
 
@@ -3585,16 +4033,45 @@ def block_rate(rec):
     return rate if rate > 0 else None
 
 
+def tuning_flags(rec, past):
+    """The flags the tuner's measurements raise: {flag: its measured cost as a sentence}.
+
+    contention-or-throttle: a reference compile of the block ran more than REF_SLOW over the block's
+    base, or the block's reference time is REF_SLOW or more over the median of the earlier blocks of
+    the same unit, once PERF_MIN exist (another unit's compile time says nothing about this one's).
+    starved-by-writers: the pool left the block below its worker floor for over PERF_STARVED of its
+    time. past is the last PERF_WINDOW block records of the same compiler.
+    """
+    def number(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+
+    flags = {}
+    base, slowest, ref = rec.get("t_ref_base_ms"), rec.get("t_ref_max_ms"), rec.get("t_ref_ms")
+    refs = [r["t_ref_ms"] for r in past if rec.get("unit") and r.get("unit") == rec["unit"] and number(r.get("t_ref_ms"))]
+    median = statistics.median(refs) if len(refs) >= PERF_MIN else None
+    if number(base) and number(slowest) and slowest > (1 + REF_SLOW) * base:
+        flags["contention-or-throttle"] = (f"the reference compile took {slowest:.0f} ms, {round(100 * (slowest / base - 1))} "
+                                           f"percent over the {base:.0f} ms a compile took as the block began")
+    elif median and number(ref) and ref >= (1 + REF_SLOW) * median:
+        flags["contention-or-throttle"] = (f"the reference compile took {ref:.0f} ms, {round(100 * (ref / median - 1))} "
+                                           f"percent over the median of {median:.0f} ms over the last {len(refs)} blocks of this unit")
+    starved = rec.get("starved_frac")
+    if number(starved) and starved > PERF_STARVED and rec["compiled"] > 0:
+        flags["starved-by-writers"] = (f"the slot pool left the block fewer than its floor of {rec.get('workers_floor')} "
+                                       f"workers for {round(100 * starved)} percent of its time")
+    return flags
+
+
 def perf_flags(rec, past):
     """The flags a block record raises: {flag: its measured cost as a sentence}.
 
     past is the log's earlier records of the same compiler, oldest first. slow-compile and io-jitter
     compare with the median of the last PERF_WINDOW blocks of them, once PERF_MIN exist.
     expander-starved and scorer-bound are shares of this block's own time. A block that built fewer
-    than PERF_COMPILES per worker raises nothing.
+    than PERF_COMPILES per worker raises none of these. The tuner's flags are tuning_flags'.
     """
     past = [r for r in past if r.get("kind") == "block"][-PERF_WINDOW:]
-    flags = {}
+    flags = tuning_flags(rec, past)
     if rec["compiled"] < PERF_COMPILES * rec["workers_end"]:  # served by the cache or ended at once: nothing to measure
         return flags
     rate = block_rate(rec)
@@ -3646,15 +4123,21 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     workers, wall = counts["workers"], perf["wall"]
     stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
     final = best["score"].differ_bytes if "score" in best else None
+    tuning = perf.get("tuning") or {}  # the Tuner's report: without one the worker count never moved
+    worker_s = tuning.get("worker_s") or workers * wall
     return {
-        "kind": "block", "unix": now(), "ticket": t["id"], "compiler": compiler, "round": round_no, "block": block_no,
-        "wall_s": round(wall, 3), "workers_min": workers, "workers_max": workers, "workers_end": workers,
+        "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
+        "round": round_no, "block": block_no, "wall_s": round(wall, 3),
+        "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
+        "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
+        "starved_frac": tuning.get("starved_frac", 0.0),
+        "t_ref_base_ms": tuning.get("t_ref_base_ms"), "t_ref_max_ms": tuning.get("t_ref_max_ms"),
         "expanded": perf["expanded"], "compiled": counts["compiled"], "unique_objects": memo_counts["unique_objects"],
         "build_fail": counts["build_fail"], "killed": launcher.killed, "src_dedupe_hits": memo_counts["src_dedupe_hits"],
         "t_compile_p50_ms": statistics.median(ms) if ms else None,
         "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
-        "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None,
-        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / (workers * wall)), 3) if wall > 0 else 0.0,
+        "t_ref_ms": tuning.get("t_ref_ms") or (round(launcher.samples[0] * 1000, 2) if launcher.samples else None),
+        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / worker_s), 3) if worker_s > 0 else 0.0,
         "best_score_start": start_best, "best_score_end": final,
         "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
         "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
@@ -3782,17 +4265,23 @@ def cmd_search(a):
     except OSError as e:
         die(f"cannot read the template: {e}")
     text = source_text(data)
-    template = with_similar(parse_template(text), closest_solved(t))
+    state = search_dir(t["id"])
+    written = parse_template(text)
+    template = with_learned(written, read_learned(state))  # a kept choice point starts from what the last round learned
+    parents = carried_parents(state, template)
+    searched = template  # what the round learned is judged against its own priors, without the similar-function bonus
+    template = with_similar(template, closest_solved(t))
     if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
         die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
             "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
     settings = background.settings(search_settings()) if background else search_settings()
-    state = search_dir(t["id"])
     latency = model_latency(state)
     ceiling = settings["ceiling_s"] if latency is None else min(latency, settings["ceiling_s"])
     pool = (background.pool(settings) if background else SlotPool(settings)).open()
-    count = max(1, min(int(settings["workers"]) or pool.start_workers(), template.space()))
-    launcher = Launcher(environment, settings, count)
+    fixed = int(settings["workers"])
+    start = max(1, min(fixed or pool.start_workers(), template.space()))
+    count = start if fixed else max(start, min(pool.size, template.space()))  # threads: the tuner runs `start` of them at first
+    launcher = Launcher(environment, settings, start)
     launcher.pool = pool
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
@@ -3818,8 +4307,10 @@ def cmd_search(a):
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
         trailed = trail(t["id"])
         timing = {}
+        reference = (Worker(Path(scratch) / "ref", launcher, t, compiler, tree, text), baseline) if settings["reference_s"] else None
+        tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
         with persistent_wineserver(launcher):
-            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing,
+            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner,
                                                    background and background.block_type())
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
@@ -3837,11 +4328,13 @@ def cmd_search(a):
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
     record_round(t, template, best, results)
+    save_learned(state, learned_weights(searched, results, written))
     winner = None
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    out = summary(template, end, best, counts, winner, results, history_line(past, category), notices)
+    out = summary(template, end, best, counts, winner, results, history_line(past, category), notices,
+                  stop_advice(trail(t["id"])))
     if found:
         out["background"] = found["report"]
     budget = start_background(t, end, counts, results, ceiling, settings)
