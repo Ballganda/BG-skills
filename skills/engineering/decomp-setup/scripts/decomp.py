@@ -2606,6 +2606,11 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "slots": 0,  # compile slots in the machine-wide pool; 0 is the cores, or `workers` when that is set higher
     "slot_heartbeat_s": 2.0,  # how often a running search renews its heartbeat in the pool,
     "slot_stale_s": 30.0,  # and how old a heartbeat makes its search's slots free for the taking
+    "tune_s": 2.0,  # the tuning tick: how often a block adjusts its worker count; 0 keeps the count it started with
+    "tune_gain": 0.05,  # a rise this large in compiles per second, against the tick before, adds a worker,
+    "tune_loss": 0.1,  # a fall this large takes one back,
+    "tune_spread": 2.0,  # as does a p95 compile time above this many times the tick's median
+    "reference_s": 30.0,  # how often a block recompiles its reference candidate, the baseline; 0 is never
 }
 
 
@@ -3220,10 +3225,13 @@ class Block:
             self.attempt(seed, memo, worker)
         return self.by_seed[seed]
 
-    def work(self, memo, worker):
-        """One worker's loop: take a seed, score it, record it."""
+    def work(self, memo, worker, admit=None):
+        """One worker's loop: take a seed, score it, record it. admit, when given, is asked before each
+        candidate: it holds the worker back while the block runs fewer workers, and is false once the block ended."""
         try:
             while True:
+                if admit and not admit():
+                    return
                 seed = self.take()
                 if seed is None:
                     return
@@ -3233,7 +3241,7 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, parents=None):
+def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
 
     Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
@@ -3245,13 +3253,20 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     steered match, reduced to the steering it needs.
     A dict given as perf is filled with the block's timings for the performance log. parents are an
     earlier block's best candidates, which open mutation and crossover (see Arms).
+    A Tuner given as tuner sets how many of the workers run at once, from its starting count on;
+    without one they all run.
     """
-    block = Block(template, settings, len(workers), ceiling, boost, parents)
-    threads = [threading.Thread(target=block.work, args=(memo, w), daemon=True) for w in workers]
+    block = Block(template, settings, tuner.start if tuner else len(workers), ceiling, boost, parents)
+    admits = [(lambda i=i: tuner.admit(i),) if tuner else () for i in range(len(workers))]
+    threads = [threading.Thread(target=block.work, args=(memo, w, *a), daemon=True) for w, a in zip(workers, admits)]
+    if tuner:
+        tuner.begin(block)
     for th in threads:
         th.start()
     for th in threads:
         th.join()
+    if tuner:
+        tuner.finish()
     if block.error:
         raise block.error
     end, best = block.end, block.best or {"failure": block.failure}
@@ -3263,10 +3278,199 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
         seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]), boost)
         end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
     wall = block.elapsed()
-    block.counts.update(workers=len(workers), wall_s=round(wall, 2))
+    block.counts.update(workers=block.workers, wall_s=round(wall, 2))
     if perf is not None:
         perf.update(wall=wall, busy=block.busy, expanded=block.expanded, stage=dict(block.stage), best_at=block.best_at)
+        if tuner:
+            perf.update(tuning=tuner.report())
     return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
+
+
+REF_SLOW = 0.3  # a reference compile this much slower than its base is contention or throttling
+TUNE_RETRY_TICKS = 10  # judged ticks before the tuner tries again a worker count it had to give up
+
+
+def pool_capacity(pool):
+    """The slots the pool could give this search now: its share, or what the other searches leave free when that is less."""
+    with pool.lock:
+        share = pool.share()
+    others = 0
+    for i in range(pool.size):
+        try:
+            others += pool.path(i).read_text(encoding="utf-8") != pool.id
+        except (OSError, ValueError):
+            pass  # free, or being written
+    return min(share, pool.size - others)
+
+
+def reference_compile(worker, text):
+    """Seconds one build of the reference source takes in worker's folder, the wait for a slot left out. None when it fails.
+
+    It holds a compile slot like any build, and stays out of the block's compile times.
+    """
+    wait = worker.environment.settings["lock_retry_s"]
+    try:
+        retrying(lambda: worker.source.write_bytes(source_bytes(text)), wait)
+    except OSError:
+        return None
+    with compile_slot(worker):
+        start = time.perf_counter()
+        _, failure = build_unit(*worker.args(), worker.objdir, str(worker.report))
+        return None if failure else time.perf_counter() - start
+
+
+class Tuner:
+    """Sets how many of a block's workers run at once, and watches what the machine gives the block.
+
+    The count starts at `start` (the cores divided by the active writers) and stays between the
+    floor, half of that, and `most`, the worker threads the block has; it never rises past the
+    pool's share. Every tuning tick it is judged on unique compiles per second against the tick
+    before: the first judged tick adds a worker to try, a gain above `tune_gain` adds another, and a
+    loss above `tune_loss`, or a p95 compile time above `tune_spread` medians, takes one back.
+    Inside the noise band it holds. A tick with fewer than two compiles per worker is joined to the
+    next. The tick after a cut only sets the new base, because it still holds compiles started
+    before the cut, and a count the tuner gave up is not tried again for TUNE_RETRY_TICKS ticks.
+
+    With a reference (a spare Worker and the baseline's source) it recompiles the baseline every
+    `reference_s`. The base is the median of the block's first 2 x start compile times, or the
+    first reference compile when the block has built nothing. A reference compile more than
+    REF_SLOW over the base halves the worker count, down to the floor.
+
+    At each tick it also notes whether the pool could give the block its floor: a block that spent
+    over half its time below it was starved by the other writers.
+
+    fixed (a worker count set in local.json) and a `tune_s` of 0 keep the count as it started.
+    """
+
+    def __init__(self, pool, launcher, settings, start, most, fixed=False, reference=None):
+        self.pool, self.launcher, self.settings = pool, launcher, settings
+        self.start = self.target = self.low = self.high = start
+        self.most, self.floor = most, max(1, start // 2)
+        self.adjusts = not fixed and settings["tune_s"] > 0
+        self.tick_s = settings["tune_s"] or SEARCH_DEFAULTS["tune_s"]
+        self.reference = reference if settings["reference_s"] > 0 else None
+        self.lock = threading.Condition()
+        self.stop = threading.Event()
+        self.threads, self.block = [], None
+        self.prev = None  # the compiles per second of the judged tick before
+        self.moved = 0  # the last change to the count: below zero after a cut
+        self.gave_up, self.gave_up_at, self.ticks = None, 0, 0
+        self.compiled = self.seen = 0  # the block's compiles and compile times already counted
+        self.span, self.built, self.times = 0.0, 0, []  # the tick being judged: seconds, compiles, compile times
+        self.at = None  # when the block was last looked at
+        self.short = False  # whether the pool then gave it less than the floor
+        self.worker_s = self.starved_s = self.watched_s = 0.0
+        self.refs, self.base = [], None
+
+    def admit(self, index):
+        """Hold worker `index` back while the count is at or under it. False once the block has ended."""
+        with self.lock:
+            while index >= self.target:
+                if self.block.end or self.stop.is_set():
+                    return False
+                self.lock.wait(0.05)
+        return True
+
+    def set(self, count):
+        """Change the count. Call with the lock held."""
+        self.target = count
+        self.low, self.high = min(self.low, count), max(self.high, count)
+        self.lock.notify_all()
+
+    def begin(self, block):
+        self.block, self.at = block, time.perf_counter()
+        self.short = pool_capacity(self.pool) < self.floor
+        runs = [self.tune] + ([self.watch] if self.reference else [])
+        self.threads = [threading.Thread(target=run, daemon=True) for run in runs]
+        for th in self.threads:
+            th.start()
+
+    def finish(self):
+        """Stop tuning. A reference compile still running is waited for: it builds in the block's scratch folder."""
+        self.stop.set()
+        for th in self.threads:
+            th.join()
+        self.look()
+
+    def look(self):
+        """Add the time since the last look to the block's totals, and note what the pool gives now. Returns that time."""
+        now = time.perf_counter()
+        took, self.at = now - self.at, now
+        with self.lock:
+            self.worker_s += took * self.target
+        self.watched_s += took
+        if self.short:
+            self.starved_s += took
+        self.short = pool_capacity(self.pool) < self.floor
+        return took
+
+    def tune(self):
+        while not self.stop.wait(self.tick_s):
+            took = self.look()
+            if self.adjusts and not self.block.end:
+                self.judge(took)
+
+    def judge(self, took):
+        """One tuning tick: move the count by what the compiles since the last judged tick show."""
+        s = self.settings
+        with self.block.lock:
+            compiled = self.block.counts["compiled"]
+        with self.launcher.lock:
+            times = self.launcher.samples[self.seen:]
+            self.seen += len(times)
+        self.span, self.built, self.compiled = self.span + took, self.built + compiled - self.compiled, compiled
+        self.times += times
+        with self.pool.lock:
+            room = min(self.most, self.pool.share())
+        with self.lock:
+            if self.built < 2 * self.target:
+                return  # too few compiles to say anything: this tick is judged with the next
+            self.ticks += 1
+            rate, times = self.built / self.span, sorted(self.times)
+            self.span, self.built, self.times = 0.0, 0, []
+            prev, self.prev = self.prev, rate
+            p95 = times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)] if times else 0.0
+            spread = bool(times) and p95 > s["tune_spread"] * statistics.median(times)
+            waited = self.ticks - self.gave_up_at >= TUNE_RETRY_TICKS
+            may_add = self.target < room and (self.gave_up is None or self.target + 1 < self.gave_up or waited)
+            if self.moved < 0:
+                move = 0
+            elif prev is not None and (rate < (1 - s["tune_loss"]) * prev or spread):
+                move = -1 if self.target > self.floor else 0
+            elif prev is None or rate > (1 + s["tune_gain"]) * prev:
+                move = 1 if may_add else 0
+            else:
+                move = 0
+            if move < 0:
+                self.gave_up, self.gave_up_at = self.target, self.ticks
+            self.moved = move
+            if move:
+                self.set(self.target + move)
+
+    def watch(self):
+        worker, text = self.reference
+        while not self.stop.wait(self.settings["reference_s"]):
+            took = reference_compile(worker, text)
+            if took is None:
+                continue
+            with self.launcher.lock:
+                first = self.launcher.samples[:2 * self.start]
+            with self.lock:
+                if self.base is None:
+                    self.base = statistics.median(first) if first else took
+                self.refs.append(took)
+                if took > (1 + REF_SLOW) * self.base and self.adjusts and self.target > self.floor:
+                    self.gave_up, self.gave_up_at, self.moved = self.target, self.ticks, -1
+                    self.set(max(self.floor, self.target // 2))
+
+    def report(self):
+        """What the block's record keeps of the tuning."""
+        ms = [round(x * 1000, 2) for x in self.refs]
+        return {"workers_min": self.low, "workers_max": self.high, "workers_end": self.target,
+                "workers_floor": self.floor, "worker_s": self.worker_s,
+                "starved_frac": round(self.starved_s / self.watched_s, 3) if self.watched_s > 0 else 0.0,
+                "t_ref_ms": round(statistics.median(ms), 2) if ms else None, "t_ref_max_ms": max(ms) if ms else None,
+                "t_ref_base_ms": None if self.base is None else round(self.base * 1000, 2)}
 
 
 def reduce_steering(template, seeds, result, boost=None):
@@ -3779,11 +3983,14 @@ PERF_STREAK = 3  # blocks in a row a flag is raised before the user is told
 PERF_DROP = 0.3  # a fall this large in compiles per worker-second against the median raises slow-compile
 PERF_SHARE = 0.2  # idle share of the workers, or scoring share of the stage time, above which a flag is raised
 PERF_JITTER = 3.0  # p95 compile time, in median compile times, above which io-jitter is raised
+PERF_STARVED = 0.5  # share of a block's time below its worker floor above which starved-by-writers is raised
 FLAG_FIXES = {  # the fix only the user can make, where there is one
     "slow-compile": "exclude the project folder and the system temp folder from antivirus scanning, stop other "
                     "CPU-heavy programs and check the power plan for throttling, or move the temp folder (TEMP) to a RAM disk",
     "io-jitter": "exclude the project folder and the system temp folder from antivirus scanning and the file indexer, "
                  "or move the temp folder (TEMP) to a RAM disk",
+    "contention-or-throttle": "stop other CPU-heavy programs, and check the power plan and the cooling for throttling",
+    "starved-by-writers": "lower the concurrent writer count in the contract, or stop the other searches on this machine",
 }
 
 
@@ -3819,16 +4026,45 @@ def block_rate(rec):
     return rate if rate > 0 else None
 
 
+def tuning_flags(rec, past):
+    """The flags the tuner's measurements raise: {flag: its measured cost as a sentence}.
+
+    contention-or-throttle: a reference compile of the block ran more than REF_SLOW over the block's
+    base, or the block's reference time is REF_SLOW or more over the median of the earlier blocks of
+    the same unit, once PERF_MIN exist (another unit's compile time says nothing about this one's).
+    starved-by-writers: the pool left the block below its worker floor for over PERF_STARVED of its
+    time. past is the last PERF_WINDOW block records of the same compiler.
+    """
+    def number(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+
+    flags = {}
+    base, slowest, ref = rec.get("t_ref_base_ms"), rec.get("t_ref_max_ms"), rec.get("t_ref_ms")
+    refs = [r["t_ref_ms"] for r in past if rec.get("unit") and r.get("unit") == rec["unit"] and number(r.get("t_ref_ms"))]
+    median = statistics.median(refs) if len(refs) >= PERF_MIN else None
+    if number(base) and number(slowest) and slowest > (1 + REF_SLOW) * base:
+        flags["contention-or-throttle"] = (f"the reference compile took {slowest:.0f} ms, {round(100 * (slowest / base - 1))} "
+                                           f"percent over the {base:.0f} ms a compile took as the block began")
+    elif median and number(ref) and ref >= (1 + REF_SLOW) * median:
+        flags["contention-or-throttle"] = (f"the reference compile took {ref:.0f} ms, {round(100 * (ref / median - 1))} "
+                                           f"percent over the median of {median:.0f} ms over the last {len(refs)} blocks of this unit")
+    starved = rec.get("starved_frac")
+    if number(starved) and starved > PERF_STARVED and rec["compiled"] > 0:
+        flags["starved-by-writers"] = (f"the slot pool left the block fewer than its floor of {rec.get('workers_floor')} "
+                                       f"workers for {round(100 * starved)} percent of its time")
+    return flags
+
+
 def perf_flags(rec, past):
     """The flags a block record raises: {flag: its measured cost as a sentence}.
 
     past is the log's earlier records of the same compiler, oldest first. slow-compile and io-jitter
     compare with the median of the last PERF_WINDOW blocks of them, once PERF_MIN exist.
     expander-starved and scorer-bound are shares of this block's own time. A block that built fewer
-    than PERF_COMPILES per worker raises nothing.
+    than PERF_COMPILES per worker raises none of these. The tuner's flags are tuning_flags'.
     """
     past = [r for r in past if r.get("kind") == "block"][-PERF_WINDOW:]
-    flags = {}
+    flags = tuning_flags(rec, past)
     if rec["compiled"] < PERF_COMPILES * rec["workers_end"]:  # served by the cache or ended at once: nothing to measure
         return flags
     rate = block_rate(rec)
@@ -3880,15 +4116,21 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     workers, wall = counts["workers"], perf["wall"]
     stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
     final = best["score"].differ_bytes if "score" in best else None
+    tuning = perf.get("tuning") or {}  # the Tuner's report: without one the worker count never moved
+    worker_s = tuning.get("worker_s") or workers * wall
     return {
-        "kind": "block", "unix": now(), "ticket": t["id"], "compiler": compiler, "round": round_no, "block": block_no,
-        "wall_s": round(wall, 3), "workers_min": workers, "workers_max": workers, "workers_end": workers,
+        "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
+        "round": round_no, "block": block_no, "wall_s": round(wall, 3),
+        "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
+        "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
+        "starved_frac": tuning.get("starved_frac", 0.0),
+        "t_ref_base_ms": tuning.get("t_ref_base_ms"), "t_ref_max_ms": tuning.get("t_ref_max_ms"),
         "expanded": perf["expanded"], "compiled": counts["compiled"], "unique_objects": memo_counts["unique_objects"],
         "build_fail": counts["build_fail"], "killed": launcher.killed, "src_dedupe_hits": memo_counts["src_dedupe_hits"],
         "t_compile_p50_ms": statistics.median(ms) if ms else None,
         "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
-        "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None,
-        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / (workers * wall)), 3) if wall > 0 else 0.0,
+        "t_ref_ms": tuning.get("t_ref_ms") or (round(launcher.samples[0] * 1000, 2) if launcher.samples else None),
+        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / worker_s), 3) if worker_s > 0 else 0.0,
         "best_score_start": start_best, "best_score_end": final,
         "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
         "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
@@ -4020,8 +4262,10 @@ def cmd_search(a):
     latency = model_latency(state)
     ceiling = settings["ceiling_s"] if latency is None else min(latency, settings["ceiling_s"])
     pool = SlotPool(settings).open()
-    count = max(1, min(int(settings["workers"]) or pool.start_workers(), template.space()))
-    launcher = Launcher(environment, settings, count)
+    fixed = int(settings["workers"])
+    start = max(1, min(fixed or pool.start_workers(), template.space()))
+    count = start if fixed else max(start, min(pool.size, template.space()))  # threads: the tuner runs `start` of them at first
+    launcher = Launcher(environment, settings, start)
     launcher.pool = pool
     tree = os.getcwd()
     scratch = tempfile.mkdtemp(prefix="decomp-search-")
@@ -4045,8 +4289,10 @@ def cmd_search(a):
         boost = {k: n[0] for k, n in past.get(category or "", {}).items()}
         trailed = trail(t["id"])
         timing = {}
+        reference = (Worker(Path(scratch) / "ref", launcher, t, compiler, tree, text), baseline) if settings["reference_s"] else None
+        tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
         with persistent_wineserver(launcher):
-            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents)
+            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)
