@@ -478,17 +478,22 @@ def cmd_doctor(a):
 
 
 def contract_line(text, *names):
-    """The value of the first contract bullet `- <name>: <value>` (any of names, case-insensitive), or None."""
+    """The value of the first contract bullet `- <name>: <value>` (any of names, case-insensitive), or None.
+
+    Markdown emphasis (asterisks, underscores, backticks) around the name and at the start of the value is
+    ignored, so `- **Name:** value` and `- **Name**: value` both read as `Name` and `value`.
+    """
+    markup = "*_` \t"
     for line in text.splitlines():
-        m = re.match(r"\s*[-*]\s*([^:]+):\s*(.*)$", line)
-        if m and m.group(1).strip().lower() in names:
-            return m.group(2).strip()
+        m = re.match(r"\s*[-*]\s*([^:]+):(.*)$", line)
+        if m and m.group(1).strip(markup).lower() in names:
+            return m.group(2).lstrip(markup).rstrip()
     return None
 
 
 def reads_as_allowed(value):
     """True for an 'allowed' value, False for 'not allowed' or 'forbidden'; None when it says neither."""
-    v = value.lower().strip("` .")
+    v = value.lower().strip("*_` .")
     if re.match(r"(not allowed|no\b|forbidden|not\b|never)", v):
         return False
     if re.match(r"(allowed|yes\b)", v):
