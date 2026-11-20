@@ -3711,6 +3711,67 @@ def test_search_raises_no_expander_starved_for_a_small_space_that_ends_exhausted
            f"idle time after the last candidate was handed out is not starvation: {rec}", r)
 
 
+# A sleeping fake compiler that stamps its objects and logs "start" and "end" lines, each with the time in ns. A
+# source with FAST_ twice or three times (the baseline of the templates below) takes 0.3 s, any other 1.5 s.
+SLEEP_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src).read()
+open(log, "a").write("start " + str(time.time_ns()) + chr(10))
+time.sleep(0.3 if text.count("FAST_") >= 2 else 1.5)
+open(obj, "w").write(text + chr(10) + "STAMP " + str(time.time_ns()))
+open(log, "a").write("end " + str(time.time_ns()) + chr(10))
+"""
+
+
+def blind_project(base):
+    """A project whose objects differ between compiles and whose diff adapter prints no function_sha256."""
+    log = Path(base) / "sleeps.log"
+    p = search_project(base, config={"build": PY + f' "{{tools}}/sleep_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+                                     "diff": PY + ' "{tools}/count_diff.py" "{obj}" "{report}" NOSHA'},
+                       files={"tools/sleep_build.py": SLEEP_BUILD_PY, "tools/count_diff.py": COUNT_DIFF_PY})
+    tune(p, workers=12, reference_s=0)
+    search(p, MARK + "int f(void) { int WRONG_now; return 1; }\n")  # the stability check is cached from here on
+    log.unlink(missing_ok=True)
+    return p, log
+
+
+def faster(*sizes):
+    """A template that never matches: one choice point per size, of that many alternatives, each choice's first one fast."""
+    return MARK + "int f(void) { int WRONG_now; " + " ".join(
+        "PERM_GENERAL(" + ", ".join(f"int {'FAST' if j == 0 else 'WRONG'}_{chr(97 + i)}{j};" for j in range(n)) + ")"
+        for i, n in enumerate(sizes)) + " return 1; }\n"
+
+
+def test_search_hands_out_the_rest_without_waiting_for_the_sweep_when_nothing_can_be_frozen(base):
+    p, log = blind_project(base)
+    r, out = fresh(p, faster(3, 4))  # 12 candidates, a sweep of 6, 12 workers
+    rec = perf_log(p)[-1]
+    lines = [x.split() for x in log.read_text().splitlines()][4:]  # less the two compiles of the stability check
+    ended = [i for i, x in enumerate(lines) if x[0] == "end"]
+    started = sum(x[0] == "start" for x in lines[:ended[1]])
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 12, f"the whole space is built: {out}", r)
+    expect(started > 6, f"{started} builds started before the second finished: the rest did not wait for the sweep", r)
+    expect(rec["wall_s"] < 2.9, f"the block takes under two slow compiles: {rec}", r)
+    expect(rec["idle_frac"] < 0.2 and "expander-starved" not in rec["flags"], f"the wait for the sweep is gone: {rec}", r)
+
+
+def test_search_still_waits_for_the_sweep_when_object_identity_exists_and_freezes_the_inert_choice(base):
+    p, builds = counting_project(base, stamp=True)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;) "
+                       "PERM_GENERAL(int WRONG_d;, int WRONG_d; /* the same bytes */) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["inert"] == ["B"] and out["counts"]["compiled"] == 3,
+           f"the choice whose alternatives give the baseline's hash is frozen, and only the sweep (3 of the 4) is built: {out}", r)
+
+
+def test_search_raises_no_expander_starved_for_a_block_of_24_candidates_with_no_object_identity(base):
+    p, log = blind_project(base)
+    r, out = fresh(p, faster(2, 3, 4))
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 24, f"the whole space is built: {out}", r)
+    expect("expander-starved" not in rec["flags"], f"the block did not wait for the sweep: {rec}", r)
+
+
 # ---------- calibration probes ----------
 
 # A unit of two marked functions. The fake compiler takes longer while the other function's body is in

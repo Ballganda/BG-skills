@@ -3196,7 +3196,8 @@ class Block:
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. The rest waits for the sweep's last result: a choice point whose
     alternatives all gave the baseline's object is inert, and stays at its first alternative from
-    then on. A match that needs steering does not end the block: it is kept while the rest is tried
+    then on. It does not wait once the round has no object identity (see Memo.blind), as nothing
+    can then be frozen. A match that needs steering does not end the block: it is kept while the rest is tried
     for a natural one (see run_block). boost is the history's (see candidates).
     """
 
@@ -3222,6 +3223,7 @@ class Block:
         self.waited, self.handed, self.unserved = 0.0, None, []  # see asked: the waits for a candidate
         self.running = lambda: self.workers  # how many workers run now: run_block asks its Tuner
         self.last = False  # whether the deadline came with one pass of the workers left (see last_pass)
+        self.blind = lambda: False  # whether nothing can be frozen as inert: run_block sets the Memo's (see Memo.blind)
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -3263,7 +3265,7 @@ class Block:
                     return None
                 if self.sweep:
                     return self.sweep.popleft()
-                if not self.pending:
+                if not self.held():
                     break
                 self.lock.wait(0.05)  # the sweep's last builds are still out: what is inert is not known yet
             if self.seeds is None:
@@ -3273,6 +3275,10 @@ class Block:
                 self.end = "exhausted"
             return seed
 
+    def held(self):
+        """Whether the rest waits for the sweep's results. It does not once no choice point can be frozen. Call with the lock held."""
+        return bool(self.pending) and not self.blind()
+
     def last_pass(self):
         """Whether no more candidates are left than workers run now. Call with the lock held, at the deadline.
 
@@ -3281,7 +3287,7 @@ class Block:
         Before the sweep's results are in, what is left is counted as if no choice point were inert.
         """
         n = self.running()
-        if self.sweep or self.pending:
+        if self.sweep or self.held():
             self.last = len(self.sweep) + self.counts["space"] - len(self.swept) <= n
             return self.last
         if self.seeds is None:
@@ -3310,7 +3316,7 @@ class Block:
                 if self.sweep:
                     seeds.append(self.sweep.popleft())
                     continue
-                seed = None if self.pending or self.seeds is None else next(self.seeds, None)
+                seed = None if self.held() or self.seeds is None else next(self.seeds, None)
                 if seed is None:
                     break
                 seeds.append(seed)
@@ -3477,6 +3483,7 @@ def run_block(template, memo, options):
     if tuner:
         block.running = lambda: tuner.target
         tuner.begin(block)
+    block.blind = memo.blind
     for th in threads:
         th.start()
     for th in threads:
