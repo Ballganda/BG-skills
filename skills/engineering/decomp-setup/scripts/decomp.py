@@ -3124,7 +3124,8 @@ class Block:
         self.early = []  # the first 2 x workers builds: whether each failed
         self.recent = collections.deque(maxlen=max(1, int(settings["repeat_window"])))  # per candidate: was it a repeat
         self.scored = self.since_gain = 0
-        self.stage, self.busy, self.expanded, self.best_at = {"expand": 0.0, "score": 0.0}, 0.0, 0, None  # the performance log's
+        self.stage, self.expanded, self.best_at = {"expand": 0.0, "score": 0.0}, 0, None  # the performance log's
+        self.waited, self.handed, self.unserved = 0.0, None, []  # see asked: the waits for a candidate
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -3137,6 +3138,23 @@ class Block:
         if s["deadline_s"]:
             return t >= s["deadline_s"]
         return t >= s["floor_s"] and (self.counts["compiled"] >= s["floor_compiles"] or t >= self.ceiling)
+
+    def asked(self, since, got):
+        """Note one worker's wait for a candidate, from since until now. got says whether it was handed one."""
+        now = time.perf_counter()
+        with self.lock:
+            if got:
+                self.waited, self.handed = self.waited + now - since, now
+            else:
+                self.unserved.append((since, now))
+
+    def starved_s(self):
+        """The seconds the workers waited for a candidate, up to the moment the last one was handed out. A wait
+        that ended with no candidate counts up to that moment only: after it, there was nothing to wait for."""
+        with self.lock:
+            if self.handed is None:
+                return 0.0
+            return self.waited + sum(max(0.0, min(end, self.handed) - since) for since, end in self.unserved)
 
     def take(self):
         """The next seed for a worker, or None when the block has ended."""
@@ -3255,7 +3273,6 @@ class Block:
         with self.lock:
             self.stage["expand"] += expanded - began
             self.stage["score"] += done - scoring
-            self.busy += done - began
             self.expanded += 1
 
     def result(self, seed, memo, worker):
@@ -3271,7 +3288,9 @@ class Block:
             while True:
                 if admit and not admit():
                     return
+                since = time.perf_counter()
                 seed = self.take()
+                self.asked(since, seed is not None)
                 if seed is None:
                     return
                 self.attempt(seed, memo, worker)
@@ -3286,14 +3305,13 @@ class Block:
             while True:
                 if admit and not admit():
                     return
+                since = time.perf_counter()
                 seeds = self.take_batch(worker.size)
+                self.asked(since, bool(seeds))
                 if not seeds:
                     return
-                began = time.perf_counter()
                 texts = dict.fromkeys(self.template.render(self.template.vector(seed)) for seed in seeds)
                 worker.prebuild([x for x in texts if not memo.known(x) and not worker.refuse(x)])
-                with self.lock:
-                    self.busy += time.perf_counter() - began
                 for seed in seeds:
                     self.attempt(seed, memo, worker)
         except BaseException as err:  # raised again by run_block, on the main thread
@@ -3342,7 +3360,7 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     wall = block.elapsed()
     block.counts.update(workers=block.workers, wall_s=round(wall, 2))
     if perf is not None:
-        perf.update(wall=wall, busy=block.busy, expanded=block.expanded, stage=dict(block.stage), best_at=block.best_at)
+        perf.update(wall=wall, starved=block.starved_s(), expanded=block.expanded, stage=dict(block.stage), best_at=block.best_at)
         if tuner:
             perf.update(tuning=tuner.report())
     return end, best, block.counts, sorted(block.results, key=lambda r: r["seed"])
@@ -4049,8 +4067,8 @@ PERF_MIN = 3  # blocks a median needs before it can raise a flag
 PERF_COMPILES = 2  # compiles per worker a block needs before it says anything about speed
 PERF_STREAK = 3  # blocks in a row a flag is raised before the user is told
 PERF_DROP = 0.3  # a fall this large in compiles per worker-second against the median raises slow-compile
-PERF_SHARE = 0.2  # idle share of the workers, or scoring share of the stage time, above which a flag is raised
-PERF_JITTER = 3.0  # p95 compile time, in median compile times, above which io-jitter is raised
+PERF_SHARE = 0.2  # idle share of the workers, or diff and scoring share of the stage time, above which a flag is raised
+PERF_JITTER = 3.0  # p95 compile time, in the block's own median compile times, above which io-jitter is raised
 PERF_STARVED = 0.5  # share of a block's time below its worker floor above which starved-by-writers is raised
 FLAG_FIXES = {  # the fix only the user can make, where there is one
     "slow-compile": "exclude the project folder and the system temp folder from antivirus scanning, stop other "
@@ -4101,14 +4119,14 @@ def tuning_flags(rec, past):
     base, or the block's reference time is REF_SLOW or more over the median of the earlier blocks of
     the same unit, once PERF_MIN exist (another unit's compile time says nothing about this one's).
     starved-by-writers: the pool left the block below its worker floor for over PERF_STARVED of its
-    time. past is the last PERF_WINDOW block records of the same compiler.
+    time. past is the earlier block records of the same unit among the last PERF_WINDOW of the same compiler.
     """
     def number(x):
         return isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
 
     flags = {}
     base, slowest, ref = rec.get("t_ref_base_ms"), rec.get("t_ref_max_ms"), rec.get("t_ref_ms")
-    refs = [r["t_ref_ms"] for r in past if rec.get("unit") and r.get("unit") == rec["unit"] and number(r.get("t_ref_ms"))]
+    refs = [r["t_ref_ms"] for r in past if number(r.get("t_ref_ms"))]
     median = statistics.median(refs) if len(refs) >= PERF_MIN else None
     if number(base) and number(slowest) and slowest > (1 + REF_SLOW) * base:
         flags["contention-or-throttle"] = (f"the reference compile took {slowest:.0f} ms, {round(100 * (slowest / base - 1))} "
@@ -4126,12 +4144,20 @@ def tuning_flags(rec, past):
 def perf_flags(rec, past):
     """The flags a block record raises: {flag: its measured cost as a sentence}.
 
-    past is the log's earlier records of the same compiler, oldest first. slow-compile and io-jitter
-    compare with the median of the last PERF_WINDOW blocks of them, once PERF_MIN exist.
-    expander-starved and scorer-bound are shares of this block's own time. A block that built fewer
-    than PERF_COMPILES per worker raises none of these. The tuner's flags are tuning_flags'.
+    past is the log's earlier records of the same compiler, oldest first. A block is compared only
+    with the earlier blocks of its own unit among the last PERF_WINDOW of them: another unit's
+    headers say nothing about this one's speed.
+    slow-compile: compiles per worker-second PERF_DROP or more below the median of those blocks,
+    once PERF_MIN exist.
+    io-jitter: the block's p95 compile time over PERF_JITTER times its own median. No history is read.
+    expander-starved: the workers waited for a candidate for over PERF_SHARE of the block's worker
+    time, counted up to the last candidate handed out.
+    scorer-bound: the diff adapter and scoring together took over PERF_SHARE of the block's stage time.
+    A block that built fewer than PERF_COMPILES per worker raises none of these four. The tuner's
+    flags are tuning_flags'.
     """
     past = [r for r in past if r.get("kind") == "block"][-PERF_WINDOW:]
+    past = [r for r in past if rec.get("unit") and r.get("unit") == rec["unit"]]
     flags = tuning_flags(rec, past)
     if rec["compiled"] < PERF_COMPILES * rec["workers_end"]:  # served by the cache or ended at once: nothing to measure
         return flags
@@ -4141,20 +4167,21 @@ def perf_flags(rec, past):
         median = statistics.median(rates)
         if rate <= (1 - PERF_DROP) * median:
             flags["slow-compile"] = (f"each worker built {rate:.1f} compiles a second, {round(100 * (1 - rate / median))} "
-                                     f"percent fewer than the median of {median:.1f} over the last {len(rates)} blocks")
+                                     f"percent fewer than the median of {median:.1f} over the last {len(rates)} blocks of this unit")
     idle = rec.get("idle_frac")
     if isinstance(idle, (int, float)) and idle > PERF_SHARE:
-        flags["expander-starved"] = f"the workers sat idle {round(100 * idle)} percent of the block, waiting for candidates"
+        flags["expander-starved"] = (f"the workers sat idle {round(100 * idle)} percent of the block, waiting for "
+                                     "candidates while candidates remained")
     stage = rec.get("stage_ms") or {}
     total = sum(v for v in stage.values() if isinstance(v, (int, float)))
-    if total > 0 and stage.get("score", 0) / total > PERF_SHARE:
-        flags["scorer-bound"] = f"scoring took {round(100 * stage['score'] / total)} percent of the block's stage time"
-    p95 = rec.get("t_compile_p95_ms")
-    p50s = [r["t_compile_p50_ms"] for r in past if isinstance(r.get("t_compile_p50_ms"), (int, float))]
-    base = statistics.median(p50s) if len(p50s) >= PERF_MIN else rec.get("t_compile_p50_ms")
+    scoring = sum(v for v in (stage.get("compare"), stage.get("score")) if isinstance(v, (int, float)))
+    if total > 0 and scoring / total > PERF_SHARE:
+        flags["scorer-bound"] = (f"the diff adapter and scoring took {round(100 * scoring / total)} percent of the "
+                                 "block's stage time")
+    p95, base = rec.get("t_compile_p95_ms"), rec.get("t_compile_p50_ms")
     if isinstance(p95, (int, float)) and isinstance(base, (int, float)) and base > 0 and p95 > PERF_JITTER * base:
-        flags["io-jitter"] = (f"the slowest compiles took {p95:.0f} ms, {p95 / base:.1f} times the median compile "
-                              f"of {base:.0f} ms")
+        flags["io-jitter"] = (f"the slowest compiles took {p95:.0f} ms, {p95 / base:.1f} times the block's median "
+                              f"compile of {base:.0f} ms")
     return flags
 
 
@@ -4198,7 +4225,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
         "t_compile_p50_ms": statistics.median(ms) if ms else None,
         "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
         "t_ref_ms": tuning.get("t_ref_ms") or (round(launcher.samples[0] * 1000, 2) if launcher.samples else None),
-        "stage_ms": stage, "idle_frac": round(max(0.0, 1 - perf["busy"] / worker_s), 3) if worker_s > 0 else 0.0,
+        "stage_ms": stage, "idle_frac": round(min(1.0, perf["starved"] / worker_s), 3) if worker_s > 0 else 0.0,
         "best_score_start": start_best, "best_score_end": final,
         "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
         "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
