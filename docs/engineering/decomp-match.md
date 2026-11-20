@@ -45,7 +45,7 @@ The tool decides when it opens, from the category the writer reported and the ti
 | The writer reads one diff | The tool compiles the candidates and returns the closest, one diff window, and counts |
 | One attempt | Still one attempt |
 
-A search result is never a match claim. The winner is copied into the unit and still goes through `check`, the coordinator's `verify`, and the audit. A round that makes no progress ends the ticket's search: the writer reports it as stuck.
+A search result is never a match claim. The winner is copied into the unit and still goes through `check`, the coordinator's `verify`, and the audit. A round that makes no progress ends the ticket's search: the writer reports it as stuck. Running an unchanged template again is not a round: the tool marks its summary `repeat`, counts no attempt, and gives no advice to stop on it. A file with no choice point is refused as a template, since a plain compile is `check`'s job.
 
 The writer marks a construct written only to steer the compiler with a `steer` tag, so the tool prefers a natural match, and keeps a `fakematch:` comment on any steering line the winner needs. After a round it reads the summary's effects, inert points, pairs, project history line, and any advice to stop, and edits the template by label.
 

@@ -3761,10 +3761,89 @@ def test_search_advises_stopping_after_two_rounds_with_no_new_best_score(base):
     p = search_project(base)
     r, out = search(p, NEVER)
     expect(out is not None and "stop" not in out, f"one flat round is no reason to stop: {out}", r)
-    r, out = search(p, NEVER)
+    r, out = search(p, wide(2))
     expect(out is not None and "no new best" in out.get("stop", ""), f"two flat rounds should carry stop advice: {out}", r)
+    expect("repeat" not in out, f"a round that built its candidates is no repeat: {out}", r)
     r, out = search(p, MATCHING)
     expect(out is not None and out["end"] == "match" and "stop" not in out, f"a round that matches carries none: {out}", r)
+
+
+# ---------- template search: a round with nothing new ----------
+
+# NEVER with one more alternative: four of its six candidates are NEVER's own, and two are new.
+NEVER_AND_MORE = NEVER.replace("int WRONG_c;)", "int WRONG_c;, int WRONG_h; int WRONG_i; int WRONG_j;)", 1)
+
+
+def test_search_refuses_a_template_with_no_choice_point_before_any_build(base):
+    p, builds = counting_project(base)
+    built = builds()
+    r, out = search(p, STUCK)
+    expect(r.returncode != 0 and out is None, "a plain source file is no template", r)
+    expect("choice point" in r.stderr and "check" in r.stderr,
+           f"the message names the missing choice point and points to check: {r.stderr!r}", r)
+    expect(builds() == built, "nothing is built for it", r)
+    expect(len(trail(p)) == 1, f"and it is no attempt: {trail(p)}", r)
+    r, out = search(p, MARK + "int f(void) { PERM_IGNORE(int WRONG_now;) return 1; }\n")
+    expect(r.returncode != 0 and "choice point" in r.stderr, "PERM_IGNORE is no choice point either", r)
+    expect(builds() == built, "nothing is built for it", r)
+
+
+def test_search_marks_a_second_run_of_an_unchanged_template_a_repeat(base):
+    p, builds = counting_project(base)
+    r, first = search(p, TWINS)
+    expect(first is not None and "repeat" not in first, f"the first run builds, so it is no repeat: {first}", r)
+    built, before = builds(), trail(p)
+    r, again = search(p, TWINS)
+    expect(again is not None and again.get("repeat") is True, f"the second run should be marked a repeat: {again}", r)
+    expect(builds() == built and again["counts"]["compiled"] == 0, "a repeat builds nothing", r)
+    expect(again["best"] == first["best"], "a repeat still returns its summary", r)
+    expect(trail(p) == before, f"a repeat adds no record to the check trail: {trail(p)}", r)
+
+
+def test_search_repeats_do_not_count_towards_stop_advice(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and "stop" not in out and "repeat" not in out, f"one real round: {out}", r)
+    for _ in range(2):
+        r, out = search(p, NEVER)
+        expect(out is not None and out.get("repeat") is True and "stop" not in out,
+               f"a repeat run gives no stop advice: {out}", r)
+    expect([e["by"] for e in trail(p)] == ["check", "search"], f"the repeats are no attempts: {trail(p)}", r)
+    r, out = search(p, wide(2))
+    expect(out is not None and "repeat" not in out and "no new best" in out.get("stop", ""),
+           f"a second real round with no new best score still carries stop advice: {out}", r)
+
+
+def test_search_round_that_builds_one_new_candidate_is_no_repeat(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and out["counts"]["compiled"] == 4, f"the first round builds its four candidates: {out}", r)
+    r, out = search(p, NEVER_AND_MORE)
+    expect(out is not None and out["counts"]["cache_hits"] == 4 and out["counts"]["compiled"] == 2,
+           f"four candidates come from the cache and two are built: {out and out['counts']}", r)
+    expect("repeat" not in out, f"a round that builds a candidate is no repeat: {out}", r)
+    expect([e["by"] for e in trail(p)] == ["check", "search", "search"], f"it counts as an attempt: {trail(p)}", r)
+    expect("no new best" in out.get("stop", ""), f"and towards stop advice, as before: {out}", r)
+
+
+def test_search_repeat_starts_no_background_search(base):
+    p = search_project(base, config={"build": PY + ' "{tools}/bare_build.py" "{source}" "{obj}"'},
+                       files={"tools/bare_build.py": BARE_BUILD_PY})
+    template = wide(8, ("/* {c}0 */", "/* {c}1 */"))
+    tune(p, workers=1, plateau_compiles=8)
+    r, out = search(p, template)
+    expect(out is not None and out["end"] == "plateau" and out["counts"]["compiled"] == 9,
+           f"the first round ends on a plateau after its sweep: {out}", r)
+    time.sleep(2)  # the time the model took: what a background search would have to run in
+    tune(p, workers=1, plateau_compiles=8, background=1)
+    try:
+        r, out = search(p, template)
+        expect(out is not None and out["end"] == "plateau" and out.get("repeat") is True,
+               f"the same template ends on the same plateau, from the cache: {out}", r)
+        expect("continues_s" not in out and not background_folder(p).exists(),
+               f"a repeat leaves no background search: {out}", r)
+    finally:
+        stop_background(p)
 
 
 # ---------- template search: background search ----------
