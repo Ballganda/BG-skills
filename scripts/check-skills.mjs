@@ -128,10 +128,9 @@ const layoutFile = "engineering/decomp-standards/LAYOUT.md";
 
 function checkLayoutLineLength({ read, fail }) {
   read(layoutFile)
-    .split("
-")
+    .split("\n")
     .forEach((line, i) => {
-      const length = line.replace(/$/, "").length;
+      const length = line.replace(/\r$/, "").length;
       if (length > layoutMaxLineLength)
         fail(`${layoutFile}:${i + 1}: line is ${length} characters, over the ${layoutMaxLineLength} limit`);
     });

@@ -100,11 +100,9 @@ const layoutFile = "engineering/decomp-standards/LAYOUT.md";
 const lineOf = (length) => "x".repeat(length);
 
 test("fails naming LAYOUT.md and the line when a line is over the length limit", () => {
-  const r = mutated(layoutFile, (t) => `${t}${lineOf(layoutMaxLineLength + 1)}
-`);
+  const r = mutated(layoutFile, (t) => `${t}${lineOf(layoutMaxLineLength + 1)}\n`);
   assert.notEqual(r.status, 0);
-  const line = readFileSync(join(repo, "skills", layoutFile), "utf8").split("
-").length;
+  const line = readFileSync(join(repo, "skills", layoutFile), "utf8").split("\n").length;
   assert.ok(
     r.stderr.includes(`${layoutFile}:${line}: line is ${layoutMaxLineLength + 1} characters`),
     r.stderr,
@@ -112,8 +110,7 @@ test("fails naming LAYOUT.md and the line when a line is over the length limit",
 });
 
 test("passes when a LAYOUT.md line is exactly at the length limit", () => {
-  const r = mutated(layoutFile, (t) => `${t}${lineOf(layoutMaxLineLength)}
-`);
+  const r = mutated(layoutFile, (t) => `${t}${lineOf(layoutMaxLineLength)}\n`);
   assert.equal(r.status, 0, r.stderr);
 });
 
