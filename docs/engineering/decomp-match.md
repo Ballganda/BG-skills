@@ -47,6 +47,8 @@ The tool decides when it opens, from the category the writer reported and the ti
 
 A search result is never a match claim. The winner is copied into the unit and still goes through `check`, the coordinator's `verify`, and the audit. A round that makes no progress ends the ticket's search: the writer reports it as stuck.
 
+The writer marks a construct written only to steer the compiler with a `steer` tag, so the tool prefers a natural match, and keeps a `fakematch:` comment on any steering line the winner needs. After a round it reads the summary's effects, inert points, pairs, project history line, and any advice to stop, and edits the template by label.
+
 Between rounds the tool keeps searching the last template in the background, while the writer reads the summary and writes the next one. The next round reports what that found, and when it found a match, returns it in place of searching the new template.
 
 ## Common questions

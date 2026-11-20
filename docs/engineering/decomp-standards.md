@@ -36,7 +36,7 @@ The guardrails, in short:
 
 ## Template search
 
-A **template** is a unit's source with choice points, each listing alternative spellings of the text at that place. The layout documents its grammar: the macros (`PERM_GENERAL`, `PERM_VAR`, `PERM_ONCE`, `PERM_INT`, `PERM_LINESWAP`, `PERM_IGNORE`), a label and kind per choice point, a likelihood per alternative, and the limits the tool enforces. A **gate**, computed from the ticket's size tier and its check trail, decides when a writer may start one.
+A **template** is a unit's source with choice points, each listing alternative spellings of the text at that place. The layout documents its grammar: the macros (`PERM_GENERAL`, `PERM_VAR`, `PERM_ONCE`, `PERM_INT`, `PERM_LINESWAP`, `PERM_IGNORE`), a label and kind per choice point, a likelihood per alternative, and the limits the tool enforces. Searches on one machine share a pool of compile slots, sample a template too large for one block from the alternatives' likelihoods, and learn across rounds (mutation and crossover of the best earlier candidates, project history, advice to stop). A **gate**, computed from the ticket's size tier and its check trail, decides when a writer may start one.
 
 A search result is never a match claim: a winner still passes `check`, `verify`, and the audit. A template round counts as one attempt against the tier's budget.
 
