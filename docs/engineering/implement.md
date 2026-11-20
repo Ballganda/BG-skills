@@ -44,6 +44,8 @@ The orchestrator reads the tickets as a **task graph**, not a list. A ticket is 
 
 Everything from a ticket batch lands on one branch. Each implementer works in its own worktree based on the integration branch tip, builds its ticket with `tdd`, runs single test files as it goes and the full suite once at the end, commits, and merges the integration branch tip into its own branch before reporting done. The orchestrator then does the merge itself; a merger subagent is started only for a conflict it cannot resolve trivially.
 
+A run uses one set of commit attribution lines. The orchestrator takes them from your instructions, otherwise from its harness (a harness with none gives a run with none), states them with the batch, and gives them word for word to every implementer and merger, which use them in place of their own harness's lines. The script's merge commits end with them too, and a resumed run keeps the lines it began with. Pull request text is unaffected.
+
 Implementers talk to the orchestrator through context pointers (the spec, the ticket, shared exploration notes, earlier commits) rather than pasted summaries, and report back in one fixed line (branch, test result, blocker, and any lessons). That is what keeps the orchestrator's window small across a long batch.
 
 When the run ends, the closing message tells you to always start a new chat before `/code-review`, so the review starts from the diff and the spec alone.

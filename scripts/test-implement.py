@@ -161,7 +161,7 @@ def test_start_recreates_a_claimed_tickets_missing_worktree(base):
 def status_lines(p):
     r = p.run("status")
     expect(r.returncode == OK, "status should succeed", r)
-    return {line.split()[1]: line for line in r.stdout.splitlines()}
+    return {line.split()[1]: line for line in r.stdout.splitlines() if line.startswith("ticket ")}
 
 
 def test_status_shows_every_batch_ticket_as_recorded(base):
@@ -234,6 +234,43 @@ def test_merge_brings_the_ticket_commits_into_the_integration_branch(base):
     r = p.run("merge", "1")
     expect(r.returncode == OK and r.stdout.strip() == "merge: merged", "a rerun reports merged", r)
     expect(p.git("rev-parse", INTEGRATION) == tip, "no second merge commit")
+
+
+LINES = "Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
+
+
+def merged_message(p, wt):
+    work(p, wt, "one.txt", "1\n", "ticket one")
+    r = p.run("merge", "1")
+    expect(r.returncode == OK and r.stdout.strip() == "merge: merged", "a clean merge", r)
+    return p.git("log", "-1", "--format=%B", INTEGRATION)
+
+
+def test_merge_ends_its_message_with_the_attribution_lines_the_run_began_with(base):
+    p = Project(base)
+    r = p.run("begin", INTEGRATION, "1", "--attribution", LINES, "--worktree-root", str(p.base / "wts"))
+    expect(r.returncode == OK, "begin with attribution lines", r)
+    _, _, wt = start(p, "1")
+    msg = merged_message(p, wt)
+    expect(msg == f"Merge ticket 1\n\n{LINES}", f"the message ends with the lines after a blank line: {msg!r}")
+
+
+def test_merge_message_is_unchanged_for_a_run_with_no_attribution_lines(base):
+    p = begun(base)
+    expect(p.run("status").stdout.splitlines()[-1] == "attribution: none", "status says none when none are stored")
+    _, _, wt = start(p, "1")
+    msg = merged_message(p, wt)
+    expect(msg == "Merge ticket 1", f"no lines, no change: {msg!r}")
+
+
+def test_status_reports_stored_lines_and_a_fresh_process_merge_still_uses_them(base):
+    p = Project(base)
+    p.run("begin", INTEGRATION, "1", "--attribution", LINES, "--worktree-root", str(p.base / "wts"))
+    r = p.run("status")
+    expect(r.stdout.splitlines()[-1] == "attribution: stored", "status says the lines are stored", r)
+    p.run("begin", INTEGRATION, "1", "--worktree-root", str(p.base / "wts"))  # a resume that names none keeps them
+    _, _, wt = start(p, "1")
+    expect(merged_message(p, wt).endswith(LINES), "the resumed run keeps the lines")
 
 
 def test_merge_recovers_when_the_ledger_missed_a_completed_merge(base):
