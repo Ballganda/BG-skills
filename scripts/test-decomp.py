@@ -469,6 +469,50 @@ def test_upgrade_maps_an_old_permuter_line_to_template_search(base):
            "a template-search line wins over a permuter line", r)
 
 
+def test_upgrade_reads_contract_bullets_through_markdown_emphasis(base):
+    want = {"template_search": False, "fakematch": "allowed"}
+    contracts = (
+        ("bold, colon inside", "- **Fakematch rule:** allowed, with a note\n- **Permuter:** not allowed (ADR 0003).\n"),
+        ("bold, colon outside", "- **Fakematch rule**: allowed\n- **Template search**: not allowed\n"),
+        ("italic asterisk", "- *Fakematch rule:* allowed\n- *Template search*: not allowed\n"),
+        ("italic underscore", "- _Fakematch rule:_ allowed\n- _Permuter_: not allowed\n"),
+        ("backtick name", "- `Fakematch rule`: allowed\n- `Template search:` not allowed\n"),
+        ("backtick value", "- **Fakematch rule:** `allowed`\n- **Template search:** `not allowed`\n"),
+        ("emphasised value", "* **Fakematch rule:** **allowed**\n* __Template search:__ _not allowed_\n"),
+        ("plain", "- Fakematch rule: allowed\n- Template search: not allowed\n"),
+    )
+    for i, (name, bullets) in enumerate(contracts):
+        p = Project(sub(base, f"c{i}"))
+        p.write("DECOMP.md", "# contract\n" + bullets)
+        r = p.run("contract-keys")
+        expect(r.returncode == 0 and json.loads(r.stdout) == want, f"a contract with {name} bullets should read", r)
+    p = Project(sub(base, "on"))
+    p.write("DECOMP.md", "# contract\n- **Fakematch rule:** forbidden\n- **Template search:** allowed\n")
+    r = p.run("contract-keys")
+    expect(r.returncode == 0 and json.loads(r.stdout) == {"template_search": True, "fakematch": "forbidden"},
+           "bold bullets should give the other values too", r)
+    p = Project(sub(base, "unclear"))
+    p.write("DECOMP.md", "# contract\n- **Fakematch rule:** allowed\n- **Template search:** see the ADR\n")
+    r = p.run("contract-keys")
+    expect(r.returncode == 1 and "missing or unclear" in r.stderr and not r.stdout.strip(),
+           "a line that says neither should still stop", r)
+
+
+def test_doctor_reports_the_rules_of_a_project_upgraded_from_a_bold_contract(base):
+    p = Project(base)
+    cfg = json.loads((p.root / "decomp.json").read_text())
+    del cfg["template_search"], cfg["fakematch"]
+    (p.root / "decomp.json").write_text(json.dumps(cfg))
+    p.write("DECOMP.md", "# contract\n- **Fakematch rule:** allowed, with a note\n- **Permuter:** not allowed (ADR 0003).\n")
+    r = p.run("contract-keys")
+    expect(r.returncode == 0, "the upgrade should read a bold-bullet contract", r)
+    cfg.update(json.loads(r.stdout))
+    (p.root / "decomp.json").write_text(json.dumps(cfg))
+    r = p.run("doctor")
+    expect(r.returncode == 0 and "template search: not allowed" in r.stdout and "fakematch: allowed" in r.stdout,
+           "doctor should print the rules the upgrade wrote", r)
+
+
 def test_doctor_passes_legacy_single_hash_manifest(base):
     r = Project(base).run("doctor")
     expect(r.returncode == 0 and "doctor: ok" in r.stdout and "target ok" in r.stdout, "legacy manifest should pass", r)
