@@ -6,18 +6,22 @@ a decomp.json whose adapters are small `python -c` commands, a fake target, and
 fake tools that only print a banner), runs decomp.py commands in it, and asserts
 on exit codes and output. No real compiler, no network. Standard library only.
 
-Run: python scripts/test-decomp.py [name-filter]
+Run: python scripts/test-decomp.py [--list] [filter ...]
 
 A full run takes minutes, longer than the default 120-second tool timeout, so run
-it in the background. While iterating, pass a name filter (a substring of the test
-function names) to run only the matching cases, for example:
-python scripts/test-decomp.py verify
+it in the background. While iterating, pass filters to run only the cases they
+select: a filter that is a full case name selects that case alone, and any other
+filter selects the cases whose names hold it as a run of whole words (split at
+underscores), for example: python scripts/test-decomp.py verify search_picks.
+A filter that selects nothing exits 2, a module-level name bound twice exits 3,
+and --list prints the selected names without running them.
 
 Each case receives its scratch folder in resolved (long) form. A Windows temp folder
 can be given in short form (8.3 names), and the tool prints the long form, so a path
 a case builds from a short-form folder would not equal the path the tool prints for
 the same file.
 """
+import ast
 import hashlib
 import itertools
 import json
@@ -2418,14 +2422,14 @@ def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
 
 
 # A fake compiler that takes longer over a source holding a SLOW_ tag, so that candidate's result comes in last.
-SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
+STEER_SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
     import time
     time.sleep(1)
 open(obj, "w")''')
 
 
 def test_search_picks_the_likelier_steering_match_whichever_build_ends_first(base):
-    p = search_project(base, files={"tools/search_build.py": SLOW_BUILD_PY}, **ALLOWED)
+    p = search_project(base, files={"tools/search_build.py": STEER_SLOW_BUILD_PY}, **ALLOWED)
     tune(p, workers=3)  # the three candidates build at once, the likelier match the slowest
     r, out = search(p, in_function(
         "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: likely */ int SLOW_a;, %0.2 /* steer: other */ int right_b;)"))
@@ -4406,24 +4410,94 @@ def rmtree(path):
     shutil.rmtree(path, onerror=retry)
 
 
-def main():
-    want = sys.argv[1] if len(sys.argv) > 1 else ""
-    tests = [(n, f) for n, f in globals().items() if n.startswith("test_") and want in n]
+NO_MATCH_EXIT, COLLISION_EXIT = 2, 3
+
+
+def module_level_collisions(source):
+    """One message per module-level name that a def, a class or a plain assignment binds more than once."""
+    seen, found = {}, []
+
+    def bind(name, line):
+        if name in seen:
+            found.append(f"{name} is bound at line {seen[name]} and again at line {line}")
+        else:
+            seen[name] = line
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for e in node.elts:
+                yield from targets(e)
+
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name, node.lineno)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                for name in targets(t):
+                    bind(name, node.lineno)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            for name in targets(node.target):
+                bind(name, node.lineno)
+    return found
+
+
+def select_cases(names, filters):
+    """The case names the filters select, in order, and the filters that select none."""
+    chosen, unmatched = set(), []
+    for flt in filters:
+        if flt in names:
+            hit = {flt}
+        else:
+            words = flt.split("_")
+            hit = {n for n in names if any(n.split("_")[i:i + len(words)] == words for i in range(len(n.split("_"))))}
+        chosen |= hit
+        if not hit:
+            unmatched.append(flt)
+    return [n for n in names if n in chosen] if filters else list(names), unmatched
+
+
+def say(text):
+    print(text, flush=True)
+
+
+def main(argv=None, namespace=None, source=None):
+    """Run a module's test_ cases. The module is this one unless a caller passes its globals and its file."""
+    argv = sys.argv[1:] if argv is None else argv
+    namespace = globals() if namespace is None else namespace
+    source = Path(source or __file__)
+    list_only = "--list" in argv
+    filters = [a for a in argv if a != "--list"]
+    clashes = module_level_collisions(source.read_text(encoding="utf-8"))
+    if clashes:
+        for c in clashes:
+            say(f"COLLISION {source.name}: {c}")
+        sys.exit(COLLISION_EXIT)
+    names, unmatched = select_cases([n for n in namespace if n.startswith("test_")], filters)
+    if unmatched:
+        for f in unmatched:
+            say(f"NO CASE matches the filter {f!r}")
+        sys.exit(NO_MATCH_EXIT)
+    if list_only:
+        for n in names:
+            say(n)
+        sys.exit(0)
     failed = 0
-    for name, f in tests:
+    for name in names:
         base = str(Path(tempfile.mkdtemp(prefix="decomp-test-")).resolve())
         try:
-            f(base)
-            print(f"PASS {name}")
+            namespace[name](base)
+            say(f"PASS {name}")
         except Exception as e:  # a crash in one case must not hide the others
             failed += 1
-            print(f"FAIL {name}: {e if isinstance(e, AssertionError) else traceback.format_exc()}")
+            say(f"FAIL {name}: {e if isinstance(e, AssertionError) else traceback.format_exc()}")
         finally:
             try:
                 rmtree(base)
             except OSError:
                 pass
-    print(f"{len(tests) - failed} passed, {failed} failed")
+    say(f"{len(names) - failed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
 
 
