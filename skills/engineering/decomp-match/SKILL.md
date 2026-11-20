@@ -50,6 +50,7 @@ Run `python tools/decomp.py check <id> --category <c>` and read the result. `<c>
 4. Run `python tools/decomp.py search <id> <template file>`. It tries the candidates and prints one JSON line: `end`, `best`, `window`, `counts`, and on a match `winner`.
 5. On `end: match`, copy the `winner` file's function into the unit's source file, then run `check` as usual. A search result is never a match claim: the winner still goes through `check`, the coordinator's `verify`, and the audit.
 6. Otherwise read `best` and `window`, then edit the template by label: drop what did not help, add alternatives for the first difference that remains. Fetch one candidate's source with `search <id> --detail '<choice code>'`.
+7. `continues_s` in the summary means the tool keeps searching that template in the background while you write the next one. The next `search` call reports it under `background`, in the old template's choice codes. When that report holds `discarded`, the old template matched: the summary is its match, your new template was not searched, and step 5 applies. To give up on a template round, run `search <id> --stop`.
 
 A template round is one attempt. When a round leaves the best `differ_bytes` no lower than the one before, stop and report the ticket as stuck in `note`: do not run a third plateau round.
 
