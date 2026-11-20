@@ -19,6 +19,10 @@ File issues only into the user's own repo, never into `Ballganda/BG-skills` (the
 
 **PRs as a request surface: no.** (`/triage` reads this flag. To turn it on, re-run `/bg-setup` and answer yes.)
 
+## Closing work
+
+A PR closes only its spec. Tickets close as they merge into the integration branch, with a comment naming the branch and the merge commit. The PR body lists its tickets by reference, without closing keywords. Keywords to avoid: close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved.
+
 <!-- if: prs -->
 ## PR triage
 
