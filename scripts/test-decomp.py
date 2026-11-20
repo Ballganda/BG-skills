@@ -3209,7 +3209,7 @@ def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails
     expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
 
 
-PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "workers_min", "workers_max", "workers_end", "expanded",
+PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "call_s", "workers_min", "workers_max", "workers_end", "expanded",
                "compiled", "unique_objects", "build_fail", "killed", "src_dedupe_hits", "t_compile_p50_ms",
                "t_compile_p95_ms", "t_ref_ms", "stage_ms", "idle_frac", "best_score_start", "best_score_end",
                "t_to_best_s", "end_reason", "model_latency_s", "writers_active"}
@@ -3255,7 +3255,14 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     expect(rec["best_score_end"] == 4 and set(rec["stage_ms"]) == {"write", "compile", "compare", "expand", "score"},
            f"the end score and the five stages: {rec}", r)
     expect(0.0 <= rec["idle_frac"] <= 1.0 and rec["t_compile_p95_ms"] >= rec["t_compile_p50_ms"] > 0, f"timings: {rec}", r)
+    probes = sum(x["wall_s"] for x in got[:4])
+    expect(probes > 0 and rec["call_s"] >= rec["wall_s"] + probes - 0.02,
+           f"call_s covers the calibration ({probes} s) and the block: {rec}", r)
+    c = out["counts"]
+    expect(c["call_s"] >= rec["call_s"] and c["call_s"] >= c["wall_s"] + probes - 0.02,
+           f"the summary's call_s covers the whole call: {c}", r)
     r, out = search(p, NEVER)
+    expect(out["counts"]["call_s"] >= out["counts"]["wall_s"], f"call_s is no smaller than wall_s: {out['counts']}", r)
     got = perf_log(p)
     expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 2 and got[5]["block"] == 2,
            f"a warm cache adds one block record and no calibration: {got}", r)
