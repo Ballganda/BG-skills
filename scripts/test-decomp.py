@@ -2869,6 +2869,53 @@ def test_search_kills_a_hung_compile_with_its_grandchild_as_a_build_fail(base):
     expect(beat.stat().st_size == size, "the grandchild should be dead: its heartbeat still grows")
 
 
+# A fake compiler that takes a second, so a block's first builds end after a half-second deadline.
+# It hangs on a candidate holding HANG.
+SLOW_BUILD_PY = """import sys, time
+text = open(sys.argv[1]).read()
+time.sleep(30 if "HANG" in text else 1)
+open(sys.argv[2], "w").write(text)
+"""
+
+
+def slow_project(base, **constants):
+    """A search project whose 2 workers are both still on their first build when the block's deadline comes."""
+    build = PY + ' "{tools}/slow_build.py" "{source}" "{obj}"'
+    p = search_project(base, config={"build": build}, files={"tools/slow_build.py": SLOW_BUILD_PY})
+    tune(p, **dict({"workers": 2, "deadline_s": 0.5}, **constants))
+    return p
+
+
+def test_search_block_at_its_deadline_finishes_a_last_pass_of_its_workers(base):
+    p = slow_project(base, ceiling_s=30, background=1)
+    try:
+        r, out = search(p, wide(2))  # 4 candidates: 2 are out at the deadline, 2 are left for 2 workers
+        expect(out is not None and out["end"] == "exhausted", f"the last 2 candidates are built: {out}", r)
+        expect(out["counts"]["compiled"] == out["counts"]["space"] == 4, f"every candidate is built: {out['counts']}", r)
+        expect("continues_s" not in out and not background_folder(p).exists(),
+               f"an exhausted space leaves no background search: {out}", r)
+    finally:
+        stop_background(p)
+
+
+def test_search_block_at_its_deadline_ends_there_with_more_candidates_left_than_workers(base):
+    p = slow_project(base)
+    r, out = search(p, wide(3))  # 8 candidates: 6 are left for 2 workers
+    expect(out is not None and out["end"] == "deadline", f"the block should end on its deadline: {out}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["space"] == 8, f"only the first 2 are built: {out['counts']}", r)
+
+
+def test_search_kills_a_hung_compile_in_a_deadline_blocks_last_pass(base):
+    p = slow_project(base, hang_floor_s=2, hang_start_s=4)
+    began = time.time()
+    r, out = search(p, MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, int HANG;) return 1; }\n")
+    took = time.time() - began
+    expect(out is not None and out["end"] == "exhausted", f"the block should outlive the hang: {out}", r)
+    c = out["counts"]
+    expect(c["killed"] == 1 and c["build_fail"] == 1 and c["compiled"] == 3, f"the hang is one killed build-fail: {c}", r)
+    expect(took < 25, f"the hung compile is killed, not waited for: the call took {took:.1f} s", r)
+
+
 def test_search_falls_back_to_the_shell_for_an_adapter_that_needs_it(base):
     p = search_project(base, config={"build": "cd . && " + SEARCH_CONFIG["build"]})
     r, out = search(p, MATCHING)
