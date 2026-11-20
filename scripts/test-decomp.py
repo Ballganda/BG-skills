@@ -3984,6 +3984,11 @@ def kept_log(p):
     return p.root / ".decomp" / "search" / TID / "background.log"
 
 
+def forget_latency(p):
+    """Drop when the last round ended, so the next round's ceiling is the setting and not the seconds since."""
+    (p.root / ".decomp" / "search" / TID / "ended").unlink()
+
+
 def waits_on(p, name):
     """Whether the running background search has logged that it waits on the foreground search `name`."""
     log = background_folder(p) / "log"
@@ -4006,6 +4011,7 @@ def test_a_background_search_that_built_nothing_leaves_its_log(base):
         expect(not background_folder(p).exists(), "the background search's other files are cleared away", r)
 
         (slot_folder(p) / "4242-feed.writer").unlink()
+        forget_latency(p)
         r, out = search(p, wide(7))
         expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
         expect(wait_for(lambda: background_tried(p) >= 2), "with no foreground block the background search builds")
@@ -4015,6 +4021,7 @@ def test_a_background_search_that_built_nothing_leaves_its_log(base):
         expect(kept_log(p).read_text(encoding="utf-8", errors="replace") == first, "the last kept log stays as it was", r)
 
         writer(p, "4343-beef", -600)
+        forget_latency(p)
         r, out = search(p, wide(6))
         expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
         expect(wait_for(lambda: waits_on(p, "4343-beef")), "the background search should wait on the foreground block")
