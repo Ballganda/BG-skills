@@ -2147,6 +2147,65 @@ def test_search_perm_var_repeats_one_pick_at_every_reference(base):
     refused(base, "PERM_VAR(t) y;", "PERM_VAR(t)", "defines it")
 
 
+PAIRED = ("PERM_VAR(@t loop-form, int WRONG_a;, int WRONG_b;, int right_c;)\n"
+          "PERM_VAR(t, int WRONG_x;, int WRONG_y;, int right_z;)")
+
+
+def test_search_paired_use_takes_the_alternative_at_its_definitions_index(base):
+    p = search_project(base)
+    r, out = search(p, in_function(PAIRED))
+    expect(out is not None and out["counts"]["space"] == 3 and out["counts"]["compiled"] == 3,
+           "a definition of 3 and one paired use of 3 give 3 candidates", r)
+    expect(out["end"] == "match" and out["best"]["code"] == "t2", "the choice code names the definition only", r)
+    for code, pair in (("t0", "int WRONG_a;\nint WRONG_x;"), ("t1", "int WRONG_b;\nint WRONG_y;"), ("t2", "int right_c;\nint right_z;")):
+        r = p.run("search", TID, "--detail", code)
+        expect(r.stdout.partition("\n")[2] == in_function(pair), f"{code} should hold the two alternatives of one index", r)
+    src = detail(search_project(sub(base, "ref")), PAIRED + "\nPERM_VAR(t)", "t1")
+    expect(src == in_function("int WRONG_b;\nint WRONG_y;\nint WRONG_b;"), f"PERM_VAR(t) still repeats the definition: {src!r}")
+
+
+def test_search_paired_uses_add_nothing_to_the_12_choice_limit(base):
+    twelve = "\n".join("PERM_VAR(@v%s, int WRONG_%d;, int right_%d;) PERM_VAR(v%s, int WRONG_p%d;, int right_p%d;)"
+                       % (chr(97 + i), i, i, chr(97 + i), i, i) for i in range(12))
+    r, out = search(search_project(base), in_function(twelve))
+    expect(out is not None and out["end"] == "match" and out["counts"]["space"] == 2 ** 12,
+           "twelve choice points, each with a paired use, are twelve choices", r)
+    expect(out["best"]["code"] == " ".join("v%s1" % chr(97 + i) for i in range(12)), "the code holds the definitions only", r)
+
+
+def test_search_refuses_a_malformed_paired_use(base):
+    define = "PERM_VAR(@t temp-type, int, short, long) x; "
+    refused(base, define + "PERM_VAR(t, a, b)", "PERM_VAR(t, ...)", "2 alternatives", "holds 3")
+    refused(base, "PERM_VAR(t, a, b) " + define, "PERM_VAR(t, ...)", "defines it")
+    refused(base, define + "PERM_VAR(t, @u, a, b, c)", "paired use", "no label")
+    refused(base, define + "PERM_VAR(t temp-type, a, b, c)", "paired use", "no kind")
+    refused(base, define + "PERM_VAR(t, a, %0.6 b, c)", "paired use", "no likelihood")
+    refused(base, define + "PERM_VAR(@t)", "PERM_VAR(t)", "PERM_VAR(t, a, b, ...)")
+
+
+def test_search_paired_steering_alternative_makes_its_pick_steering(base):
+    steered = in_function("PERM_VAR(@t, int WRONG_a;, int right_a;)\nPERM_VAR(t, int b;, /* steer: pin it */ int c;)")
+    r, out = search(search_project(base), steered)
+    expect(r.returncode == 1 and out is None and "fakematch" in r.stderr and "Nothing was built" in r.stderr,
+           "a steering paired alternative is refused when fakematch is forbidden", r)
+    r, out = search(search_project(sub(base, "a"), **ALLOWED), steered)
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "t1", "the steered pick matches", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == in_function("int right_a;\nint c; /* fakematch: pin it */"),
+           f"only the paired line should carry the comment: {text!r}", r)
+    r, out = search(search_project(sub(base, "n"), **ALLOWED), in_function(
+        "PERM_VAR(@t, int WRONG_a;, /* steer: first */ int right_a;)\nPERM_VAR(t, int b;, /* steer: second */ int c;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "t1", "the steered pick matches", r)
+    text = Path(out["winner"]).read_text()
+    expect(text == in_function("int right_a; /* fakematch: first */\nint c; /* fakematch: second */"),
+           f"each steering line should carry its own comment: {text!r}", r)
+    r, out = search(search_project(sub(base, "r"), **ALLOWED), in_function(
+        "PERM_VAR(@t, int WRONG_a;, int right_a;, int fine_a;)\nPERM_VAR(t, int b;, /* steer: pin it */ int c;, int d;)"))
+    expect(out is not None and out["end"] == "match" and out["best"]["code"] == "t2",
+           "the natural index should win over the one a paired alternative steers", r)
+    expect("fakematch" not in Path(out["winner"]).read_text(), "the natural winner holds no steering comment", r)
+
+
 def test_search_perm_lineswap_tries_every_order_of_its_lines(base):
     p = search_project(base)
     r, out = search(p, in_function("  PERM_LINESWAP(\n  a;\n  b;\n  c;\n  )"))
