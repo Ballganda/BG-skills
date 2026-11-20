@@ -2266,6 +2266,48 @@ def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(bas
     expect(out["window"][0].startswith("0000 mov eax"), "the window is the report's first lines", r)
 
 
+# A fake diff whose report is the lines given as its third argument, a JSON list.
+SEARCH_REPORT_DIFF_PY = """import json, sys
+n = open(sys.argv[1]).read().count("WRONG")
+open(sys.argv[2], "w").write("".join(line + chr(10) for line in json.load(open(sys.argv[3]))))
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n}))
+"""
+EMPTY_REPORT = "holds no instruction diff"  # what the summary says of a report with nothing but its header
+
+
+def report_project(base, lines):
+    """A search project whose diff report holds exactly these lines."""
+    return search_project(base, files={"tools/search_diff.py": SEARCH_REPORT_DIFF_PY, "tools/report.json": json.dumps(lines)},
+                          config={"diff": PY + ' "{tools}/search_diff.py" "{obj}" "{report}" "{tools}/report.json"'})
+
+
+def test_search_window_marks_a_cut_line_and_leaves_a_shorter_one_alone(base):
+    exact, long = "0000 " + "a" * 115, "0004 " + "b" * 116
+    r, out = search(report_project(base, ["0008 short", exact, long]), NEVER)
+    expect(out is not None and out["window"][:2] == ["0008 short", exact],
+           "a line no longer than the width is unchanged", r)
+    expect(out["window"][2] == long[:116] + " ...", f"a longer line is cut inside the width and ends in the mark: {out['window']}", r)
+    expect(all(len(w) <= 120 for w in out["window"]), "no window line is longer than the width", r)
+    expect(EMPTY_REPORT not in r.stdout, "a report of 2 or more lines is not called empty", r)
+    expect(len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+
+
+def test_search_summary_names_a_report_with_no_instruction_diff(base):
+    r, out = search(report_project(base, ["f: expected 0x180001000 size 64, built size 71, " + "9" * 5000]), NEVER)
+    said = [n for n in (out or {}).get("notice", []) if EMPTY_REPORT in n]
+    expect(len(said) == 1 and "diff adapter" in said[0] and "\n" not in said[0],
+           "the summary should say in one line that the report holds no instruction diff, and name the diff adapter", r)
+    expect(len(out["window"]) == 1 and out["window"][0].endswith(" ...") and len(out["window"][0]) == 120,
+           f"the one line is cut with its mark: {out['window']}", r)
+    expect(len(r.stdout) <= 600 * 4, f"the summary is {len(r.stdout)} characters", r)
+
+
+def test_search_summary_of_a_two_line_report_names_no_empty_report(base):
+    r, out = search(report_project(base, ["f: expected size 64, built size 71", "0000 mov eax, 1"]), NEVER)
+    expect(out is not None and len(out["window"]) == 2 and EMPTY_REPORT not in r.stdout,
+           "a report of 2 lines is shown without the empty-report line", r)
+
+
 # A steering alternative leads with /* steer: <why> */. The fake diff only counts WRONG, so these templates
 # match whenever no WRONG is left: A1 steers, A2 is natural, and B1 steers where B0 is natural.
 STEERED = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, /* steer: keep a, in a register */ int right_a;) "
