@@ -2515,6 +2515,8 @@ class Worker:
         """Build one candidate's source. Returns (obj, failure log or ''). A build that passes is timed."""
         wait = self.environment.settings["lock_retry_s"]
         began = time.perf_counter()
+        if getattr(self.environment, "single", False):  # the single-function build, kept by its calibration probe
+            text = single_function(text, self.t["id"]) or text
         retrying(lambda: self.source.write_bytes(source_bytes(text)), wait)
         retrying(lambda: self.report.unlink(missing_ok=True), wait)
         self.environment.add("write", time.perf_counter() - began)
@@ -2601,6 +2603,8 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "hang_floor_s": 5.0,  # though never sooner than this,
     "hang_start_s": 120.0,  # and after this long while fewer than 2 x workers compiles are timed
     "lock_retry_s": 2.0,  # how long an overwrite retries on a file another process still holds
+    "probe_gain": 0.05,  # a calibration probe keeps a build mode only when it is faster by this share
+    "probe_runs": 2,  # builds a calibration probe times of each mode; the fastest counts
     "budget": 0,  # the compiles a block fits, and its end once it built them; 0 works it out from the deadline
     "seed": 0,  # seeds the random picks of a space too large to try whole
     "cores": 0,  # the physical cores to plan for; 0 asks the platform
@@ -3021,8 +3025,11 @@ class Launcher:
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, errors="replace", start_new_session=os.name != "nt")
 
-    def run(self, command, cwd):
-        """Run one filled adapter command to its end or the hang limit. Returns it as subprocess.run would."""
+    def run(self, command, cwd, scale=1):
+        """Run one filled adapter command to its end or the hang limit. Returns it as subprocess.run would.
+
+        scale is how many candidates the one run builds: a batch gets that many times the limit.
+        """
         proc, direct = None, self.direct(command, cwd)
         if direct:
             with contextlib.suppress(OSError):
@@ -3031,7 +3038,7 @@ class Launcher:
             proc = self.start(command, cwd, shell=True)
             with self.lock:
                 self.shell += 1
-        job, limit = tree_handle(proc), self.limit()
+        job, limit = tree_handle(proc), self.limit() * scale
         try:
             out, err = proc.communicate(timeout=limit)
             return subprocess.CompletedProcess(command, proc.returncode, out, err)
@@ -3147,6 +3154,27 @@ class Block:
                 self.end = "exhausted"
             return seed
 
+    def take_batch(self, n):
+        """Up to n seeds for a worker that builds them in one compiler call; none when the block has ended.
+
+        The first is taken as take does. More are added only while they can be had without waiting: a
+        worker that waited for the sweep's results while holding sweep seeds of its own would never get them.
+        """
+        first = self.take()
+        if first is None:
+            return []
+        seeds = [first]
+        with self.lock:
+            while len(seeds) < n and not self.end:
+                if self.sweep:
+                    seeds.append(self.sweep.popleft())
+                    continue
+                seed = None if self.pending or self.seeds is None else next(self.seeds, None)
+                if seed is None:
+                    break
+                seeds.append(seed)
+        return seeds
+
     def rest(self):
         """The seeds after the sweep: the space, most likely first, less the sweep and every candidate that varies
         an inert choice point. Call with the lock held, the sweep's results in."""
@@ -3246,6 +3274,27 @@ class Block:
             with self.lock:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
+    def work_batch(self, memo, worker, admit=None):
+        """A BatchWorker's loop: take several seeds, build the unseen ones in one compiler call, score and record each.
+        admit is as for work, asked before each batch."""
+        try:
+            while True:
+                if admit and not admit():
+                    return
+                seeds = self.take_batch(worker.size)
+                if not seeds:
+                    return
+                began = time.perf_counter()
+                texts = dict.fromkeys(self.template.render(self.template.vector(seed)) for seed in seeds)
+                worker.prebuild([x for x in texts if not memo.known(x) and not worker.refuse(x)])
+                with self.lock:
+                    self.busy += time.perf_counter() - began
+                for seed in seeds:
+                    self.attempt(seed, memo, worker)
+        except BaseException as err:  # raised again by run_block, on the main thread
+            with self.lock:
+                self.error, self.end = self.error or err, self.end or "stopped"
+
 
 def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
@@ -3265,7 +3314,8 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     """
     block = (block_type or Block)(template, settings, tuner.start if tuner else len(workers), ceiling, boost, parents)
     admits = [(lambda i=i: tuner.admit(i),) if tuner else () for i in range(len(workers))]
-    threads = [threading.Thread(target=block.work, args=(memo, w, *a), daemon=True) for w, a in zip(workers, admits)]
+    threads = [threading.Thread(target=block.work_batch if hasattr(w, "prebuild") else block.work,
+                                args=(memo, w, *a), daemon=True) for w, a in zip(workers, admits)]
     if tuner:
         tuner.begin(block)
     for th in threads:
@@ -3807,7 +3857,7 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
 
 
 CACHE_ENTRIES = 50000  # what the cache keeps of each kind of entry; the oldest go first
-CACHE_KINDS = ("stable", "src", "obj")
+CACHE_KINDS = ("stable", "src", "obj", "probe")  # probe: the build modes a calibration kept (see build_modes)
 
 
 def search_cache_path():
@@ -3904,6 +3954,12 @@ class Memo:
         h = hashlib.sha256(self.ctx.encode() + b"\0" + kind.encode() + b"\0")
         h.update(data if isinstance(data, bytes) else data.encode())
         return h.hexdigest()
+
+    def known(self, text):
+        """Whether a source needs no build: it was tried this round, a worker is building it, or the cache holds it."""
+        skey = self.key("src", source_bytes(text))
+        with self.lock:
+            return skey in self.seen or skey in self.cache["src"]
 
     def new_object(self, e):
         """Whether the entry's object is the first of its hash this round. Call with the lock held."""
@@ -4155,6 +4211,378 @@ def log_block(compiler, rec):
     return list(notices.values())
 
 
+# ---------- calibration probes ----------
+
+MARKER = re.compile(r"(?://|/\*)[ \t]*@decomp ([\w.-]+)")
+DEFINITION_HEAD = re.compile(r"[^;{}=]*\)(?:\s+\w+)*\s*")  # what may stand between a marker and its function's body
+CONDITIONAL = re.compile(r"^[ \t]*#[ \t]*(?:if|ifdef|ifndef|elif|else|endif)\b", re.M)
+BRACE = re.compile(r"[{}]")
+BATCH_SIZES = (4, 8, 16)  # candidates per compiler call the batching probe tries, in this order
+PROBES = ("single-function", "batching", "resolved-compiler")
+
+
+def function_bodies(text):
+    """The body of each marked function in a source: {ticket id: (index of its `{`, index after its `}`, is a member)}.
+
+    Found with the lexer and the `@decomp` markers, with no C parser: the body is the first brace pair
+    after the marker. A function is left out wherever that reading is not certain: its marker stands
+    twice, something other than a function's head stands between marker and brace (a `;`, a `=`,
+    another brace, no closing parenthesis), the braces do not close, or the body holds a
+    preprocessor conditional, which can hide a brace.
+    """
+    code, _ = lexed(text)
+    out, twice = {}, set()
+    for m in MARKER.finditer(text):
+        tid = m.group(1)
+        if tid in out or tid in twice:
+            twice.add(tid)
+            out.pop(tid, None)
+            continue
+        start = code.find("{", m.end())
+        if start < 0 or not DEFINITION_HEAD.fullmatch(code, m.end(), start):
+            continue
+        depth, end = 0, None
+        for b in BRACE.finditer(code, start):
+            depth += 1 if b.group() == "{" else -1
+            if depth == 0:
+                end = b.end()
+                break
+        if end is not None and not CONDITIONAL.search(code, start, end):
+            out[tid] = (start, end, "::" in code[m.end():start])
+    return out
+
+
+def single_function(text, tid):
+    """The source with the body of every other marked function cut away, or None when there is nothing to cut.
+
+    A cut body becomes `;`, which leaves the function declared, or an endless loop for a member
+    function, which cannot be declared outside its class. The body's line breaks stay, so every
+    line keeps its number. Functions with no marker, and those function_bodies leaves out, stay whole.
+    """
+    bodies = function_bodies(text)
+    if tid not in bodies:
+        return None
+    mine = bodies[tid]
+    out, at = [], 0
+    for start, end, member in sorted(span for other, span in bodies.items() if other != tid):
+        if start < at or (start < mine[1] and end > mine[0]):  # inside a body already cut, or around the target
+            continue
+        out += [text[at:start], "{for(;;);}" if member else ";", "\n" * text.count("\n", start, end)]
+        at = end
+    return "".join(out + [text[at:]]) if at else None
+
+
+def function_print(worker, obj):
+    """What stands for the target function's bytes in a built object, or None when the diff gave no result.
+
+    It is the diff adapter's `function_sha256`. Where the adapter prints none, it is the diff's
+    result, its counts, and its report together.
+    """
+    fields = {}
+    s = worker.diff(obj, fields)
+    if rank(s) is None:
+        return None
+    if isinstance(fields.get("function_sha256"), str):
+        return fields["function_sha256"]
+    try:
+        report = file_sha(worker.report)
+    except OSError:
+        report = ""
+    return [s.result, s.differ_bytes, s.first_differ, report]
+
+
+def object_print(worker, obj, hashing):
+    """What two builds must share to count as byte-identical: the object file's hash, or the function's bytes
+    where this compiler's objects do not repeat. None when there is no object."""
+    if not os.path.exists(obj):
+        return None
+    return file_sha(obj) if hashing == "object" else function_print(worker, obj)
+
+
+def best_build(worker, text, runs):
+    """Build one source runs times. Returns (obj, failure log or '', seconds of the fastest build or None)."""
+    obj, best = "", None
+    for _ in range(max(1, int(runs))):
+        start = time.perf_counter()
+        obj, failure = worker.build(text)
+        took = time.perf_counter() - start
+        if failure:
+            return obj, failure, None
+        best = took if best is None else min(best, took)
+    return obj, "", best
+
+
+def faster(took, ref, settings):
+    """Whether a mode's time per candidate beats the reference by the probe's margin."""
+    return took < (1 - settings["probe_gain"]) * ref
+
+
+def as_ms(seconds):
+    return None if seconds is None else round(seconds * 1000, 2)
+
+
+def probe_record(t, compiler, probe, began, outcome, reason, ref=None, took=None, **more):
+    """Add one probe's calibration record to the performance log."""
+    append_perf({"kind": "calibration", "probe": probe, "unix": now(), "ticket": t["id"], "compiler": compiler,
+                 "wall_s": round(time.perf_counter() - began, 3), "outcome": outcome, "reason": reason,
+                 "t_ref_ms": as_ms(ref), "t_probe_ms": as_ms(took), **more})
+
+
+class BatchWorker(Worker):
+    """A build slot that compiles several candidates in one call of the `build_batch` adapter.
+
+    It stands on a Worker's folder. The batch's sources sit beside the unit's own path, each under
+    its own name (`<stem>.<n><suffix>`), and their objects go to one folder. Before a candidate is
+    diffed it is put at the unit's own path, so the diff adapter reads what it reads after a
+    single build. A candidate the last batch did not build is built singly.
+    """
+
+    def __init__(self, worker, size):
+        vars(self).update(vars(worker))
+        self.size, self.ready = size, {}
+        self.batchdir = self.objdir / "batch"
+        self.batchdir.mkdir(exist_ok=True)
+
+    def shaped(self, text):
+        """The source as a build takes it: cut to the target function when the single-function build is kept."""
+        if getattr(self.environment, "single", False):
+            return single_function(text, self.t["id"]) or text
+        return text
+
+    def place(self, text):
+        """Put a candidate at the unit's own path and clear the report, as a single build leaves them."""
+        wait, began = self.environment.settings["lock_retry_s"], time.perf_counter()
+        retrying(lambda: self.source.write_bytes(source_bytes(self.shaped(text))), wait)
+        retrying(lambda: self.report.unlink(missing_ok=True), wait)
+        self.environment.add("write", time.perf_counter() - began)
+
+    def build_batch(self, texts):
+        """Build every text in one call of the adapter. Returns one (obj, failure log or '') per text.
+
+        A text whose object is missing after the call failed to build. When the call fails and no
+        object is missing, every text failed: nothing says which.
+        """
+        wait, began = self.environment.settings["lock_retry_s"], time.perf_counter()
+        src = self.source
+        names = [src.with_name(f"{src.stem}.{i}{src.suffix}") for i in range(len(texts))]
+        objs = [self.batchdir / (name.stem + ".obj") for name in names]
+        for name, obj, text in zip(names, objs, texts):
+            retrying(lambda: name.write_bytes(source_bytes(self.shaped(text))), wait)
+            retrying(lambda: obj.unlink(missing_ok=True), wait)
+        self.environment.add("write", time.perf_counter() - began)
+        command = expand(fill(CFG["build_batch"], self.t, self.compiler, "", "", self.tree, str(src)),
+                         sources=" ".join(f'"{name}"' for name in names), objdir=self.batchdir)
+        with compile_slot(self):  # one compiler process, so one slot
+            start = time.perf_counter()
+            b = self.environment.run(command, self.tree, scale=len(texts))
+            took = time.perf_counter() - start
+        self.environment.add("compile", took)
+        log = (b.stderr or b.stdout)[-4000:] or "the batch build wrote no object for this candidate"
+        made = [obj.exists() for obj in objs]
+        if b.returncode != 0 and all(made):
+            made = [False] * len(made)
+        for _ in range(sum(made)):
+            self.environment.sample(took / len(texts))
+        return [(str(obj), "" if ok else log) for obj, ok in zip(objs, made)]
+
+    def prebuild(self, texts):
+        """Build these distinct candidates in one call, for build to hand out. One candidate alone is left to a single build."""
+        self.ready = {}
+        if len(texts) > 1:
+            with contextlib.suppress(OSError):  # a file stayed locked: each is built singly instead
+                self.ready = dict(zip(texts, self.build_batch(texts)))
+
+    def build(self, text):
+        if text not in self.ready:
+            return super().build(text)
+        self.place(text)
+        return self.ready.pop(text)
+
+
+def probe_single(t, compiler, worker, text, reference):
+    """Probe the single-function build on the baseline. Returns (kept, seconds per build in the kept form or None).
+
+    It is kept when the cut source gives the same function bytes as the full unit and builds faster.
+    reference is best_build's answer for the full unit, or None when nothing asked for one.
+    """
+    began, launcher = time.perf_counter(), worker.environment
+    if single_function(text, t["id"]) is None:
+        probe_record(t, compiler, PROBES[0], began, "skipped", "the unit holds no other marked function to cut")
+        return False, reference and reference[2]
+    obj, failure, ref = reference
+    if failure:
+        probe_record(t, compiler, PROBES[0], began, "skipped", "the baseline does not build")
+        return False, None
+    whole = function_print(worker, obj)
+    launcher.single = True
+    try:
+        obj, failure, took = best_build(worker, text, launcher.settings["probe_runs"])
+        part = None if failure else function_print(worker, obj)
+    finally:
+        launcher.single = False
+    identical = whole is not None and part == whole
+    keep = identical and faster(took, ref, launcher.settings)
+    reason = ("byte-identical and faster" if keep else "the single-function source does not build" if failure
+              else "the function's bytes changed" if not identical else "not faster than the full unit")
+    probe_record(t, compiler, PROBES[0], began, "kept" if keep else "dropped", reason, ref, took, identical=identical)
+    return keep, took if keep else ref
+
+
+def probe_batch(t, compiler, worker, text, hashing, ref):
+    """Probe batching on the baseline. Returns the candidates per compiler call to use: 1 for no batching.
+
+    Each size is one call that builds the baseline that many times. A size is kept when every
+    object equals the single build's and the time per candidate beats the best so far. The first
+    size that is not faster ends the probe, and one that changes the bytes drops batching.
+    """
+    began, launcher = time.perf_counter(), worker.environment
+    if not CFG.get("build_batch"):
+        probe_record(t, compiler, PROBES[1], began, "skipped", "decomp.json holds no build_batch adapter")
+        return 1
+    obj, failure = worker.build(text) if ref is not None else ("", "no reference")
+    want = None if failure else object_print(worker, obj, hashing)
+    if want is None:
+        probe_record(t, compiler, PROBES[1], began, "skipped", "the baseline does not build")
+        return 1
+    batcher = BatchWorker(worker, BATCH_SIZES[-1])
+    size, best, sizes, reason = 1, ref, {}, ""
+    for n in BATCH_SIZES:
+        start = time.perf_counter()
+        try:
+            built = batcher.build_batch([text] * n)
+        except OSError as err:
+            size, reason = 1, f"a batch of {n} could not be written: {err}"
+            break
+        for _ in built:
+            batcher.place(text)  # what every candidate of a batch costs before its diff
+        per = (time.perf_counter() - start) / n
+        sizes[str(n)] = as_ms(per)
+        if any(failed for _, failed in built):
+            size, reason = 1, f"a batch of {n} did not build every object"
+            break
+        if any(object_print(batcher, o, hashing) != want for o, _ in built):
+            size, reason = 1, f"a batch of {n} changed the bytes"
+            break
+        if not faster(per, best, launcher.settings):
+            reason = reason or f"a batch of {n} is not faster"
+            break
+        size, best = n, per
+    if size > 1:
+        reason = f"batches of {size} are byte-identical and faster"
+    probe_record(t, compiler, PROBES[1], began, "kept" if size > 1 else "dropped", reason, ref, best if size > 1 else None,
+                 batch=size, sizes_ms=sizes)
+    return size
+
+
+def probe_resolved(t, compiler, worker, text, hashing, ref):
+    """Probe the resolved-compiler mode on the baseline, and record the outcome. Nothing uses the mode.
+
+    The `build_resolve` adapter prints the compiler's argument list and environment once; the
+    probe then runs the compiler itself, with no adapter and no wrapper in between, and compares
+    the object and the time with the build adapter's. `eligible` means byte-identical and faster.
+    Running tools outside the wrapper departs from the wrapper rule, so a block never does it:
+    adopting the mode needs an ADR first.
+    """
+    began, launcher = time.perf_counter(), worker.environment
+
+    def record(outcome, reason, took=None, **more):
+        probe_record(t, compiler, PROBES[2], began, outcome, reason, ref, took, **more)
+
+    if not CFG.get("build_resolve"):
+        return record("skipped", "decomp.json holds no build_resolve adapter")
+    obj, failure = worker.build(text) if ref is not None else ("", "no reference")
+    want = None if failure else object_print(worker, obj, hashing)
+    if want is None:
+        return record("skipped", "the baseline does not build")
+    r = adapter(CFG["build_resolve"], t, compiler, "{obj}", "", worker.tree, launcher, "{source}")
+    try:
+        given = json.loads(r.stdout.strip().splitlines()[-1])
+        argv, env = given["argv"], given.get("env") or {}
+        if r.returncode != 0 or not argv or not all(isinstance(x, str) for x in argv) or not isinstance(env, dict):
+            raise ValueError
+    except (ValueError, IndexError, KeyError, TypeError, AttributeError):
+        return record("dropped", "the build_resolve adapter gave no argument list")
+    argv = [x.replace("{source}", str(worker.source)).replace("{obj}", obj) for x in argv]
+    env = dict(launcher.vars, **{str(k): str(v) for k, v in env.items()})
+    took = None
+    for _ in range(max(1, int(launcher.settings["probe_runs"]))):
+        with contextlib.suppress(OSError):
+            os.remove(obj)
+        with compile_slot(worker):
+            start = time.perf_counter()
+            try:
+                done = subprocess.run(argv, cwd=worker.tree, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                      timeout=launcher.limit())
+            except (OSError, subprocess.TimeoutExpired):
+                done = None
+            spent = time.perf_counter() - start
+        if done is None or done.returncode != 0 or not os.path.exists(obj):
+            return record("dropped", "the resolved compiler did not build the baseline")
+        took = min(took or math.inf, spent)
+    identical = object_print(worker, obj, hashing) == want
+    quick = faster(took, ref, launcher.settings)
+    reason = ("byte-identical and faster; not used, adopting it needs an ADR" if identical and quick
+              else "the bytes changed" if not identical else "not faster than the build adapter")
+    record("eligible" if identical and quick else "dropped", reason, took, identical=identical)
+
+
+def build_modes(t, compiler, worker, text, hashing, cache, ctx):
+    """The build modes a block uses for this ticket: {"single": bool, "batch": candidates per call, "key": cache key}.
+
+    They come from the calibration probes, run on the baseline and kept in the cache with the
+    answer of the double compile. The key adds to the search context the source outside the target
+    function and the two optional adapters, so a change to any of them probes again. Each probe
+    writes one calibration record. With nothing to probe, nothing is built.
+    """
+    launcher, tid = worker.environment, t["id"]
+    span = function_bodies(text).get(tid)
+    frame = text[:span[0]] + text[span[1]:] if span else ""
+    parts = [ctx, frame, CFG.get("build_batch") or "", CFG.get("build_resolve") or ""]
+    key = sha("\0".join(parts).encode("utf-8", errors="surrogateescape"))
+    kept = cache["probe"].get(key)
+    if isinstance(kept, dict):
+        batch = kept.get("batch") if CFG.get("build_batch") else 1
+        return {"single": kept.get("single") is True, "batch": batch if batch in BATCH_SIZES else 1, "key": key}
+    needed = single_function(text, tid) is not None or CFG.get("build_batch") or CFG.get("build_resolve")
+    reference = best_build(worker, text, launcher.settings["probe_runs"]) if needed else None
+    single, ref = probe_single(t, compiler, worker, text, reference)
+    launcher.single = single  # the later probes measure the form a block will build
+    try:
+        batch = probe_batch(t, compiler, worker, text, hashing, ref)
+        probe_resolved(t, compiler, worker, text, hashing, ref)
+    finally:
+        launcher.single = False
+    if not (reference and reference[1]):  # a baseline that does not build leaves no answer to keep
+        cache["probe"][key] = {"single": single, "batch": batch}
+    return {"single": single, "batch": batch, "key": key}
+
+
+def mode_context(ctx, mode):
+    """The context a block's results are cached under: single-function results never mix with the full unit's."""
+    return sha((ctx + "\0single-function").encode()) if mode["single"] else ctx
+
+
+def match_holds(t, compiler, template, best, worker, cache, mode):
+    """Whether a match found under the single-function build is a match of the full unit too.
+
+    The probe compared the two builds on the baseline only, and a candidate can differ where the
+    baseline does not (it may call a function whose body was cut). So the winner is built once
+    more, whole. When it does not match, the single-function build is dropped for this ticket and
+    the drop is recorded.
+    """
+    began, launcher = time.perf_counter(), worker.environment
+    launcher.single = False
+    obj, failure = Worker.build(worker, template.render(template.vector(best["seed"])))
+    held = not failure and worker.diff(obj).result == "bytes-match"
+    launcher.single = held
+    if not held:
+        mode["single"] = False
+        cache["probe"][mode["key"]] = {"single": False, "batch": mode["batch"]}
+        probe_record(t, compiler, PROBES[0], began, "dropped",
+                     "a match under the single-function build did not hold for the full unit", identical=False)
+    return held
+
+
 def search_dir(tid):
     """Where a ticket's last template round is kept: on this machine only, shared by every worktree."""
     return checkout_dir() / "search" / tid
@@ -4298,8 +4726,12 @@ def cmd_search(a):
             append_perf({"kind": "calibration", "unix": now(), "ticket": t["id"], "compiler": compiler,
                          "wall_s": round(time.perf_counter() - began, 3),
                          "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None})
+        mode = build_modes(t, compiler, workers[0], baseline, hashing, cache, ctx)
+        launcher.single = mode["single"]
+        if mode["batch"] > 1:
+            workers = [BatchWorker(w, mode["batch"]) for w in workers]
         launcher.restart_timing()
-        memo = Memo(cache, ctx, hashing)
+        memo = Memo(cache, mode_context(ctx, mode), hashing)
         if background:
             background.resume(memo, template)
         past = history(compiler)  # at each round start, so a win recorded since the last round counts
@@ -4310,9 +4742,17 @@ def cmd_search(a):
         reference = (Worker(Path(scratch) / "ref", launcher, t, compiler, tree, text), baseline) if settings["reference_s"] else None
         tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
         with persistent_wineserver(launcher):
-            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner,
-                                                   background and background.block_type())
-        counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell)
+            kind = background and background.block_type()
+            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner, kind)
+            if end == "match" and mode["single"] and not match_holds(t, compiler, template, best, workers[0], cache, mode):
+                launcher.single = False  # the match came from the cut source alone: run the block again on the full unit
+                launcher.restart_timing()
+                # (a background search's resumed results came from the cut source too: none is carried over)
+                memo, timing = Memo(cache, mode_context(ctx, mode), hashing), {}
+                tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
+                end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner, kind)
+        counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell,
+                      single_function=mode["single"], batch=mode["batch"])
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)
         if background:  # it is no round: nothing is printed, counted or logged, and the next call collects it
