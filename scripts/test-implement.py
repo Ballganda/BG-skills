@@ -88,13 +88,24 @@ def test_begin_creates_the_integration_branch_then_reuses_it(base):
     p = Project(base)
     tip = p.git("rev-parse", "HEAD")
     r = p.run("begin", INTEGRATION, "1", "2")
-    expect(r.returncode == OK and r.stdout.strip() == f"begin: created {INTEGRATION}", "begin should create", r)
+    expect(r.returncode == OK and r.stdout.strip() == f"begin: created {INTEGRATION} from HEAD", "begin should create", r)
     expect(p.git("rev-parse", INTEGRATION) == tip, "the integration branch should start at HEAD")
     r = p.run("begin", INTEGRATION, "1", "2")
     expect(r.returncode == OK and r.stdout.strip() == f"begin: reused {INTEGRATION}", "begin should reuse", r)
     common = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     expect(common == (p.root / ".git").resolve() and (common / "implement" / "runs").is_dir(),
            "the ledger lives under the git directory")
+
+
+def test_begin_names_the_base_a_new_integration_branch_started_from(base):
+    p = Project(base)
+    p.git("branch", "feature-base")
+    r = p.run("begin", INTEGRATION, "1", "--base", "feature-base")
+    expect(r.returncode == OK and r.stdout.strip() == f"begin: created {INTEGRATION} from feature-base",
+           "begin should name the given base", r)
+    r = p.run("begin", INTEGRATION, "1", "--base", "other")
+    expect(r.returncode == OK and r.stdout.strip() == f"begin: reused {INTEGRATION}",
+           "reuse keeps the old line and ignores a disagreeing base", r)
 
 
 def begun(base, *tickets):
