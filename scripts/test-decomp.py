@@ -3516,15 +3516,18 @@ def probes(p):
     return {x["probe"]: x for x in perf_log(p) if x["kind"] == "calibration" and "probe" in x}
 
 
-def form_project(base, diff):
-    """A two-function unit whose compiler is faster on the single-function source. Returns (project, the logged forms)."""
+def form_project(base, diff, helper=HELPER, probe_min_chars=0):
+    """A two-function unit whose compiler is faster on the single-function source. Returns (project, the logged forms).
+
+    probe_min_chars is 0 unless a test asks, so the helper's short body is still worth a probe; None leaves the default.
+    """
     log = Path(base) / "forms.log"
     p = search_project(base, config={"build": PY + f' "{{tools}}/form_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
                                      "diff": PY + ' "{tools}/probe_diff.py" "{obj}" "{report}"'},
                        files={"tools/form_build.py": FORM_BUILD_PY, "tools/probe_diff.py": diff},
-                       source=HELPER + STUCK)
-    tune(p, workers=1)
-    return p, lambda: log.read_text().split()
+                       source=helper + STUCK)
+    tune(p, workers=1, **({} if probe_min_chars is None else {"probe_min_chars": probe_min_chars}))
+    return p, lambda: log.read_text().split() if log.exists() else []
 
 
 def test_search_rejects_a_single_function_build_that_changes_the_bytes(base):
@@ -3568,6 +3571,53 @@ def test_search_drops_the_single_function_build_when_its_match_fails_on_the_full
     before = len(forms())
     r, out = search(p, CALLS_HELPER.replace("USES_G;", "USES_G; int other;"))
     expect("cut" not in forms()[before:], f"the next round builds the full unit: {forms()[before:]}", r)
+
+
+# A helper whose body holds more text than the default threshold of the single-function probe.
+LONG_HELPER = HELPER.replace("SLOW_BODY;", "SLOW_BODY; " + "int pad; " * 250)
+HELPER_BODY = len(HELPER[HELPER.index("{"):HELPER.index("}") + 1])
+
+
+def test_search_skips_the_single_function_probe_when_there_is_too_little_to_cut(base):
+    p, forms = form_project(base, TARGET_DIFF_PY, probe_min_chars=None)
+    r, out = search(p, TWO_FUNCTIONS)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "skipped" and f"{HELPER_BODY} characters" in got.get("reason", "")
+           and "2000" in got.get("reason", ""), f"the probe should be skipped, naming the text it would cut: {got}", r)
+    expect("cut" not in forms(), f"no single-function build was run: {forms()}", r)
+    expect(out is not None and out["end"] == "match" and out["counts"]["single_function"] is False, f"the round runs: {out}", r)
+
+
+def test_search_probes_the_single_function_build_when_there_is_enough_to_cut(base):
+    p, forms = form_project(base, TARGET_DIFF_PY, helper=LONG_HELPER, probe_min_chars=None)
+    r, out = search(p, LONG_HELPER + MATCHING)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "kept" and got.get("identical") is True, f"the probe should run and keep it: {got}", r)
+    expect(out is not None and out["end"] == "match" and out["counts"]["single_function"] is True, f"the round runs: {out}", r)
+    (Path(base) / "changed").mkdir()
+    p, forms = form_project(Path(base) / "changed", COUNT_DIFF_PY, helper=LONG_HELPER, probe_min_chars=None)
+    r, out = search(p, LONG_HELPER + MATCHING)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "dropped" and "bytes changed" in got.get("reason", ""),
+           f"the probe should run and drop it: {got}", r)
+
+
+def test_search_takes_the_single_function_probes_threshold_from_local_json(base):
+    p, forms = form_project(base, TARGET_DIFF_PY, helper=LONG_HELPER, probe_min_chars=5000)
+    r, out = search(p, LONG_HELPER + MATCHING)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "skipped" and "5000" in got.get("reason", "") and "cut" not in forms(),
+           f"a higher threshold skips the long unit: {got} {forms()}", r)
+    tune(p, workers=1, probe_min_chars=HELPER_BODY)
+    r, out = search(p, LONG_HELPER + MATCHING.replace("int right_b;", "int right_b2;"))
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "kept", f"lowering the threshold probes the same unit again: {got}", r)
+    (Path(base) / "short").mkdir()
+    p, forms = form_project(Path(base) / "short", TARGET_DIFF_PY, probe_min_chars=HELPER_BODY)
+    r, out = search(p, TWO_FUNCTIONS)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "kept" and "cut" in forms(),
+           f"a threshold no higher than the text to cut runs the probe on the short unit: {got}", r)
 
 
 def batch_project(base, per_call, per_source):

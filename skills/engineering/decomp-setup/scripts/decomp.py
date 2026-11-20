@@ -2629,6 +2629,7 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "lock_retry_s": 2.0,  # how long an overwrite retries on a file another process still holds
     "probe_gain": 0.05,  # a calibration probe keeps a build mode only when it is faster by this share
     "probe_runs": 2,  # builds a calibration probe times of each mode; the fastest counts
+    "probe_min_chars": 2000,  # the single-function probe is skipped when it would cut less body text (an unmeasured estimate)
     "budget": 0,  # the compiles a block fits, and its end once it built them; 0 works it out from the deadline
     "seed": 0,  # seeds the random picks of a space too large to try whole
     "cores": 0,  # the physical cores to plan for; 0 asks the platform
@@ -4360,6 +4361,29 @@ def function_bodies(text):
     return out
 
 
+def cut_bodies(text, tid):
+    """The bodies the single-function build cuts for a ticket: [(index of `{`, index after `}`, is a member)], in order.
+
+    They are the bodies of the other marked functions, less any that lies inside one already cut
+    or around the target. Empty when the target's own body is not found.
+    """
+    bodies = function_bodies(text)
+    if tid not in bodies:
+        return []
+    mine, out, at = bodies[tid], [], 0
+    for start, end, member in sorted(span for other, span in bodies.items() if other != tid):
+        if start < at or (start < mine[1] and end > mine[0]):  # inside a body already cut, or around the target
+            continue
+        out.append((start, end, member))
+        at = end
+    return out
+
+
+def cut_chars(text, tid):
+    """How much source text the single-function build would cut: the characters of the bodies, braces included."""
+    return sum(end - start for start, end, _ in cut_bodies(text, tid))
+
+
 def single_function(text, tid):
     """The source with the body of every other marked function cut away, or None when there is nothing to cut.
 
@@ -4367,14 +4391,8 @@ def single_function(text, tid):
     function, which cannot be declared outside its class. The body's line breaks stay, so every
     line keeps its number. Functions with no marker, and those function_bodies leaves out, stay whole.
     """
-    bodies = function_bodies(text)
-    if tid not in bodies:
-        return None
-    mine = bodies[tid]
     out, at = [], 0
-    for start, end, member in sorted(span for other, span in bodies.items() if other != tid):
-        if start < at or (start < mine[1] and end > mine[0]):  # inside a body already cut, or around the target
-            continue
+    for start, end, member in cut_bodies(text, tid):
         out += [text[at:start], "{for(;;);}" if member else ";", "\n" * text.count("\n", start, end)]
         at = end
     return "".join(out + [text[at:]]) if at else None
@@ -4511,11 +4529,15 @@ def probe_single(t, compiler, worker, text, reference):
     """Probe the single-function build on the baseline. Returns (kept, seconds per build in the kept form or None).
 
     It is kept when the cut source gives the same function bytes as the full unit and builds faster.
+    It is skipped when the bodies it would cut hold less text than `probe_min_chars`: the time a cut
+    saves follows the amount of code cut, so a build pair there has a known answer.
     reference is best_build's answer for the full unit, or None when nothing asked for one.
     """
     began, launcher = time.perf_counter(), worker.environment
-    if single_function(text, t["id"]) is None:
-        probe_record(t, compiler, PROBES[0], began, "skipped", "the unit holds no other marked function to cut")
+    chars, least = cut_chars(text, t["id"]), launcher.settings["probe_min_chars"]
+    if not chars or chars < least:
+        probe_record(t, compiler, PROBES[0], began, "skipped", "the unit holds no other marked function to cut" if not chars
+                     else f"the bodies it would cut hold {chars} characters, fewer than probe_min_chars ({least:g})")
         return False, reference and reference[2]
     obj, failure, ref = reference
     if failure:
@@ -4639,19 +4661,22 @@ def build_modes(t, compiler, worker, text, hashing, cache, ctx):
 
     They come from the calibration probes, run on the baseline and kept in the cache with the
     answer of the double compile. The key adds to the search context the source outside the target
-    function and the two optional adapters, so a change to any of them probes again. Each probe
+    function, the two optional adapters, and whether the single-function probe was skipped for
+    too little to cut, so a change to any of them probes again. Each probe
     writes one calibration record. With nothing to probe, nothing is built.
     """
     launcher, tid = worker.environment, t["id"]
     span = function_bodies(text).get(tid)
     frame = text[:span[0]] + text[span[1]:] if span else ""
-    parts = [ctx, frame, CFG.get("build_batch") or "", CFG.get("build_resolve") or ""]
+    chars = cut_chars(text, tid)
+    worth = chars and chars >= launcher.settings["probe_min_chars"]  # whether the single-function probe runs
+    parts = [ctx, frame, CFG.get("build_batch") or "", CFG.get("build_resolve") or ""] + ([] if worth or not chars else ["little"])
     key = sha("\0".join(parts).encode("utf-8", errors="surrogateescape"))
     kept = cache["probe"].get(key)
     if isinstance(kept, dict):
         batch = kept.get("batch") if CFG.get("build_batch") else 1
         return {"single": kept.get("single") is True, "batch": batch if batch in BATCH_SIZES else 1, "key": key}
-    needed = single_function(text, tid) is not None or CFG.get("build_batch") or CFG.get("build_resolve")
+    needed = worth or CFG.get("build_batch") or CFG.get("build_resolve")
     reference = best_build(worker, text, launcher.settings["probe_runs"]) if needed else None
     single, ref = probe_single(t, compiler, worker, text, reference)
     launcher.single = single  # the later probes measure the form a block will build
