@@ -12,6 +12,11 @@ A full run takes minutes, longer than the default 120-second tool timeout, so ru
 it in the background. While iterating, pass a name filter (a substring of the test
 function names) to run only the matching cases, for example:
 python scripts/test-decomp.py verify
+
+Each case receives its scratch folder in resolved (long) form. A Windows temp folder
+can be given in short form (8.3 names), and the tool prints the long form, so a path
+a case builds from a short-form folder would not equal the path the tool prints for
+the same file.
 """
 import hashlib
 import itertools
@@ -4390,6 +4395,10 @@ def test_collecting_a_background_search_stuck_in_a_compile_is_bounded(base):
     expect_background_dead(p, beat, r)
 
 
+def test_a_case_receives_its_scratch_folder_in_resolved_form(base):
+    expect(base == str(Path(base).resolve()), f"the scratch folder {base} differs from its resolved form {Path(base).resolve()}")
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
@@ -4402,7 +4411,7 @@ def main():
     tests = [(n, f) for n, f in globals().items() if n.startswith("test_") and want in n]
     failed = 0
     for name, f in tests:
-        base = tempfile.mkdtemp(prefix="decomp-test-")
+        base = str(Path(tempfile.mkdtemp(prefix="decomp-test-")).resolve())
         try:
             f(base)
             print(f"PASS {name}")
