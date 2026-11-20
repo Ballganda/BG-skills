@@ -79,7 +79,7 @@ A very large spec can outgrow what a tracker issue serves back cleanly. There is
 The skill now asks for testable checks only and forbids restating What to build, which removes the commonest case. Three shapes recur: a criterion already true at the base commit, a criterion that only work in another ticket can satisfy, and one that restates the request rather than deriving from the artifact. Vertical slicing prevents most of it, because a slice that delivers new behaviour fails at the base commit by construction. The check is still worth doing by hand. For each criterion, name the observation that would show it false, and confirm it fails at the commit the implementer starts from.
 
 **The tickets are published. How do I actually run them?**
-The skill stops at the artifact. Run [implement](implement.md), which works one Ticket batch per run (default: the next ready ticket) and resolves each ticket it lands the way your tracker closes work.
+The skill stops at the artifact. Run [implement](implement.md), which works one Ticket batch per run (default: the next ready ticket) and closes each ticket as it merges into the integration branch. When the tickets come from a review of an open PR, each one is a sub-issue of that PR's spec, and the PR itself closes only the spec.
 
 ## It's working if
 

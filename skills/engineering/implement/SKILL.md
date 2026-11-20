@@ -9,7 +9,7 @@ You are the orchestrator, even for a single Ticket. Never implement in your own 
 ## Input
 
 - **Tickets**: resolve a **Ticket batch** (below) and run the Steps. If no issue tracker is configured, tell the user to run `/bg-setup`. For a Ticket reference, fetch it from the issue tracker and state its title first; if the reference is ambiguous, ask.
-- **No Tickets** (work described in chat, or a spec not split into Tickets): a batch of one at the Standard tier. Start a single implementer subagent with a fresh context window, hand it the description (or a pointer to the spec), and have it do the implementer work from step 4 in the current checkout, without the bullets marked *Tickets only*, committing to the current branch. Skip the task graph, the integration branch, the worktree, and the script: the no-Tickets path never calls it.
+- **No Tickets** (work described in chat, or a spec not split into Tickets): a batch of one at the Standard tier. Start a single implementer subagent with a fresh context window, hand it the description (or a pointer to the spec), and the run's attribution lines (see Rules), and have it do the implementer work from step 4 in the current checkout, without the bullets marked *Tickets only*, committing to the current branch. Skip the task graph, the integration branch, the worktree, and the script: the no-Tickets path never calls it.
 
 ## Ticket batch
 
@@ -40,6 +40,7 @@ On Claude Code, start the role's plugin agent (`bg-skills:<agent>`) and override
 
 - Tickets form a **task graph**; the **frontier** is the batch Tickets that are ready. The script's ledger tracks merges, since the tracker's blocked-by count lags until issues close.
 - At most 3 implementer subagents at once (the user may override per run), run in the background, each with a fresh context window, its own worktree, and its own branch.
+- **One attribution per run.** Settle the run's commit attribution lines at the start: the user's instructions when they give any, otherwise your harness's, otherwise none (a run with none adds none). State them with the resolved batch. Give every implementer and merger the lines word for word, the one content passed by value, and tell it they replace the lines of its own harness for every commit it makes, merges of the integration branch into its branch included. The script adds them to its merge commits.
 - Talk to subagents through **context pointers** (spec, Ticket, notes path, commits), never pasted content.
 - **Retry once, then report.** When an implementer reports failing tests or a blocker, start one fresh implementer for that Ticket on the next tier's model (Mechanical to Standard, Standard to Hard). If the retry fails too, stop work on the Ticket and list it in the final reply. A Hard Ticket that fails is not retried.
 
@@ -57,16 +58,16 @@ If the user asks what a report means, explain it in plain language.
 
 ## The script
 
-Every mechanical step is one command of `scripts/implement.py` beside this file, run as `python3 <this skill's directory>/scripts/implement.py <command>`. Each prints one fixed line; errors go to stderr as `error: <text>`. Exit codes: 0 ok, 1 merge conflict, 2 bad arguments or a Ticket the run cannot take, 3 nothing ready, 4 environment problem, 5 the test command failed. Run `--help` for arguments.
+Every mechanical step is one command of `scripts/implement.py` beside this file, run as `<python> <this skill's directory>/scripts/implement.py <command>`. Each prints one fixed line; errors go to stderr as `error: <text>`. Exit codes: 0 ok, 1 merge conflict, 2 bad arguments or a Ticket the run cannot take, 3 nothing ready, 4 environment problem, 5 the test command failed. Run `--help` for arguments.
 
-Before the first command, run `python3 --version`. If Python 3 is missing, tell the user to install it and stop.
+Before the first command, find `<python>`: ask `python3`, then `python`, then `py` for `--version`, and use the first whose answer is a Python 3 version for every script command in the run. A name that is missing, prints an install hint, or answers Python 2 counts as missing. Only when every name fails, tell the user to install Python 3 and stop.
 
 | Command | Does | Prints |
 | --- | --- | --- |
-| `begin INTEGRATION TICKET[:TIER]...` | creates or reuses the integration branch, opens the run's ledger | `begin: created or reused <branch>` |
+| `begin INTEGRATION TICKET[:TIER]... [--base BRANCH] [--attribution LINES]` | creates the integration branch at BASE (default HEAD) or reuses it, opens the run's ledger, stores the attribution lines | `begin: created <branch> from <base>`, or `begin: reused <branch>` |
 | `ready [--cap N] [--tracker T]` | lists batch Tickets whose blockers are merged, up to the free slots | `ticket ID TIER` per Ticket, or `ready: none` (exit 3) |
 | `start TICKET [--slug TEXT]` | claims a Ticket, creates or reuses its worktree and branch | `start: created or reused branch=B worktree=W` |
-| `status` | one line per batch Ticket | `ticket ID STATE TIER attempts=N branch=B worktree=W`, plus `missing=` when either is gone |
+| `status` | one line per batch Ticket, then whether the run holds attribution lines | `ticket ID STATE TIER attempts=N branch=B worktree=W`, plus `missing=` when either is gone; `attribution: stored` or `attribution: none` |
 | `test TICKET COMMAND` | runs COMMAND in the Ticket's worktree, logs the output | `test: pass or fail log=PATH` |
 | `merge TICKET` | merges the Ticket's branch into the integration branch | `merge: merged`, or `merge: conflict files=...` (exit 1) |
 | `fail TICKET` | records a failed attempt, frees the Ticket for a retry | `fail: ticket ID attempts=N` |
@@ -76,23 +77,23 @@ Before the first command, run `python3 --version`. If Python 3 is missing, tell 
 
 ## Steps
 
-1. Read the spec and the batch Tickets.
+1. Read the spec and the batch Tickets. When they build on work not yet in the default branch (an open PR, a named spec branch), that branch is the base; otherwise the base is the default branch tip. State the base and the attribution lines with the resolved batch.
 2. (Optional) If Tickets need shared exploration, start one explorer with a fresh context window to save markdown notes to a directory outside the repo; pass its path to implementers.
-3. Run `begin` with the integration branch name and the batch Tickets with their tiers. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
+3. Run `begin` with the integration branch name, the batch Tickets with their tiers, `--base` set to the step 1 base, and `--attribution` set to the run's lines when it has any. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec only, with the Tickets listed by reference and no closing keyword (the tracker doc's Closing work section names the keywords). If the integration branch already has an open PR, update it instead of opening another.
 4. Run `ready --cap 3` (or the user's cap). For each Ticket it lists, run `start`, then start an implementer on the printed worktree, on its tier's model. The implementer:
    - calls the Skill tool with `tdd` at pre-agreed seams where possible;
    - typechecks and runs the single relevant test file as it goes, and the full suite once at the end (a run that would outlast the tool timeout runs in the background);
    - commits;
    - merges the integration branch tip into its branch before reporting done.
-5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window. On a failing report or a failing `test`, run `fail` and apply the retry rule.
+5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window. On a failing report or a failing `test`, run `fail` and apply the retry rule. After each successful `merge`, close that Ticket with the tracker doc's Close operation, the comment naming the integration branch and the merge commit; the tracker's blocked-by counts then agree with the ledger.
 6. Run `ready` again for newly ready batch Tickets, within the cap, and repeat from step 4 until it prints `ready: none` and no implementer is running.
-7. When the batch is done, resolve each Ticket the way the tracker closes work (mark the draft PR ready only if the whole spec is now done).
+7. When the batch is done, update the PR body's Ticket list if a PR exists, and mark the draft PR ready only if every sub-issue of the spec is closed.
 8. If at least one lesson line came back, call the Skill tool with `retro`, passing the lesson-line mode and the collected lesson lines. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
 9. Write the final reply: integration branch, Tickets done, Tickets skipped or stopped and why, the lesson lines, and retro's suggestions when it ran.
 10. Run `clean`.
 
 ## Resuming
 
-In a new chat, run `status` instead of `begin`: the ledger survives, so it shows each Ticket's state, attempts, and any missing worktree or branch. Re-run `start` on a claimed Ticket whose worktree is missing to rebuild it, then continue from step 4.
+In a new chat, run `status` instead of `begin`: the ledger survives, so it shows each Ticket's state, attempts, and any missing worktree or branch, and holds the run's attribution lines, which the resumed run keeps without asking the harness again. Re-run `start` on a claimed Ticket whose worktree is missing to rebuild it, then continue from step 4.
 
 Don't review: review is a separate stage, so suggest `/code-review` when done. End the closing message with this line: Always start a new chat before `/code-review`.

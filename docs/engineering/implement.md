@@ -23,7 +23,7 @@ If the plan lives only in the thread, say so when you invoke it, so the orchestr
 ## Prerequisites
 
 - **An issue tracker**, for ticket work. The skill reads the tickets from, and resolves them on, the tracker [bg-setup](bg-setup.md) configured. If none has been configured, it stops and tells you to run that first. Work described in chat needs no tracker.
-- **Python 3**, for ticket work. The mechanical steps run through a script that needs only the standard library; if `python3` is missing, the run tells you to install it and stops. Work described in chat does not use the script.
+- **Python 3**, for ticket work. The mechanical steps run through a script that needs only the standard library; the run tries `python3`, `python`, then `py`, uses the first that answers with a Python 3 version, and tells you to install Python 3 and stops only when none does. Work described in chat does not use the script.
 - **A harness that runs subagents**, ideally in the background with a git worktree each. On a harness that runs them one at a time, a multi-ticket batch still works, only serially.
 - **The right branch checked out.** Chat work commits to the branch you are on; ticket work lands on an integration branch the run creates or reuses.
 
@@ -44,17 +44,19 @@ The orchestrator reads the tickets as a **task graph**, not a list. A ticket is 
 
 Everything from a ticket batch lands on one branch. Each implementer works in its own worktree based on the integration branch tip, builds its ticket with `tdd`, runs single test files as it goes and the full suite once at the end, commits, and merges the integration branch tip into its own branch before reporting done. The orchestrator then does the merge itself; a merger subagent is started only for a conflict it cannot resolve trivially.
 
+A run uses one set of commit attribution lines. The orchestrator takes them from your instructions, otherwise from its harness (a harness with none gives a run with none), states them with the batch, and gives them word for word to every implementer and merger, which use them in place of their own harness's lines. The script's merge commits end with them too, and a resumed run keeps the lines it began with. Pull request text is unaffected.
+
 Implementers talk to the orchestrator through context pointers (the spec, the ticket, shared exploration notes, earlier commits) rather than pasted summaries, and report back in one fixed line (branch, test result, blocker, and any lessons). That is what keeps the orchestrator's window small across a long batch.
 
 When the run ends, the closing message tells you to always start a new chat before `/code-review`, so the review starts from the diff and the spec alone.
 
 Chat work skips all of this. Its one implementer works in your current checkout with no worktree, builds with `tdd` the same way, and commits straight to the branch you are on.
 
-A pull request opens only if your tracker closes work through PRs or you ask for one. Otherwise the run stops on the integration branch with every ticket resolved, which works fully offline against a local markdown tracker.
+A pull request opens only if your tracker closes work through PRs or you ask for one. Otherwise the run stops on the integration branch with every ticket resolved, which works fully offline against a local markdown tracker. The PR closes only the spec: its body lists the tickets by reference, with no closing keyword. Each ticket closes as soon as it merges into the integration branch, with a comment naming the branch and the merge commit, so the tracker shows what has landed. Work from a review of that PR becomes new tickets under the same spec, built on the same integration branch, closed as they merge, and pushed as an update to the same PR. The draft is marked ready only when every sub-issue of the spec is closed.
 
 ## The orchestration script
 
-The mechanical steps of a ticket run are one command each of `scripts/implement.py`, shipped beside the skill, so the orchestrator spends tokens on decisions and not on git: `begin` creates or reuses the integration branch and opens a ledger, `ready` lists the tickets whose blockers have merged, `start` claims one and creates its worktree and branch, `test` runs a command in a ticket's worktree and logs the output, `merge` lands a branch on the integration branch, `fail` records a failed attempt, and `clean` removes finished worktrees. Each prints one line. `ready` reads blocking edges from a local tracker and from GitHub; on any other tracker the orchestrator computes readiness itself and passes ticket ids to `start`. Implementers run the full suite themselves, so `test` is the orchestrator's check after their merge.
+The mechanical steps of a ticket run are one command each of `scripts/implement.py`, shipped beside the skill, so the orchestrator spends tokens on decisions and not on git: `begin` creates the integration branch, starting from the branch your spec builds on when that work is not yet in the default branch (the base is stated before work starts, and `begin` names it), or reuses it, and opens a ledger, `ready` lists the tickets whose blockers have merged, `start` claims one and creates its worktree and branch, `test` runs a command in a ticket's worktree and logs the output, `merge` lands a branch on the integration branch, `fail` records a failed attempt, and `clean` removes finished worktrees. Each prints one line. `ready` reads blocking edges from a local tracker and from GitHub; on any other tracker the orchestrator computes readiness itself and passes ticket ids to `start`. Implementers run the full suite themselves, so `test` is the orchestrator's check after their merge.
 
 The ledger lives in the repository's git directory, never committed. That is what makes a run resumable: in a new chat, `status` shows each ticket's state, attempts, and any missing worktree or branch, and the run continues from there.
 
@@ -74,7 +76,7 @@ On Claude Code, each subagent runs as one of the plugin's **restricted agents** 
 
 ## Lessons and the automatic retro
 
-An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). `implement` resolves the tickets. If at least one lesson came back, it calls [retro](retro.md) on those lines alone, without reading session logs. It then writes the final reply, with retro's suggestions listed when it ran, and cleans up the implementer worktrees last. Retro changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
+An implementer that lost time on something adds a **lesson** to its report line, as `type @ location` (navigation, automated check, coding standard, tool economy, or information access, at a file and line). If at least one lesson came back, it calls [retro](retro.md) on those lines alone, without reading session logs. It then writes the final reply, with retro's suggestions listed when it ran, and cleans up the implementer worktrees last. Retro changes nothing; you pick which suggestions to act on. A run with no lessons skips the retro and costs nothing extra.
 
 ## Common questions
 
@@ -101,7 +103,7 @@ Give it a smaller batch. With no argument it builds only the next ready ticket. 
 
 **Blocked tickets never start, even after their blocker has merged.**
 
-The tracker's blocked-by count only drops when a blocker *closes*, and tickets typically close at the end of the run. The orchestrator tracks merges into the integration branch itself and computes the frontier from that. If you still see it, check whether the blocker is outside the batch: those are skipped by design, and the final reply lists them.
+The tracker's blocked-by count only drops when a blocker *closes*, and `implement` closes each ticket right after it merges into the integration branch, so the count follows the run. The orchestrator also tracks merges itself, and the ledger stays the source of truth for the frontier. If you still see it, check whether the blocker is outside the batch: those are skipped by design, and the final reply lists them.
 
 **Two implementers collided on the same file, or picked different names for the same thing.**
 

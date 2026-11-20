@@ -6,7 +6,7 @@ Commands:
   ready [--cap N] [--tracker T]       list batch tickets whose blockers are merged, up to the free slots
                                       (T: local, github, or any other name, which exits with the environment code)
   start TICKET [--slug TEXT]          claim a ticket, create or reuse its worktree and branch
-  status                              one line per batch ticket
+  status                              one line per batch ticket, then whether the run stores attribution lines
   test TICKET COMMAND                 run COMMAND in the ticket's worktree, log the output
   merge TICKET                        merge the ticket's branch into the integration branch
   fail TICKET                         record a failed attempt and free the ticket
@@ -185,6 +185,8 @@ def cmd_begin(store, args):
             ledger = store.load(args.integration)
         except Stop:
             ledger = {"version": 1, "integration": args.integration, "worktree_root": None, "tickets": {}}
+        if args.attribution is not None:
+            ledger["attribution"] = args.attribution.strip()
         root = Path(args.worktree_root) if args.worktree_root else default_worktree_root()
         ledger["worktree_root"] = root.resolve().as_posix()
         for ticket, tier in tickets:
@@ -194,7 +196,8 @@ def cmd_begin(store, args):
             git("branch", args.integration, args.base)
         store.save(ledger)
         store.activate(args.integration)
-    print(f"begin: {'reused' if existed else 'created'} {args.integration}")
+    print(f"begin: reused {args.integration}" if existed
+          else f"begin: created {args.integration} from {args.base}")
     return OK
 
 
@@ -352,6 +355,7 @@ def cmd_status(store, args):
         if e["branch"] and not branch_exists(e["branch"]):
             missing.append("branch")
         print(line + (f" missing={','.join(missing)}" if missing else ""))
+    print("attribution: " + ("stored" if ledger.get("attribution") else "none"))
     return OK
 
 
@@ -381,7 +385,7 @@ def cmd_test(store, args):
     return TEST_FAILED if r.returncode else OK
 
 
-def merge_into(store, integration, branch, ticket):
+def merge_into(store, integration, branch, ticket, attribution=""):
     """Merge branch into the integration branch; return the conflicting files, or [] on success."""
     path = worktrees().get(integration)
     temp = None
@@ -394,7 +398,8 @@ def merge_into(store, integration, branch, ticket):
         git("worktree", "add", "-q", str(temp), integration)
         path = str(temp)
     try:
-        r = git("merge", "--no-ff", "-q", "-m", f"Merge ticket {ticket}", branch, cwd=path, check=False)
+        message = f"Merge ticket {ticket}" + (f"\n\n{attribution}" if attribution else "")
+        r = git("merge", "--no-ff", "-q", "-m", message, branch, cwd=path, check=False)
         if r.returncode == 0:
             return []
         files = out("diff", "--name-only", "--diff-filter=U", cwd=path).splitlines()
@@ -423,7 +428,7 @@ def cmd_merge(store, args):
             require_clean_integration(integration)
             # a merge that landed before the ledger was written needs no second merge commit
             if git("merge-base", "--is-ancestor", branch, integration, check=False).returncode:
-                conflicts = merge_into(store, integration, branch, args.ticket)
+                conflicts = merge_into(store, integration, branch, args.ticket, ledger.get("attribution", ""))
                 if conflicts:
                     print("merge: conflict files=" + ",".join(conflicts))
                     return CONFLICT
@@ -483,6 +488,7 @@ def parser():
     b.add_argument("integration", help="integration branch name")
     b.add_argument("tickets", nargs="+", help="batch tickets as ID or ID:TIER")
     b.add_argument("--base", default="HEAD", help="where a new integration branch starts (default HEAD)")
+    b.add_argument("--attribution", help="the run's commit attribution lines, which every merge commit ends with")
     b.add_argument("--worktree-root", help="directory for ticket worktrees (default: beside the main checkout)")
     r = sub.add_parser("ready", help="list batch tickets whose blockers are merged, up to the free slots")
     r.add_argument("--cap", type=int, default=DEFAULT_CAP, help=f"concurrency cap (default {DEFAULT_CAP})")
