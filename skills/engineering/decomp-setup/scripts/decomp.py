@@ -3419,7 +3419,24 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
+class BlockOptions:
+    """What run_block needs beside the template and the memo: plain data, built once per round.
+
+    A new option is one field here, one line where a caller sets it and one where run_block reads it.
+    workers are the Worker objects, settings the search settings, ceiling the block's time ceiling in
+    seconds, boost the history's (see candidates). A dict given as perf is filled with the block's
+    timings for the performance log. parents are an earlier block's best candidates, which open
+    mutation and crossover (see Arms). A Tuner given as tuner sets how many of the workers run at
+    once, from its starting count on; without one they all run. block_type is the kind of Block to
+    run, for a background search.
+    """
+
+    def __init__(self, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
+        self.workers, self.settings, self.ceiling, self.boost = workers, settings, ceiling, boost
+        self.perf, self.parents, self.tuner, self.block_type = perf, parents, tuner, block_type
+
+
+def run_block(template, memo, options):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
 
     Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
@@ -3429,12 +3446,10 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     per candidate tried, by seed.
     A block that ends with no natural match but with one that needs steering ends as a match: the
     steered match, reduced to the steering it needs.
-    A dict given as perf is filled with the block's timings for the performance log. parents are an
-    earlier block's best candidates, which open mutation and crossover (see Arms).
-    A Tuner given as tuner sets how many of the workers run at once, from its starting count on;
-    without one they all run.
-    block_type is the kind of Block to run, for a background search.
+    options is a BlockOptions.
     """
+    workers, settings, ceiling, boost = options.workers, options.settings, options.ceiling, options.boost
+    perf, parents, tuner, block_type = options.perf, options.parents, options.tuner, options.block_type
     block = (block_type or Block)(template, settings, tuner.start if tuner else len(workers), ceiling, boost, parents)
     admits = [(lambda i=i: tuner.admit(i),) if tuner else () for i in range(len(workers))]
     threads = [threading.Thread(target=block.work_batch if hasattr(w, "prebuild") else block.work,
@@ -4939,14 +4954,16 @@ def cmd_search(a):
         tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
         with persistent_wineserver(launcher):
             kind = background and background.block_type()
-            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner, kind)
+            options = BlockOptions(workers, settings, ceiling, boost, timing, parents, tuner, kind)
+            end, best, counts, results = run_block(template, memo, options)
             if end == "match" and mode["single"] and not match_holds(t, compiler, template, best, workers[0], cache, mode):
                 launcher.single = False  # the match came from the cut source alone: run the block again on the full unit
                 launcher.restart_timing()
                 # (a background search's resumed results came from the cut source too: none is carried over)
                 memo, timing = Memo(cache, mode_context(ctx, mode), hashing), {}
-                tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
-                end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner, kind)
+                options.perf = timing
+                options.tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
+                end, best, counts, results = run_block(template, memo, options)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell,
                       single_function=mode["single"], batch=mode["batch"])
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)

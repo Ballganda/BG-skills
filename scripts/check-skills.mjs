@@ -121,6 +121,21 @@ function checkDecompRequiredLines({ read, fail }) {
   }
 }
 
+// The decomp layout reference keeps one fact per short line, so two Tickets that add facts about
+// the same command or path merge without a conflict. A longer line fails the check.
+export const layoutMaxLineLength = 300;
+const layoutFile = "engineering/decomp-standards/LAYOUT.md";
+
+function checkLayoutLineLength({ read, fail }) {
+  read(layoutFile)
+    .split("\n")
+    .forEach((line, i) => {
+      const length = line.replace(/\r$/, "").length;
+      if (length > layoutMaxLineLength)
+        fail(`${layoutFile}:${i + 1}: line is ${length} characters, over the ${layoutMaxLineLength} limit`);
+    });
+}
+
 // Every heading of the decomp contract template carries exactly one tag: whether its
 // answer depends on the compiler (identify first) or not.
 const contractTags = ["[needs IDENTIFY]", "[independent]"];
@@ -379,6 +394,7 @@ function checkUpstreamPointers({ fail }) {
 const checks = [
   checkBoundaryLines,
   checkDecompRequiredLines,
+  checkLayoutLineLength,
   checkContractHeadingTags,
   checkDescriptionLengths,
   checkTicketTiers,
