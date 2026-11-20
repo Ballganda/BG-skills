@@ -159,7 +159,7 @@ Commands with detail link to their section below the table.
 | `revalidate [--ref <branch>] [--header <path>]` | Rebuild matched tickets on a ref; nonzero exit on any regression. See [revalidate](#revalidate) |
 | `revalidate --candidate <c/slug>` | Rebuild every matched ticket on a candidate ref. See [revalidate](#revalidate) |
 | `note <id> <text>` | Append an attempt note to a ticket |
-| `similar <id>` | Closest matched functions by byte pattern |
+| `similar <id>` | Closest matched functions by byte pattern, from the tickets `ledger/matches.jsonl` names |
 | `lock <name> --by <n>` / `unlock <name>` | Exclusive lock, used for shared header and symbol map repair. See [lock and unlock](#lock-and-unlock) |
 | `link` | Link the whole binary from the reconstructed source plus raw blocks of the target. See [link](#link) |
 | `report` | Progress, attribution, learning metrics, early warning. See [report](#report) |

@@ -1459,14 +1459,7 @@ def grams(data):
 
 def cmd_similar(a):
     t, _ = read_ticket(a.id)
-    mine = grams((ROOT / t["expected"]).read_bytes())
-    scored = []
-    for o in all_tickets():
-        if o["status"] in MATCHED and o["id"] != a.id:
-            g = grams((ROOT / o["expected"]).read_bytes())
-            if mine and g:
-                scored.append((len(mine & g) / len(mine | g), o))
-    for s, o in sorted(scored, key=lambda x: -x[0])[: a.n]:
+    for s, o, _ in closest_solved(t, a.n):
         print(f"{s:.2f} {o['id']} {o['size']}B {o['source']}")
 
 
@@ -2229,11 +2222,13 @@ def shape(text):
                     for w in SHAPE_TOKEN.findall(lexed(text)[0]))
 
 
-def closest_solved(t, n=SIMILAR_N):
-    """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
+def closest_solved(t, n=SIMILAR_N, with_source=False):
+    """The matched functions closest to the ticket, as (closeness, ticket, the function's source) triples, closest first.
 
-    A function's source is its unit's text from its marker to the next marker. One that cannot be
-    read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
+    This is the one answer `similar` prints and the bonus of `search` reads. A function's source is
+    its unit's text from its marker to the next marker, read only with_source: the bonus leaves out
+    one whose source cannot be read, `similar` does not need it. A function whose ticket or expected
+    bytes cannot be read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
     are the tickets the matches ledger names, so no other ticket file is read: a project's open
     tickets can outnumber its matched ones by thousands.
     """
@@ -2258,25 +2253,29 @@ def closest_solved(t, n=SIMILAR_N):
             continue
         try:
             g = grams((ROOT / o["expected"]).read_bytes())
-            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace")
+            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace") if with_source else ""
         except OSError:
             continue
-        marks = list(MARKER.finditer(text))
-        at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
-        if mine and g and at is not None:
-            end = marks[at + 1].start() if at + 1 < len(marks) else len(text)
-            scored.append((len(mine & g) / len(mine | g), o["id"], text[marks[at].end():end]))
-    return [(s, text) for s, _, text in sorted(scored, key=lambda x: (-x[0], x[1]))[:n]]
+        body = ""
+        if with_source:
+            marks = list(MARKER.finditer(text))
+            at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
+            if at is None:
+                continue
+            body = text[marks[at].end():marks[at + 1].start() if at + 1 < len(marks) else len(text)]
+        if mine and g:
+            scored.append((len(mine & g) / len(mine | g), o, body))
+    return sorted(scored, key=lambda x: (-x[0], x[1]["id"]))[:n]
 
 
 def with_similar(template, near):
     """The template with each likelihood raised where the alternative is written as the closest solved functions are.
 
-    near is closest_solved's. An alternative gets the bonus when its shape, two tokens or more, stands
+    near is closest_solved's, with its sources. An alternative gets the bonus when its shape, two tokens or more, stands
     in such a function, by that function's closeness. A choice point whose alternatives all get the
     same bonus is left alone: the functions say nothing about it.
     """
-    near = [(s, f" {shape(text)} ") for s, text in near if s > 0]
+    near = [(s, f" {shape(text)} ") for s, _, text in near if s > 0]
     parts = []
     for p in template.parts:
         if near and isinstance(p, Choice):
@@ -4930,7 +4929,7 @@ def cmd_search(a):
     template = with_learned(written, read_learned(state))  # a kept choice point starts from what the last round learned
     parents = carried_parents(state, template)
     searched = template  # what the round learned is judged against its own priors, without the similar-function bonus
-    template = with_similar(template, closest_solved(t))
+    template = with_similar(template, closest_solved(t, with_source=True))
     if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
         die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
             "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
