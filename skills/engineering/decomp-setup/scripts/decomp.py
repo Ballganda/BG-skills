@@ -10,7 +10,6 @@ import atexit
 import codecs
 import collections
 import contextlib
-import dataclasses
 import hashlib
 import heapq
 import itertools
@@ -3420,7 +3419,6 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-@dataclasses.dataclass
 class BlockOptions:
     """What run_block needs beside the template and the memo: plain data, built once per round.
 
@@ -3432,14 +3430,10 @@ class BlockOptions:
     once, from its starting count on; without one they all run. block_type is the kind of Block to
     run, for a background search.
     """
-    workers: list
-    settings: dict
-    ceiling: float
-    boost: dict = None
-    perf: dict = None
-    parents: list = None
-    tuner: object = None
-    block_type: type = None
+
+    def __init__(self, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
+        self.workers, self.settings, self.ceiling, self.boost = workers, settings, ceiling, boost
+        self.perf, self.parents, self.tuner, self.block_type = perf, parents, tuner, block_type
 
 
 def run_block(template, memo, options):
