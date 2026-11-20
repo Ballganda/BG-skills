@@ -4,6 +4,15 @@
 Copied into a decomp project's tools/ by decomp-setup and frozen at the
 decomp-setup tag. It is the only writer of ticket statuses and ledger records.
 Standard library only. Run from the project root: python tools/decomp.py <cmd>.
+
+Sections are marked by a banner line `# ---------- name ----------`; search for it.
+Sections, in file order: environment; tickets; ledger; ticket lifecycle; build and
+compare; commands; check trail and the template-search gate; template search;
+template search: the priors, and which candidates a block tries when it cannot try
+them all; template search: the compile-slot pool; template search: the compiler
+launcher; template search: the block scheduler; template search: tuning and the
+performance log; template search: learning across rounds, mutation, crossover, and
+stop advice; calibration probes; background search.
 """
 import argparse
 import atexit
@@ -2692,6 +2701,9 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
 }
 
 
+# ---------- template search: the compile-slot pool ----------
+
+
 def search_settings():
     """The block constants for this machine: the defaults with local.json's "search" entries over them."""
     path = local_dir() / "local.json"
@@ -3016,6 +3028,9 @@ class SlotPool:
         return freed
 
 
+# ---------- template search: the compiler launcher ----------
+
+
 @contextlib.contextmanager
 def compile_slot(worker):
     """Hold one of the machine's compile slots for the length of a worker's build. A launcher with no pool builds freely."""
@@ -3162,6 +3177,9 @@ def persistent_wineserver(launcher):
             except subprocess.TimeoutExpired:
                 kill_tree(proc, None)
                 proc.wait()
+
+
+# ---------- template search: the block scheduler ----------
 
 
 class Block:
@@ -3497,6 +3515,9 @@ def pool_capacity(pool):
         except (OSError, ValueError):
             pass  # free, or being written
     return min(share, pool.size - others)
+
+
+# ---------- template search: tuning and the performance log ----------
 
 
 def reference_compile(worker, text):

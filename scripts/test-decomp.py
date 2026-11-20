@@ -4411,6 +4411,17 @@ def test_a_case_receives_its_scratch_folder_in_resolved_form(base):
     expect(base == str(Path(base).resolve()), f"the scratch folder {base} differs from its resolved form {Path(base).resolve()}")
 
 
+def test_the_tool_index_names_its_section_banners_in_order(base):
+    import re
+    source = TOOL.read_text(encoding="utf-8")
+    banners = re.findall(r"^# -{10} (.+?) -{10}$", source, re.M)
+    doc = ast.get_docstring(ast.parse(source), clean=True)
+    start = doc.index("Sections, in file order: ") + len("Sections, in file order: ")
+    index = " ".join(doc[start:].split()).rstrip(".").split("; ")
+    expect(banners, "the tool should have section banners")
+    expect(index == banners, f"the index names {index} but the banners are {banners}")
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
