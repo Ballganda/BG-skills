@@ -2977,12 +2977,99 @@ def test_search_tries_first_the_alternative_written_as_the_closest_solved_functi
     other = "u0002-00402000"
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
              "src/u0002.c": f"// @decomp {other}\nint g(int n) {{ int k = 0; while (k < n) k++; return k; }}\n",
-             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated")}
-    template = in_function("int tag_a; PERM_GENERAL(tag_base = WRONG_x;, for (; tag_for < WRONG_n;) WRONG_k++;, "
-                           "while (tag_while < WRONG_n) WRONG_k++;)")
-    r, out, order = sampled_search(base, template, files=files)
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated"),
+             "ledger/matches.jsonl": matches_ledger(other)}
+    r, out, order = sampled_search(base, LOOP_SPELLINGS, files=files)
     expect([line.split()[1] for line in order] == ["tag_base", "tag_while", "tag_for"],
            f"the spelling the solved function uses should be tried before the other: {order}", r)
+
+
+# Read by every Python the tool starts: it writes down each ticket file that is opened.
+TICKET_READS_PY = """import os, sys
+def _hook(event, args):
+    if event == "open" and args:
+        path = str(args[0]).replace(os.sep, "/")
+        if "/tickets/" in path and path.endswith(".md"):
+            with open(os.environ["TICKET_READS"], "a") as f:
+                f.write(path.rsplit("/", 1)[1][:-3] + chr(10))
+sys.addaudithook(_hook)
+"""
+LOOP_SPELLINGS = in_function("int tag_a; PERM_GENERAL(tag_base = WRONG_x;, for (; tag_for < WRONG_n;) WRONG_k++;, "
+                             "while (tag_while < WRONG_n) WRONG_k++;)")
+WHILE_LOOP = "int g(int n) { int k = 0; while (k < n) k++; return k; }\n"
+
+
+def matches_ledger(*tids):
+    """The matches ledger as `audit pass` leaves it for these tickets."""
+    return "".join(json.dumps({"ticket": tid, "unix": 1789000000, "attempt": f"{tid}-a001", "model": "m", "size": 37,
+                               "auditor": "a1"}, sort_keys=True) + "\n" for tid in tids)
+
+
+def solved_ticket(n, status="integrated", source=WHILE_LOOP, expected="abcdefgx\n"):
+    """The files of one more ticket, u<n>, close to the project's own: its ticket, its unit and its expected bytes."""
+    tid = f"u{n:04d}-{0x00400000 + n * 0x1000:08x}"
+    files = {f"tickets/u{n:04d}/{tid}.md": ticket_text(tid, f"0x{tid.split('-')[1]}", f"src/u{n:04d}.c", status),
+             f"src/u{n:04d}.c": f"// @decomp {tid}\n{source}"}
+    if expected is not None:
+        files[f"expected/{tid.split('-')[1]}.bin"] = expected
+    return tid, files
+
+
+def ticket_reads(base, files):
+    """Search LOOP_SPELLINGS in a project of `files`. Returns (process, the candidates built in order, the ticket files read)."""
+    base = Path(base)
+    hook, reads, log = base / "hook", base / "reads.log", base / "order.log"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(TICKET_READS_PY, encoding="utf-8")
+    files = dict({"expected/00401000.bin": "abcdefgh\n",
+                  "tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))}, **files)
+    p = search_project(base, files=files)
+    tune(p, workers=1)
+    template = base / "template.c"
+    template.write_text(LOOP_SPELLINGS, encoding="utf-8")
+    r = p.run("search", TID, str(template), env={"PYTHONPATH": str(hook), "TICKET_READS": str(reads)})
+    expect(r.returncode == 0, "search should pass", r)
+    order = [line.split()[1] for line in log.read_text().splitlines()[-3:]]
+    return r, order, (reads.read_text().split() if reads.exists() else [])
+
+
+def test_search_reads_no_more_ticket_files_however_many_tickets_are_open(base):
+    counts = {}
+    for extra in (0, 40):
+        files, solved = {}, []
+        for n in (2, 3):
+            tid, more = solved_ticket(n)
+            solved.append(tid)
+            files.update(more)
+        for n in range(4, 4 + extra):
+            files.update(solved_ticket(n, status="open")[1])
+        files["ledger/matches.jsonl"] = matches_ledger(*solved)
+        r, order, reads = ticket_reads(sub(base, f"open{extra}"), files)
+        expect(order == ["tag_base", "tag_while", "tag_for"], f"the bonus should hold with {extra} open tickets: {order}", r)
+        expect(set(reads) == {TID, *solved}, f"only the ticket and the matched ones are read: {sorted(set(reads))}", r)
+        counts[extra] = len(reads)
+    expect(counts[0] == counts[40], f"the ticket files read should not grow with the open tickets: {counts}")
+
+
+def test_search_leaves_out_a_matched_ticket_it_cannot_read(base):
+    gone, files = solved_ticket(2)
+    del files[f"tickets/u0002/{gone}.md"]
+    bare, more = solved_ticket(3, expected=None)
+    files.update(more)
+    regressed, more = solved_ticket(4, status="regressed")
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(gone, bare, regressed)
+    r, order, reads = ticket_reads(base, files)
+    expect(order == ["tag_base", "tag_for", "tag_while"], f"no function is left to give a bonus: {order}", r)
+
+
+def test_search_reads_no_other_ticket_in_a_project_without_a_match(base):
+    files = {}
+    for n, status in ((2, "open"), (3, "claimed"), (4, "integrated")):  # the last was never recorded as a match
+        files.update(solved_ticket(n, status=status)[1])
+    r, order, reads = ticket_reads(base, files)
+    expect(order == ["tag_base", "tag_for", "tag_while"], f"no match gives no bonus: {order}", r)
+    expect(set(reads) == {TID}, f"only the ticket searched is read: {sorted(set(reads))}", r)
 
 
 # ---------- template search: the machine-wide slot pool ----------
@@ -3761,10 +3848,89 @@ def test_search_advises_stopping_after_two_rounds_with_no_new_best_score(base):
     p = search_project(base)
     r, out = search(p, NEVER)
     expect(out is not None and "stop" not in out, f"one flat round is no reason to stop: {out}", r)
-    r, out = search(p, NEVER)
+    r, out = search(p, wide(2))
     expect(out is not None and "no new best" in out.get("stop", ""), f"two flat rounds should carry stop advice: {out}", r)
+    expect("repeat" not in out, f"a round that built its candidates is no repeat: {out}", r)
     r, out = search(p, MATCHING)
     expect(out is not None and out["end"] == "match" and "stop" not in out, f"a round that matches carries none: {out}", r)
+
+
+# ---------- template search: a round with nothing new ----------
+
+# NEVER with one more alternative: four of its six candidates are NEVER's own, and two are new.
+NEVER_AND_MORE = NEVER.replace("int WRONG_c;)", "int WRONG_c;, int WRONG_h; int WRONG_i; int WRONG_j;)", 1)
+
+
+def test_search_refuses_a_template_with_no_choice_point_before_any_build(base):
+    p, builds = counting_project(base)
+    built = builds()
+    r, out = search(p, STUCK)
+    expect(r.returncode != 0 and out is None, "a plain source file is no template", r)
+    expect("choice point" in r.stderr and "check" in r.stderr,
+           f"the message names the missing choice point and points to check: {r.stderr!r}", r)
+    expect(builds() == built, "nothing is built for it", r)
+    expect(len(trail(p)) == 1, f"and it is no attempt: {trail(p)}", r)
+    r, out = search(p, MARK + "int f(void) { PERM_IGNORE(int WRONG_now;) return 1; }\n")
+    expect(r.returncode != 0 and "choice point" in r.stderr, "PERM_IGNORE is no choice point either", r)
+    expect(builds() == built, "nothing is built for it", r)
+
+
+def test_search_marks_a_second_run_of_an_unchanged_template_a_repeat(base):
+    p, builds = counting_project(base)
+    r, first = search(p, TWINS)
+    expect(first is not None and "repeat" not in first, f"the first run builds, so it is no repeat: {first}", r)
+    built, before = builds(), trail(p)
+    r, again = search(p, TWINS)
+    expect(again is not None and again.get("repeat") is True, f"the second run should be marked a repeat: {again}", r)
+    expect(builds() == built and again["counts"]["compiled"] == 0, "a repeat builds nothing", r)
+    expect(again["best"] == first["best"], "a repeat still returns its summary", r)
+    expect(trail(p) == before, f"a repeat adds no record to the check trail: {trail(p)}", r)
+
+
+def test_search_repeats_do_not_count_towards_stop_advice(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and "stop" not in out and "repeat" not in out, f"one real round: {out}", r)
+    for _ in range(2):
+        r, out = search(p, NEVER)
+        expect(out is not None and out.get("repeat") is True and "stop" not in out,
+               f"a repeat run gives no stop advice: {out}", r)
+    expect([e["by"] for e in trail(p)] == ["check", "search"], f"the repeats are no attempts: {trail(p)}", r)
+    r, out = search(p, wide(2))
+    expect(out is not None and "repeat" not in out and "no new best" in out.get("stop", ""),
+           f"a second real round with no new best score still carries stop advice: {out}", r)
+
+
+def test_search_round_that_builds_one_new_candidate_is_no_repeat(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and out["counts"]["compiled"] == 4, f"the first round builds its four candidates: {out}", r)
+    r, out = search(p, NEVER_AND_MORE)
+    expect(out is not None and out["counts"]["cache_hits"] == 4 and out["counts"]["compiled"] == 2,
+           f"four candidates come from the cache and two are built: {out and out['counts']}", r)
+    expect("repeat" not in out, f"a round that builds a candidate is no repeat: {out}", r)
+    expect([e["by"] for e in trail(p)] == ["check", "search", "search"], f"it counts as an attempt: {trail(p)}", r)
+    expect("no new best" in out.get("stop", ""), f"and towards stop advice, as before: {out}", r)
+
+
+def test_search_repeat_starts_no_background_search(base):
+    p = search_project(base, config={"build": PY + ' "{tools}/bare_build.py" "{source}" "{obj}"'},
+                       files={"tools/bare_build.py": BARE_BUILD_PY})
+    template = wide(8, ("/* {c}0 */", "/* {c}1 */"))
+    tune(p, workers=1, plateau_compiles=8)
+    r, out = search(p, template)
+    expect(out is not None and out["end"] == "plateau" and out["counts"]["compiled"] == 9,
+           f"the first round ends on a plateau after its sweep: {out}", r)
+    time.sleep(2)  # the time the model took: what a background search would have to run in
+    tune(p, workers=1, plateau_compiles=8, background=1)
+    try:
+        r, out = search(p, template)
+        expect(out is not None and out["end"] == "plateau" and out.get("repeat") is True,
+               f"the same template ends on the same plateau, from the cache: {out}", r)
+        expect("continues_s" not in out and not background_folder(p).exists(),
+               f"a repeat leaves no background search: {out}", r)
+    finally:
+        stop_background(p)
 
 
 # ---------- template search: background search ----------

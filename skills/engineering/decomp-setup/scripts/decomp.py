@@ -2177,15 +2177,28 @@ def closest_solved(t, n=SIMILAR_N):
     """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
 
     A function's source is its unit's text from its marker to the next marker. One that cannot be
-    read is left out, as is every one when the ticket's own expected bytes are missing.
+    read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
+    are the tickets the matches ledger names, so no other ticket file is read: a project's open
+    tickets can outnumber its matched ones by thousands.
     """
+    try:
+        solved = list(dict.fromkeys(m["ticket"] for m in records("matches.jsonl")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    solved = [tid for tid in solved if isinstance(tid, str) and tid != t["id"] and ticket_path(tid).is_file()]
+    if not solved:
+        return []
     try:
         mine = grams((ROOT / t["expected"]).read_bytes())
     except OSError:
         return []
     scored = []
-    for o in all_tickets():
-        if o["status"] not in MATCHED or o["id"] == t["id"]:
+    for tid in solved:
+        try:
+            o = read_ticket(tid)[0]
+        except (OSError, ValueError, KeyError):
+            continue
+        if o["status"] not in MATCHED:  # a match that has since regressed is no model
             continue
         try:
             g = grams((ROOT / o["expected"]).read_bytes())
@@ -3986,6 +3999,7 @@ class Memo:
         self.seen, self.objects = {}, set()  # seen: source key to its entry, or to an Event while a worker builds it
         self.src_hits = self.cache_hits = self.object_hits = 0
         self.unhashed = 0  # scored entries that carry no object key: with `function` hashing, no `function_sha256`
+        self.unseen = 0  # candidates this round had to build or refuse itself: neither the round nor the cache held them
 
     def key(self, kind, data):
         h = hashlib.sha256(self.ctx.encode() + b"\0" + kind.encode() + b"\0")
@@ -4028,6 +4042,8 @@ class Memo:
                     self.src_hits += 1
                     return e, "repeat", False
             e.wait()
+        with self.lock:
+            self.unseen += 1
         try:
             e = self.fresh(text, worker)
         except BaseException:
@@ -4078,6 +4094,11 @@ class Memo:
         """
         with self.lock:
             return self.hashing == "function" and not self.objects and self.unhashed > 0
+
+    def repeat(self):
+        """Whether the round added nothing: every candidate it tried was served from the result cache."""
+        with self.lock:
+            return self.cache_hits > 0 and self.unseen == 0
 
     def counts(self):
         """What the layers did, for the summary. The two object counts are None when nothing was hashed (see blind)."""
@@ -4671,6 +4692,7 @@ def record_round(t, template, best, results, count=True):
 
     The round carries the category of the attempt before it: it worked on that difference.
     count is False for a match the round's background search found: the round is already counted.
+    It is False too for a repeat, a round served wholly from the result cache: it is no attempt.
     """
     category = trail(t["id"])[-1]["category"]
     kept = {"unix": now(), "category": category, "best": None, "result": results[0]["result"] if results else "build-fail",
@@ -4758,6 +4780,10 @@ def cmd_search(a):
     text = source_text(data)
     state = search_dir(t["id"])
     written = parse_template(text)
+    if not written.choices:
+        die("the template holds no choice point, so there is nothing to search: a template needs at least one "
+            "(PERM_GENERAL(a, b, ...) or another PERM_ macro with two or more alternatives). "
+            "A plain compile is `check`'s job. Nothing was built.")
     template = with_learned(written, read_learned(state))  # a kept choice point starts from what the last round learned
     parents = carried_parents(state, template)
     searched = template  # what the round learned is judged against its own priors, without the similar-function bonus
@@ -4830,7 +4856,8 @@ def cmd_search(a):
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
-    record_round(t, template, best, results)
+    repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
+    record_round(t, template, best, results, count=not repeat)
     save_learned(state, learned_weights(searched, results, written))
     winner = None
     if end == "match":
@@ -4842,7 +4869,9 @@ def cmd_search(a):
                   stop_advice(trail(t["id"])))
     if found:
         out["background"] = found["report"]
-    budget = start_background(t, end, counts, results, ceiling, settings, pool.id)
+    if repeat:
+        out["repeat"] = True
+    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings, pool.id)
     if budget:
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     print(json.dumps(out))
