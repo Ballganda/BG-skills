@@ -3388,8 +3388,8 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     r, out = search(p, NEVER)
     expect(out["counts"]["call_s"] >= out["counts"]["wall_s"], f"call_s is no smaller than wall_s: {out['counts']}", r)
     got = perf_log(p)
-    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 2 and got[5]["block"] == 2,
-           f"a warm cache adds one block record and no calibration: {got}", r)
+    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 1 and got[5]["repeat"] is True
+           and got[5]["block"] == 2, f"a warm cache adds one block record (a repeat) and no calibration: {got}", r)
 
 
 def test_search_perf_log_is_never_committed(base):
