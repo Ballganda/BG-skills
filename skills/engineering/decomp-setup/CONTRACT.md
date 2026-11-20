@@ -39,13 +39,13 @@ Each heading carries one tag. `[needs IDENTIFY]` means its answers depend on the
 - The denominator: in-scope bytes and functions as `inventory` counts them.
 
 ## Matching [needs IDENTIFY]
-- Diff adapter and the tool under it.
+- Diff adapter and the tool under it, and the address width that tool prints (8 or 16 digits). Where template search is allowed: that its result carries `first_differ` and `function_sha256`.
 - Link adapter and the linker flags under it, or the link marked unavailable: the reason (the format or linker cannot place raw blocks at fixed positions, or cannot reproduce the headers), the evidence for it, and that `decomp.json`'s `link_unavailable` holds the reason. There is no patched-original fallback.
 - Relocation policy: the default in `decomp-standards`' layout, or a named departure with its ADR.
 - Symbol map: what `inventory` seeds it with for this format, and the relocation types the `diff` adapter resolves.
 - Marker comment form: `// @decomp <id>`, or `/* @decomp <id> */` where the language has no line comment.
 - Fakematch rule: `forbidden`, or `allowed with a fakematch: comment` (ADR).
-- Permuter: allowed or not, and if allowed, its output is fakematch-governed.
+- Template search: allowed or not. Allowed covers natural choices, plus steering only where the fakematch rule allows it. `decomp.json`'s `template_search` (true or false) and `fakematch` (`forbidden` or `allowed`) mirror this line and the fakematch line, so the tool can enforce them.
 
 ## Models [independent]
 | Tier | Writer model | Attempt budget |
@@ -66,5 +66,6 @@ Each heading carries one tag. `[needs IDENTIFY]` means its answers depend on the
 
 ## Pipeline check [needs IDENTIFY]
 - The link from raw blocks alone, with no source unit, reproduces the original's hash (or the link is marked unavailable above).
+- Where template search is allowed: for a build known to differ, the diff result carries `first_differ` and `function_sha256`, and the report holds more than its header line.
 - Each check, the command, its result, and the Unix time it passed.
 ```

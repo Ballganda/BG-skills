@@ -1,6 +1,6 @@
 ## What it does
 
-`decomp-match` takes one decomp ticket and writes the source for its function, so that the contract's compiler, with the contract's flags, emits the original function's bytes exactly. It is the **writer**: it reads the original's disassembly, writes the function into its unit's source file, and loops on the project tool's build-and-diff until the bytes match or the attempt budget for the ticket's size tier runs out.
+`decomp-match` takes one decomp ticket and writes the source for its function, so that the contract's compiler, with the contract's flags, emits the original function's bytes exactly. It is the **writer**: it reads the original's disassembly, writes the function into its unit's source file, and loops on the project tool's build-and-diff until the bytes match or the attempt budget for the ticket's size tier runs out. When only small differences are left, it stops sending single changes and writes one **template**: the function with choice points, each listing alternative spellings, which the tool tries all at once.
 
 The disassembly decides the source, not what the function appears to do. A readable function with the same behaviour is a failed attempt, and every type, field, callee and calling convention it uses has to come from the shared headers, the symbol map, or an instruction in the original. When one is missing or contradicts the evidence, it stops and reports a `gap` instead of declaring a local stand-in, because a local copy would hide the gap from every other function that needs the same declaration.
 
@@ -23,17 +23,33 @@ A decomp project built by [decomp-setup](./decomp-setup.md) and filled by [decom
 
 ## The loop: first difference, one change
 
-Each pass runs `python tools/decomp.py check <id>` and reads one result:
+Each pass runs `python tools/decomp.py check <id> --category <c>`, naming its reading of the first difference, and reads one result:
 
 | Result | What it means | What the writer does |
 | --- | --- | --- |
 | Exit 6, `ENVIRONMENT:` | The machine differs from the contract, this edition holds the function differently, or the unit's compiler is not provisioned | Stops: no source change fixes the machine |
 | `build-fail` | The source does not compile | Fixes its own source, or stops with a `gap` if a shared declaration is at fault |
 | `guardrail` | The scan quoted a line that breaks a rule | Rewrites it in plain form; an attribute the original needed is a `gap` for the contract |
-| `differ` | Bytes differ | Finds the **first differing instruction**, ranks two or three hypotheses, makes one change |
+| `differ` | Bytes differ | Finds the **first differing instruction**, ranks two or three hypotheses, makes one change, or a template round when the result says search is open |
 | `bytes-match` | Every byte matches locally | Commits and reports |
 
 The leading idea is **one change per iteration against the first difference**. Later differences are often echoes of the first, so chasing them wastes attempts. A change that does not lower `differ_bytes` is reverted unless it moves the first difference later. [MISMATCH.md](../../skills/engineering/decomp-match/MISMATCH.md) maps what the first difference looks like to its category and the source levers that move it.
+
+## The template step
+
+The tool decides when it opens, from the category the writer reported and the ticket's attempts so far. It stays closed for TINY tickets and for categories that need a stop or a report, and opens for register allocation, statement order, expression shape, or three attempts without progress.
+
+| Single change | Template round |
+| --- | --- |
+| One hypothesis per attempt | The ranked hypotheses as choice points, each with a label, a kind, and a likelihood |
+| The writer reads one diff | The tool compiles the candidates and returns the closest, one diff window, and counts |
+| One attempt | Still one attempt |
+
+A search result is never a match claim. The winner is copied into the unit and still goes through `check`, the coordinator's `verify`, and the audit. A round that makes no progress ends the ticket's search: the writer reports it as stuck. Running an unchanged template again is not a round: the tool marks its summary `repeat`, counts no attempt, and gives no advice to stop on it. A file with no choice point is refused as a template, since a plain compile is `check`'s job.
+
+When two places must change together (a loop header and the expression that depends on it), the writer writes them as one choice: a paired `PERM_VAR`, whose second place follows the pick of the first and adds no candidates. The writer marks a construct written only to steer the compiler with a `steer` tag, so the tool prefers a natural match, and keeps a `fakematch:` comment on any steering line the winner needs. After a round it reads the summary's effects, inert points, pairs, project history line, and any advice to stop, and edits the template by label.
+
+Between rounds the tool keeps searching the last template in the background, while the writer reads the summary and writes the next one. The next round reports what that found, and when it found a match, returns it in place of searching the new template.
 
 ## Common questions
 
@@ -51,6 +67,7 @@ Nothing in the source. Exit 6 always means the machine, not the code: the target
 
 ## It's working if
 
+- A template, when used, comes from the ranked hypotheses, and the next round edits it by label rather than starting over.
 - Each attempt's note names one change and what it did to the byte count, and no note repeats an approach an earlier note already tried.
 - `differ_bytes` falls across attempts, or the first difference moves later.
 - The branch touches one file, the unit source, plus at most an added include.

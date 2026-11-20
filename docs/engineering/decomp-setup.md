@@ -37,9 +37,11 @@ Every tool the contract names is pinned in a frozen `toolchain.json`: its exact 
 - **You install it**, and the manifest records where.
 - **The agent downloads and unpacks it** into the project, after you approve the exact files and sources. Size and SHA-256 are checked on every download.
 
-`decomp.py doctor` then has to pass. It checks the target's edition, each host prerequisite, and each tool's files and banner, and the tool runs it before every build or comparison afterwards. Exit 6 always means the machine differs from the contract, never the source. The contract itself records nothing about this machine's current state, such as what is installed, logged in, or missing: that comes from `doctor` and the tool at run time, because a frozen contract would go stale on it.
+`decomp.py doctor` then has to pass. It checks the target's edition, each host prerequisite, and each tool's files and banner, and the tool runs it before every build or comparison afterwards. Exit 6 always means the machine differs from the contract, never the source. `doctor` also prints the contract's two codegen rules as `decomp.json` holds them, `template search: allowed` or `not allowed` and `fakematch: forbidden` or `allowed`, so the tool can enforce them. The contract itself records nothing about this machine's current state, such as what is installed, logged in, or missing: that comes from `doctor` and the tool at run time, because a frozen contract would go stale on it.
 
-The pipeline check proves the system works before anything depends on it, in a throwaway clone so nothing reaches the real records. A stub function has to build and match its own bytes, and differ from a real function. The scan has to refuse inline assembly, an unlisted pragma, and the other hidden-directive forms. The inventory has to account for the target's code. A link made from raw blocks alone has to reproduce the original's hash. Where the format cannot be linked whole, the contract records why instead.
+The `diff` adapter writes a report with one line per instruction, on 32-bit and 64-bit targets alike (a disassembler prints 8-digit or 16-digit addresses by target). It may also print two fields that only template search reads: `first_differ`, the byte offset of its first difference, which breaks ties between equally close candidates and centres the diff window, and `function_sha256`, a hash of the function's bytes, which lets search skip candidates that compile to the same code and freeze choices that change nothing. Where your contract allows template search, setup writes an adapter that prints both. Where it does not, both stay optional.
+
+The pipeline check proves the system works before anything depends on it, in a throwaway clone so nothing reaches the real records. A stub function has to build and match its own bytes, and differ from a real function. Where template search is allowed, one more box checks that differing build: the diff result has to carry both fields, and the report has to hold more than its header line. The scan has to refuse inline assembly, an unlisted pragma, and the other hidden-directive forms. The inventory has to account for the target's code. A link made from raw blocks alone has to reproduce the original's hash. Where the format cannot be linked whole, the contract records why instead.
 
 ## Common questions
 
@@ -49,7 +51,11 @@ The pipeline check proves the system works before anything depends on it, in a t
 
 **My project was set up with older skills. How do I bring it up to date?**
 
-Run `/decomp-setup` on the project folder. It diffs the project's `tools/decomp.py` against the skill's copy; identical means current, and it stops. A difference means an upgrade: a fresh copy of the tool and whatever contract files the newer skills require (the manifest, rewired adapters, the link adapter), on a `c/<slug>` branch with an ADR, with the pipeline check run again. The upgrade keeps every decision the contract already made: same compiler, flags, scope, and policies. You are the only trigger. No other skill compares the copies or warns you.
+Run `/decomp-setup` on the project folder. It diffs the project's `tools/decomp.py` against the skill's copy; identical means current, and it stops. A difference means an upgrade: a fresh copy of the tool and whatever contract files the newer skills require (the manifest, rewired adapters, the link adapter, the machine-readable template-search and fakematch keys, read from an old contract's permuter line, and, where template search is allowed, a diff adapter that serves it), on a `c/<slug>` branch with an ADR, with the pipeline check run again. The upgrade keeps every decision the contract already made: same compiler, flags, scope, and policies. You are the only trigger. No other skill compares the copies or warns you.
+
+**A template round's summary says object dedupe is off, or that the diff report holds no instruction diff. What do I do?**
+
+Run `/decomp-setup` on the project. Those two notice lines are the signs that the project's diff adapter predates what template search needs: it prints no `function_sha256`, or its report is a header line only (typically an adapter that reads 8-digit addresses on a 64-bit target, where the disassembler prints 16). The upgrade rewrites the adapter as a contract change with its ADR, and the pipeline check proves the result. Search still runs without the fix, but it retries candidates that compile to the same code and shows you no diff to plan the next template on.
 
 **I want to change a flag (or the scope) after tickets exist. Will that wipe my matches?**
 
@@ -69,6 +75,7 @@ If its code is the same, the contract can accept it as another edition, recognis
 - Compiler and flag questions come with evidence and a confidence from the identification, not a request for you to know them.
 - You approve exact download sources and hashes before anything is fetched.
 - `DECOMP.md` lists every pipeline check box with the command that ran it, its output, and a Unix time.
+- Where template search is allowed, a template round's summary shows several diff lines in its window, and no notice about object identity or an empty diff report.
 - A second `/decomp-setup` on the same, current project says it is current and changes nothing.
 
 ## Where it fits

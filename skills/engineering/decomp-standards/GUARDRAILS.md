@@ -8,7 +8,7 @@ The project tool (`tools/decomp.py`) enforces every rule a script can check; the
 4. **Bytes straight from the compiler.** No editing objects, no post-processing, no linker or section tricks that place bytes.
 5. **Evidence-backed declarations.** Every field, type, signature, and calling convention comes from the shared headers or from evidence in the binary, and every symbol's address from the symbol map. When one is missing or wrong, stop and report a `reference-gap`: the shared fix belongs to `decomp-reference`, never to a local copy in the unit file.
 6. **The tool records matches.** Statuses, ledger lines, and match claims come only from `tools/decomp.py`. A report cites the attempt id the tool printed.
-7. **Codegen steering is declared.** A construct written only to steer the compiler (a dummy variable, a needless `volatile`, permuter output) is allowed only as far as the contract's fakematch rule allows, and carries a `fakematch: <why>` comment.
+7. **Codegen steering is declared.** A construct written only to steer the compiler (a dummy variable, a needless `volatile`, a template-search alternative tagged as steering) is allowed only as far as the contract's fakematch rule allows, and carries a `fakematch: <why>` comment.
 8. **Scope belongs to the user.** What is in scope, the compiler, and the flags change only through `/decomp-setup`, recorded in a dated ADR.
 
 ## Auditor checklist
