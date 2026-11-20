@@ -816,6 +816,10 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 #### A block record
 
 - `unit`, `round`, `block`.
+- `repeat`: `true` on the record of a repeat, a round served wholly from the result cache; a counted round's record has no such field.
+  - A repeat's `round` is the number of the last counted round, the one it repeated.
+  - A repeat takes a `block` number like any block, and its `model_latency_s` is as measured.
+  - A repeat does not write the ticket's round-end time, so the next round's `model_latency_s` runs from the last counted round.
 - `call_s`: the seconds of the whole `search` call up to this record, calibration included.
   - It is never smaller than `wall_s`.
   - It is a little under the summary's `call_s`, which is taken at the call's end.

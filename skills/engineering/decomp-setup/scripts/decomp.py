@@ -4376,8 +4376,12 @@ def perf_notices(flags, past):
     return out
 
 
-def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no):
-    """The performance log's record of one finished block."""
+def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no,
+                 repeat=False):
+    """The performance log's record of one finished block.
+
+    A repeat's record carries `repeat: true` and the number of the last counted round it repeated.
+    """
     ms = sorted(round(x * 1000, 2) for x in launcher.samples)
     workers, wall = counts["workers"], perf["wall"]
     stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
@@ -4386,7 +4390,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     worker_s = tuning.get("worker_s") or workers * wall
     return {
         "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
-        "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
+        **({"repeat": True} if repeat else {}), "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
         "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
         "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
         "starved_frac": tuning.get("starved_frac", 0.0),
@@ -4999,16 +5003,17 @@ def cmd_search(a):
             return background.ended(end, best)
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
         counts.update(call_s=call_seconds(called, counts))
+        repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
+        rounds = sum(r["by"] == "search" for r in trailed)  # a repeat adds none: it keeps the last counted round's number
         notices = log_block(compiler, block_record(
             t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
-            trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
+            trailed[-1]["differ_bytes"] if trailed else None, rounds if repeat else rounds + 1, len(mine) + 1, repeat))
     finally:
         pool.close()
         shutil.rmtree(scratch, ignore_errors=True)
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
-    repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
     record_round(t, template, best, results, count=not repeat)
     save_learned(state, learned_weights(searched, results, written))
     winner = None
@@ -5028,7 +5033,8 @@ def cmd_search(a):
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
     print(json.dumps(out))
-    (state / "ended").write_text(str(time.time()), encoding="utf-8")
+    if not repeat:  # a repeat is no round: the next block's ceiling is measured from the last counted round
+        (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
 
 def search_detail(t, code):
