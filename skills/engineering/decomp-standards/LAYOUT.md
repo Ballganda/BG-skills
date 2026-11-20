@@ -681,7 +681,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - Otherwise, or when no line holds it, it is the report's first lines.
   - A report line longer than 120 characters is cut inside that width and ends in ` ...`, so a line without the mark is whole.
   - When the report holds fewer than 2 lines, `notice` gains one line.
-  - That line says the diff report holds no instruction diff and that the fix is the `diff` adapter (see its contract under [Adapters](#adapters)).
+  - In full, that line starts with `no-instruction-diff:`, says the diff report holds no instruction diff, and says the fix is the `diff` adapter (see its contract under [Adapters](#adapters)).
+  - Once the ticket has read it in full, the line is the name `no-instruction-diff` alone (see [Adapter notices](#adapter-notices)).
 - `failure`: the end of the first failure log (only when none was scored).
 - `effects`: the choice points that change the score, at most 8, largest first, each with its alternatives' change in differing bytes against the baseline (`{"B": {"B1": -2}}`).
 - `inert`: the labels of the frozen choice points.
@@ -763,7 +764,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - No choice point is frozen as inert.
   - The `plateau` rule rests on the best score alone.
 - The summary's `notice` list says so in one line.
-- That line names `function_sha256`, the diff adapter, and `/decomp-setup`'s upgrade as the fix (a contract change).
+- In full, that line starts with `no-object-identity:` and names `function_sha256`, the diff adapter, and `/decomp-setup`'s upgrade as the fix (a contract change).
+- Once the ticket has read it in full, the line is the name `no-object-identity` alone (see [Adapter notices](#adapter-notices)).
 - No identity is derived from the score or the report in its place.
 
 ### Not a match claim
@@ -781,6 +783,24 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - A `check` records the `--category` it was given, `build-fail` when the build failed and none was given, and no category on a match.
 - A template round records its best candidate's `result` and `differ_bytes`, and the category of the attempt before it.
 - A run that exits 6, a refused `check` or `search`, and a `search` round marked `repeat`, add nothing.
+
+### Adapter notices
+
+Two notices in the summary's `notice` list come from the `diff` adapter: `no-object-identity` and `no-instruction-diff`.
+
+- Each has a full form and a name form.
+- The full form is the sentence, starting with the name, and carrying the fix.
+- The name form is the name alone: it means the notice stated earlier in the ticket still holds.
+- The first round of a ticket in which a condition holds states its notice in full.
+- A later round of the same ticket in which it holds names it.
+- A round in which a condition does not hold clears that notice's record, so the next round that meets it states it in full.
+- `release` clears both records with the ticket's other round state.
+- Another ticket starts with no record, so it reads each sentence in full.
+- A record is kept on this machine only, with the ticket's round state.
+- A repeat round states by the same rule and changes no record.
+- The summary of a collected background match follows the same rule.
+- The summary cap never drops a notice, in either form.
+- The speed notices are no part of this: each shows once per streak (see [Flags](#flags)).
 
 ### Performance log
 
@@ -854,7 +874,7 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - Every raised flag is logged.
 - A flag raised in 3 blocks in a row is shown to the user once per streak, in the search summary's `notice` list.
 - A shown flag comes with its measured cost and the fix only the user can make, where there is one.
-- The `no-object-identity` line (see [Result cache](#result-cache)) is no flag: it is shown in every round it holds.
+- The `no-object-identity` line (see [Result cache](#result-cache)) is no flag: it is shown in every round it holds, in full or by name (see [Adapter notices](#adapter-notices)).
 
 ### The gate
 

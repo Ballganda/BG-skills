@@ -2591,7 +2591,7 @@ def test_search_reads_object_identity_as_unknown_without_function_sha256(base):
     expect(c["compiled"] == 2 and out["inert"] == [] and "stop" not in out,
            f"equal scores and reports freeze no choice as inert: {out}", r)
     r, again = search(p, COMMENTED)
-    expect(again["counts"]["unique_objects"] is None and any("function_sha256" in n for n in again.get("notice", [])),
+    expect(again["counts"]["unique_objects"] is None and any(n.startswith("no-object-identity") for n in again.get("notice", [])),
            f"a round served from the cache knows no more: {again}", r)
 
 
@@ -2602,6 +2602,117 @@ def test_search_counts_objects_and_gives_no_identity_notice_when_objects_are_sta
     expect(c.get("hashing") == "object" and isinstance(c["unique_objects"], int) and isinstance(c["object_hits"], int),
            f"stable objects are hashed whole: {out}", r)
     expect(not any("function_sha256" in n for n in out.get("notice", [])), f"no notice is due: {out.get('notice')}", r)
+
+
+# The adapter notices: a fake compiler that stamps its objects, and a diff that prints no function_sha256 while
+# the file `nosha` exists beside the tools, with a one-line report. Both notices hold in every such round.
+NOTICE_DIFF_PY = COUNT_DIFF_PY.replace("import hashlib", "import os, hashlib").replace(
+    'if "NOSHA" in sys.argv[3:]:', "if os.path.exists(sys.argv[3]):")
+IDENTITY_FULL, INSTRUCTION_FULL = "no-object-identity: ", "no-instruction-diff: "
+NOTICE_NAMES = ["no-object-identity", "no-instruction-diff"]
+
+
+def notice_project(base):
+    log, flag = Path(base) / "builds.log", Path(base) / "nosha"
+    flag.write_text("", encoding="utf-8")
+    build = PY + f' "{{tools}}/count_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}" STAMP'
+    diff = PY + f' "{{tools}}/count_diff.py" "{{obj}}" "{{report}}" "{flag.as_posix()}"'
+    p = search_project(base, config={"build": build, "diff": diff}, files={
+        "tools/count_build.py": COUNT_BUILD_PY, "tools/count_diff.py": NOTICE_DIFF_PY, **second_ticket("open", STUCK2)})
+    return p, flag
+
+
+STUCK2 = f"// @decomp {TID2}\nint g(void) {{ int WRONG_now; return 2; }}\n"
+
+
+def notice_template(tid, n):
+    """A template that never matches; n makes its sources new, so that no round is served from the cache."""
+    return f"// @decomp {tid}\nint f(void) {{ PERM_GENERAL(int WRONG_a;, int WRONG_a; /* {n} */) return 1; }}\n"
+
+
+def notice_round(p, n, tid=TID):
+    path = p.base / f"template-{tid}.c"
+    path.write_text(notice_template(tid, n), encoding="utf-8")
+    r = p.run("search", tid, str(path))
+    try:
+        return r, json.loads(r.stdout.splitlines()[0])
+    except (ValueError, IndexError):
+        return r, None
+
+
+def adapter_notices(out):
+    return [n for n in out.get("notice", []) if n.startswith(tuple(NOTICE_NAMES))]
+
+
+def test_search_states_the_adapter_notices_in_full_once_per_ticket_then_by_name(base):
+    p, flag = notice_project(base)
+    r, first = notice_round(p, 1)
+    expect(first is not None and [n.split(":")[0] for n in adapter_notices(first)] == NOTICE_NAMES
+           and all(len(n) > 100 for n in adapter_notices(first)),
+           f"round 1 states both notices in full, each starting with its name: {first and first.get('notice')}", r)
+    forget_latency(p)
+    r, second = notice_round(p, 2)
+    expect(second is not None and second["counts"]["compiled"] > 0 and not second.get("repeat"),
+           f"round 2 is no repeat: {second and second['counts']}", r)
+    expect(second.get("notice") == NOTICE_NAMES, f"round 2 names the two conditions: {second.get('notice')}", r)
+    fuller = len(json.dumps(dict(second, notice=first["notice"])))  # round 2 with round 1's sentences
+    expect(len(json.dumps(second)) + 350 <= fuller, f"round 2 is far shorter: {len(json.dumps(second))} against {fuller}", r)
+
+
+def test_search_states_the_adapter_notices_in_full_for_each_ticket(base):
+    p, flag = notice_project(base)
+    r, out = notice_round(p, 1)
+    expect(out is not None and len(adapter_notices(out)[0]) > 100, "the first ticket reads them in full", r)
+    r = p.run("claim", TID2, "--by", "w2")
+    expect(r.returncode == 0, "the second ticket can be claimed", r)
+    r = p.run("check", TID2, "--category", "register-allocation")
+    r, other = notice_round(p, 1, TID2)
+    expect(other is not None and [n.split(":")[0] for n in adapter_notices(other)] == NOTICE_NAMES
+           and all(len(n) > 100 for n in adapter_notices(other)),
+           f"the second ticket reads them in full too: {other and other.get('notice')}", r)
+
+
+def test_search_states_a_notice_in_full_again_when_it_returns_after_a_round_without_it(base):
+    p, flag = notice_project(base)
+    notice_round(p, 1)
+    flag.unlink()  # the diff adapter now prints function_sha256: the identity notice does not hold
+    forget_latency(p)
+    r, mid = notice_round(p, 2)
+    expect(mid is not None and NOTICE_NAMES[0] not in str(mid.get("notice")),
+           f"no identity notice while the hash is printed: {mid and mid.get('notice')}", r)
+    flag.write_text("", encoding="utf-8")
+    forget_latency(p)
+    r, back = notice_round(p, 3)
+    notices = adapter_notices(back) if back else []
+    expect(len(notices) == 2 and notices[0].startswith(IDENTITY_FULL) and len(notices[0]) > 100 and notices[1] == NOTICE_NAMES[1],
+           f"the identity notice is in full again, the unbroken one by name: {back and back.get('notice')}", r)
+
+
+def test_release_clears_what_the_ticket_has_stated_of_the_adapter_notices(base):
+    p, flag = notice_project(base)
+    p.run("claim", TID, "--by", "w1")
+    notice_round(p, 1)
+    r = p.run("release", TID)
+    expect(r.returncode == 0, "release passes", r)
+    r = p.run("claim", TID, "--by", "w1")
+    expect(r.returncode == 0, "the ticket can be claimed again", r)
+    forget_latency(p)
+    r, out = notice_round(p, 2)
+    expect(out is not None and [n.split(":")[0] for n in adapter_notices(out)] == NOTICE_NAMES
+           and all(len(n) > 100 for n in adapter_notices(out)),
+           f"the next round states both in full: {out and out.get('notice')}", r)
+
+
+def test_a_repeat_round_changes_no_record_of_the_adapter_notices(base):
+    p, flag = notice_project(base)
+    notice_round(p, 1)
+    r, again = notice_round(p, 1)
+    expect(again is not None and again.get("repeat") is True and again.get("notice") == NOTICE_NAMES,
+           f"a repeat of a round that stated them names them: {again and again.get('notice')}", r)
+    forget_latency(p)
+    r, next_round = notice_round(p, 2)
+    expect(next_round is not None and next_round.get("notice") == NOTICE_NAMES,
+           f"the round after names them too: {next_round and next_round.get('notice')}", r)
 
 
 # ---------- check trail and the template-search gate ----------

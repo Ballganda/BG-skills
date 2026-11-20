@@ -1115,6 +1115,8 @@ def cmd_release(a):
         accepted = "claimed" if a.to == "blocked-reference" else "claimed or blocked-reference"
         die(f"{a.id} is {t['status']}; release needs {accepted}")
     discard_background(a.id)
+    with contextlib.suppress(OSError):
+        (search_dir(a.id) / NOTICES_FILE).unlink()  # the ticket's next round states each adapter notice in full
     print(f"{a.id} -> {move(a.id, event)}")
 
 
@@ -1810,8 +1812,9 @@ WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
 WINDOW_WIDTH = 120  # characters kept of each of those lines
 CUT_MARK = " ..."  # ends a window line that was cut, inside the width
 # What the summary says when the best candidate's report holds fewer than 2 lines: a header at most.
-EMPTY_REPORT = ("the diff report holds no instruction diff, so the window shows nothing to plan the next template on: "
-                "the fix is a diff adapter whose report holds one line per instruction")
+EMPTY_NAME = "no-instruction-diff"  # the name that starts its sentence, and stands alone once the ticket has read it
+EMPTY_REPORT = (f"{EMPTY_NAME}: the diff report holds no instruction diff, so the window shows nothing to plan the next "
+                "template on: the fix is a diff adapter whose report holds one line per instruction")
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
 CHOICE_CODE = re.compile(r"([A-Za-z_]+)(\d+)")
@@ -3986,8 +3989,16 @@ def insights(template, results, best):
     return out
 
 
-def summary(template, end, best, counts, winner, results=(), history_line="", notices=(), stop=""):
-    """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
+def empty_report(best, winner):
+    """Whether the round's summary carries the empty-report notice: the best candidate's report holds under 2 lines."""
+    return not winner and "score" in best and len(best["window"]) < 2  # it holds 2 lines or more whenever the report does
+
+
+def summary(template, end, best, counts, winner, results=(), history_line="", notices=(), stop="", stated=()):
+    """The round as the writer reads it: one JSON object, held under the token cap. It never holds source.
+
+    stated names the adapter notices the ticket has already read in full: the empty-report notice is then its name alone.
+    """
     out = {"end": end, "best": None, "counts": counts}
     if history_line:
         out["history"] = history_line
@@ -3999,8 +4010,8 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
         out["winner"] = str(winner)
     elif "score" in best:
         out["window"] = list(best["window"])
-        if len(out["window"]) < 2:  # the window holds 2 lines or more whenever the report does
-            out["notice"] = out.get("notice", []) + [EMPTY_REPORT]
+        if empty_report(best, winner):
+            out["notice"] = out.get("notice", []) + [EMPTY_NAME if EMPTY_NAME in stated else EMPTY_REPORT]
     else:
         out["failure"] = best["failure"][-FAILURE_CHARS:]
     if results:
@@ -4220,9 +4231,24 @@ class Memo:
                 "unique_objects": None if blind else len(self.objects), "hashing": self.hashing}
 
 
-NO_IDENTITY = ("no-object-identity: object dedupe and the inert freeze are off, because the compiler's objects differ "
+IDENTITY_NAME = "no-object-identity"  # the name that starts its sentence, and stands alone once the ticket has read it
+NO_IDENTITY = (f"{IDENTITY_NAME}: object dedupe and the inert freeze are off, because the compiler's objects differ "
                "between two compiles and the diff adapter prints no function_sha256. The fix is a diff adapter that "
                "prints it: a contract change, made through /decomp-setup's upgrade.")
+NOTICES_FILE = "notices.json"  # in the ticket's round state: the adapter notices it has stated in full, while they hold
+
+
+def stated_notices(tid):
+    """The adapter notices the ticket's rounds have stated in full and that have held in every round since."""
+    names = read_json(search_dir(tid) / NOTICES_FILE).get("stated")
+    return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+
+
+def keep_notices(tid, held):
+    """Record that these notices held this round and are stated: a notice not held loses its record, so it is stated in full when it returns."""
+    state = search_dir(tid)
+    state.mkdir(parents=True, exist_ok=True)
+    (state / NOTICES_FILE).write_text(json.dumps({"stated": sorted(held)}), encoding="utf-8")
 
 
 PERF = "perf.jsonl"  # the performance log: this machine only, never committed, shared by every worktree
@@ -4993,7 +5019,7 @@ def cmd_search(a):
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)
         if background:  # it is no round: nothing is printed, counted or logged, and the next call collects it
-            return background.ended(end, best)
+            return background.ended(end, best, memo.blind())
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
         counts.update(call_s=call_seconds(called, counts))
         repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
@@ -5013,10 +5039,14 @@ def cmd_search(a):
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    if memo.blind():
-        notices = [NO_IDENTITY] + notices
+    held = ([IDENTITY_NAME] if memo.blind() else []) + ([EMPTY_NAME] if empty_report(best, winner) else [])
+    stated = stated_notices(t["id"])  # a notice is in full the first round of the ticket that holds it
+    if IDENTITY_NAME in held:
+        notices = [IDENTITY_NAME if IDENTITY_NAME in stated else NO_IDENTITY] + notices
+    if not repeat:  # a repeat states by the same rule and changes no record
+        keep_notices(t["id"], held)
     out = summary(template, end, best, counts, winner, results, history_line(past, category), notices,
-                  stop_advice(trail(t["id"])))
+                  stop_advice(trail(t["id"])), stated)
     if found:
         out["background"] = found["report"]
     if repeat:
@@ -5276,6 +5306,7 @@ class Background:
         self.began, self.waited, self.waiting_on = time.perf_counter(), 0.0, None
         self.lock, self.stopped = threading.Lock(), threading.Event()
         self.known, self.end, self.seed, self.until = set(), "stopped", None, None
+        self.blind = False  # whether its block had no object identity (see Memo.blind)
         self.job = own_job(token)
         # Every scratch folder of this process goes under one folder, which the call that kills it removes.
         self.scratch = tempfile.tempdir = tempfile.mkdtemp(prefix="decomp-background-")
@@ -5349,8 +5380,8 @@ class Background:
                                            "object": e.get("o")}) + "\n")
             self.results.flush()
 
-    def ended(self, end, best):
-        self.end, self.seed = end, best.get("seed")
+    def ended(self, end, best, blind=False):
+        self.end, self.seed, self.blind = end, best.get("seed"), blind
         self.say(f"ended: {end}, {round(self.waited, 1)} worker-seconds spent waiting on the foreground")
 
     def close(self):
@@ -5359,7 +5390,8 @@ class Background:
             self.results.close()
         if read_json(self.dir / "spawn.json").get("token") == self.token:
             with contextlib.suppress(OSError):
-                (self.dir / "done.json").write_text(json.dumps({"end": self.end, "seed": self.seed}), encoding="utf-8")
+                (self.dir / "done.json").write_text(json.dumps({"end": self.end, "seed": self.seed, "blind": self.blind}),
+                                                     encoding="utf-8")
         shutil.rmtree(self.scratch, ignore_errors=True)
 
 
@@ -5555,8 +5587,12 @@ def collect_background(t):
         report.update(end="match", natural=bool(natural), winner=str(winner))
         if natural:
             report["discarded"] = "the new template was not searched: the last one already matches with no steering"
+            notices = []  # the notice the search's own block held, by the rule of a foreground round (a match holds no empty report)
+            if done.get("blind") is True:
+                notices = [IDENTITY_NAME if IDENTITY_NAME in stated_notices(t["id"]) else NO_IDENTITY]
+            keep_notices(t["id"], [IDENTITY_NAME] if notices else [])
             found["summary"] = summary(template, "match", best, {"space": template.space(), "tried": len(results)},
-                                       winner, results)
+                                       winner, results, notices=notices)
             found["summary"]["background"] = report
     return found
 
