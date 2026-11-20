@@ -29,3 +29,5 @@ Agents are welcome to help, but you post the issue, so you own it:
 Run `npm run check` before a change is ready. It checks the skills and runs the skill-check, implement and Replies-line tests, and finishes in well under two minutes.
 
 Also run `npm run test:decomp` (the same as `python scripts/test-decomp.py`) when a change touches the decomp skills (`skills/engineering/decomp-*`) or `scripts/test-decomp.py`. A full run takes minutes, longer than the default 120-second tool timeout, so run it in the background; while iterating, pass a name filter (`python scripts/test-decomp.py <filter>`, a substring of the test names) to run only matching cases. Those tests are not in `npm run check`, so this is the one place the rule is stated.
+
+On Windows, never pass script text (Python, Node or shell) through a shell heredoc: Git Bash rewrites backslashes and quotes inside it, so the script fails or edits the wrong text. Write the script to a file with the file-writing tool and run that file.
