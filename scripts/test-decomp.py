@@ -3018,9 +3018,11 @@ def fresh(p, template):
 
 
 def seed_perf(p, n, **fields):
-    """Append n block records of the last record's compiler, as an earlier machine history, each with the given fields."""
-    compiler = perf_log(p)[-1]["compiler"]
-    base = {"kind": "block", "compiler": compiler, "ticket": "other", "compiled": 1000000, "wall_s": 1.0, "workers_end": 1,
+    """Append n block records of the last record's compiler and unit, as an earlier machine history, each with the
+    given fields. A `unit` among them makes it another unit's history."""
+    last = perf_log(p)[-1]
+    base = {"kind": "block", "compiler": last["compiler"], "unit": last["unit"], "ticket": "other",
+            "compiled": 1000000, "wall_s": 1.0, "workers_end": 1,
             "t_compile_p50_ms": 10, "t_compile_p95_ms": 12, "idle_frac": 0.0, "stage_ms": {"compile": 1000, "score": 1},
             "flags": [], "shown": []}
     with (p.root / ".decomp" / "perf.jsonl").open("a") as f:
@@ -3086,20 +3088,100 @@ def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
     expect(all("slow-compile" in x["flags"] for x in log[-5:]), f"every block is slow: {[x.get('flags') for x in log]}", r)
     expect(notices[0] is None and notices[1] is None, f"a flag raised once or twice is logged, not shown: {notices}", r)
     expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row")
-           and "percent fewer than the median" in notices[2][0] and "antivirus" in notices[2][0],
-           f"the third in a row is shown with its cost and the user's fix: {notices}", r)
+           and "percent fewer than the median" in notices[2][0] and "blocks of this unit" in notices[2][0]
+           and "antivirus" in notices[2][0],
+           f"the third in a row is shown with its cost against the unit's history and the user's fix: {notices}", r)
     expect(notices[3] is None and notices[4] is None, f"it is shown once: {notices}", r)
     expect("slow-compile" in log[-3]["shown"] and "slow-compile" not in log[-4]["shown"] + log[-2]["shown"], f"the record says what was shown: {log[-4:]}", r)
 
 
-def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
-    p = search_project(base)
+OTHER_UNIT = "src/fast.c"  # a unit with no heavy headers, in the seeded history
+
+
+def test_search_compares_a_block_with_its_own_unit_only(base):
+    # Every compile of this unit takes 0.5 s; the history holds another unit's blocks, far faster.
+    build = PY + ' "{tools}/wait_build.py" "{source}" "{obj}" "{tools}/built.log"'
+    p = search_project(base, config={"build": build}, files={"tools/wait_build.py": WAIT_BUILD_PY.replace("0.3", "0.5")})
     tune(p, workers=1)
     search(p, NEVER)
-    seed_perf(p, 3, t_compile_p50_ms=0.001)  # a median compile far below this block's p95
+    seed_perf(p, 8, unit=OTHER_UNIT, t_compile_p50_ms=0.001)
     r, out = fresh(p, NEVER)
     rec = perf_log(p)[-1]
-    expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
+    expect(rec["compiled"] >= 2 and "slow-compile" not in rec["flags"] and "io-jitter" not in rec["flags"],
+           f"a slow unit after a fast unit's blocks raises neither flag: {rec}", r)
+
+
+def test_search_raises_no_slow_compile_before_the_unit_has_enough_blocks(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)  # the unit's first block
+    seed_perf(p, 1)  # its second, far faster than the next
+    seed_perf(p, 8, unit=OTHER_UNIT)
+    r, out = fresh(p, NEVER)
+    rec = perf_log(p)[-1]
+    expect(rec["compiled"] >= 2 and "slow-compile" not in rec["flags"],
+           f"two earlier blocks of the unit are too few, however many another unit has: {rec}", r)
+
+
+# A fake compiler that takes 2 s over a source that holds a SLOW_ tag and no FAST_ tag, or 5 LATE_ tags.
+STARVE_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if ("SLOW_" in text and "FAST_" not in text) or text.count("LATE_") >= 5:
+    import time
+    time.sleep(2)
+open(obj, "w")''')
+STARVE_FILES = {"tools/search_build.py": STARVE_BUILD_PY}
+ONE_SLOW = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a0;, int SLOW_a1; int WRONG_a2;) "
+                   "PERM_GENERAL(int WRONG_b0;, int FAST_b1; int WRONG_b2;) return 1; }\n")
+
+
+def test_search_raises_io_jitter_when_p95_is_far_above_the_blocks_own_median_compile(base):
+    p = search_project(base, files=STARVE_FILES)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 8, t_compile_p50_ms=1000000)  # a history of compiles far slower than any of this block's
+    r, out = fresh(p, ONE_SLOW)  # 4 candidates, one of them 2 s slower than the rest
+    rec = perf_log(p)[-1]
+    expect("io-jitter" in rec["flags"], f"p95 over 3 times the block's own median raises io-jitter, whatever the history: {rec}", r)
+
+
+def test_search_raises_scorer_bound_for_a_slow_diff_adapter(base):
+    slow_diff = "import time\ntime.sleep(0.3)\n" + SEARCH_DIFF_PY
+    p = search_project(base, files={"tools/search_diff.py": slow_diff})
+    tune(p, workers=1)
+    r, out = search(p, NEVER)
+    rec = perf_log(p)[-1]
+    stage = rec["stage_ms"]
+    expect("scorer-bound" in rec["flags"], f"a diff adapter that takes most of the stage time is flagged: {rec}", r)
+    expect(stage["score"] < 0.05 * sum(stage.values()) and stage["compare"] > 0.2 * sum(stage.values()),
+           f"the time is the adapter's, not the in-process scoring's: {stage}", r)
+
+
+def paired(n, tag):
+    """A template of n choice points of 2 alternatives: the first's second alternative holds SLOW_, the others' hold tag."""
+    return MARK + "int f(void) { PERM_GENERAL(int WRONG_a0;, int SLOW_a1; int WRONG_a2;) " + " ".join(
+        f"PERM_GENERAL(int WRONG_{chr(98 + i)}0;, int {tag}_{chr(98 + i)}1; int WRONG_{chr(98 + i)}2;)" for i in range(n - 1)
+    ) + " return 1; }\n"
+
+
+def test_search_raises_expander_starved_when_workers_wait_while_candidates_remain(base):
+    p = search_project(base, files=STARVE_FILES)
+    tune(p, workers=8, reference_s=0)
+    # 32 candidates. The opening sweep's one slow build holds the other 26 back for 2 s, with 7 workers waiting.
+    r, out = search(p, paired(5, "FAST"))
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["end"] == "exhausted" and rec["compiled"] >= 16, f"the block should try the space: {out}", r)
+    expect("expander-starved" in rec["flags"] and rec["idle_frac"] > 0.2, f"waiting for candidates that remain is flagged: {rec}", r)
+
+
+def test_search_raises_no_expander_starved_for_a_small_space_that_ends_exhausted(base):
+    p = search_project(base, files=STARVE_FILES)
+    tune(p, workers=8, reference_s=0)
+    # 32 candidates. The one slow build is not in the sweep: the other workers sit idle for 2 s with nothing left to hand out.
+    r, out = search(p, MARK + "int f(void) { " + " ".join(
+        f"PERM_GENERAL(int WRONG_{c}0;, int LATE_{c}1; int WRONG_{c}2;)" for c in "abcde") + " return 1; }\n")
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["end"] == "exhausted" and rec["compiled"] >= 16, f"the block should try the space: {out}", r)
+    expect(rec["wall_s"] >= 2 and "expander-starved" not in rec["flags"],
+           f"idle time after the last candidate was handed out is not starvation: {rec}", r)
 
 
 # ---------- calibration probes ----------
