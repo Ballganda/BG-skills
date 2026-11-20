@@ -1824,8 +1824,13 @@ STEER_TAG = re.compile(r"/\*\s*steer:(.*?)\*/\s*", re.S)  # leads a steering alt
 # A choice point: its label, its alternatives' source text, its kind, one likelihood per alternative
 # (None: all alike), and per alternative the reason it steers the compiler (None: the alternative is
 # natural; an empty tuple: all natural). A Reference is a later PERM_VAR(label): the same pick again.
-Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods steers", defaults=("other", None, ()))
+# A Paired is a later PERM_VAR(label, a, b, ...): its own alternative at the index the choice point
+# picked. A choice point with a steering paired alternative counts that pick as steering, so its steers
+# hold the reason of the first steering place at each index, and own keeps the reasons of its own
+# alternatives (None: steers are its own), which is what its lines in a candidate are tagged with.
+Choice = collections.namedtuple("Choice", "label alternatives kind likelihoods steers own", defaults=("other", None, (), None))
 Reference = collections.namedtuple("Reference", "label")
+Paired = collections.namedtuple("Paired", "label alternatives steers")
 Score = collections.namedtuple("Score", "result differ_bytes log first_differ", defaults=(None,))  # first_differ: optional
 
 
@@ -1835,8 +1840,10 @@ def steer(choice, pick):
 
 
 def picked(self, pick):
-    """The source one alternative of a choice point stands for."""
-    why = steer(self, pick)
+    """The source one alternative of a choice point, or of a paired use, stands for."""
+    steers = getattr(self, "own", None)
+    steers = self.steers if steers is None else steers
+    why = steers[pick] if steers else None
     text = self.alternatives[pick]
     if why is None:
         return text
@@ -1844,7 +1851,7 @@ def picked(self, pick):
     return "\n".join(line + note if line.strip() else line for line in text.split("\n"))
 
 
-Choice.picked = picked
+Choice.picked = Paired.picked = picked
 
 
 def choice_label(n):
@@ -1923,12 +1930,18 @@ class Template:
 
 
 def render_parts(parts, vector):
-    """Template.render, apart: each choice point replaced by its picked alternative, each reference by that pick again."""
-    picks, said, out = iter(vector), {}, []
+    """Template.render, apart: each choice point replaced by its picked alternative, each reference by that pick again.
+
+    A paired use is replaced by its own alternative at the index its choice point picked.
+    """
+    picks, at, said, out = iter(vector), {}, {}, []
     for p in parts:
         if isinstance(p, Choice):
-            said[p.label] = p.picked(next(picks))
+            at[p.label] = next(picks)
+            said[p.label] = p.picked(at[p.label])
             out.append(said[p.label])
+        elif isinstance(p, Paired):
+            out.append(p.picked(at[p.label]))
         else:
             out.append(said[p.label] if isinstance(p, Reference) else p)
     return "".join(out)
@@ -1996,13 +2009,15 @@ def parse_template(text):
     alternative taking a leading '%0.7' likelihood:
       PERM_GENERAL(a, b, ...)   one of the alternatives
       PERM_VAR(@name, a, b ...) as PERM_GENERAL; a later PERM_VAR(name) repeats the pick
+      PERM_VAR(name, a, b ...)  a paired use, no choice point: its own alternative at the index the
+                                earlier PERM_VAR(@name, ...) picked; steering tags only
       PERM_ONCE(a, b, ...)      nothing, or one of the alternatives
       PERM_INT(lo, hi)          one integer from lo to hi
       PERM_LINESWAP(lines)      the lines in every order (at most MAX_LINESWAP_LINES)
       PERM_IGNORE(text)         the text itself: no choice, only a marked stretch to leave alone
     """
     code, _ = lexed(text)
-    parts, choices, variables, at = [], [], set(), 0
+    parts, choices, variables, at = [], [], {}, 0  # variables: each PERM_VAR name's index in parts
 
     def where(i):
         return f"line {text.count(chr(10), 0, i) + 1}"
@@ -2031,14 +2046,23 @@ def parse_template(text):
             alternatives, weights, steers = line_orders(here, body), None, ()
         else:
             args = split_alternatives(code, text, body_at, end - 1)
-            if macro == "PERM_VAR" and len(args) == 1 and re.fullmatch(r"[A-Za-z_]+", args[0]):
-                if args[0] not in variables:
-                    die(f"template {here}: PERM_VAR({args[0]}) comes before the PERM_VAR(@{args[0]}, ...) that defines it")
-                parts.append(Reference(args[0]))
+            name = (args[0].split() or [""])[0] if macro == "PERM_VAR" else ""
+            if re.fullmatch(r"[A-Za-z_]+", name) and (name == args[0] or name in variables):
+                if name not in variables:
+                    die(f"template {here}: PERM_VAR({name}{', ...' * (len(args) > 1)}) comes before the "
+                        f"PERM_VAR(@{name}, ...) that defines it")
+                if len(args) == 1 and name == args[0]:
+                    parts.append(Reference(name))
+                    continue
+                parts.append(read_paired(here, name, args, parts[variables[name]]))
                 continue
             label, kind, args = read_head(here, args, "other")
+            if macro == "PERM_VAR" and label is not None and not args:
+                die(f"template {here}: PERM_VAR(@{label}) holds no alternatives; write PERM_VAR({label}) to repeat the "
+                    f"pick of the PERM_VAR(@{label}, ...) that defines it, or PERM_VAR({label}, a, b, ...) to pair with it")
             if macro == "PERM_VAR" and label is None:
-                die(f"template {here}: PERM_VAR(@name, a, b, ...) defines a variable; PERM_VAR(name) repeats its pick")
+                die(f"template {here}: PERM_VAR(@name, a, b, ...) defines a variable; PERM_VAR(name) repeats its pick, "
+                    "and PERM_VAR(name, a, b, ...) pairs with it")
             if macro == "PERM_INT":
                 try:
                     lo, hi = (int(x) for x in args)
@@ -2059,10 +2083,33 @@ def parse_template(text):
         choices.append(choice)
         parts.append(choice)
         if macro == "PERM_VAR":
-            variables.add(label)
+            variables[label] = len(parts) - 1
     if len(choices) > MAX_CHOICES:
         die(f"template has {len(choices)} choice points; the limit is {MAX_CHOICES}")
+    for i in variables.values():  # a pick is steering when any paired alternative at its index is
+        paired = [p.steers for p in parts if isinstance(p, Paired) and p.label == parts[i].label]
+        own = parts[i].steers or (None,) * len(parts[i].alternatives)
+        steers = tuple(next((w for w in at_index if w is not None), None) for at_index in zip(own, *paired))
+        if steers != own:
+            parts[i] = parts[i]._replace(steers=steers, own=own)
     return Template(parts + [text[at:]])
+
+
+def read_paired(where, name, args, definition):
+    """The paired use PERM_VAR(name, a, b, ...) of the variable definition defines. Stops on one it cannot read."""
+    if args[0] != name:
+        die(f"template {where}: PERM_VAR({name}, a, b, ...) is a paired use of PERM_VAR(@{name}, ...) and takes "
+            "no kind: the choice point's kind is its definition's")
+    for alt in args[1:]:
+        bare = STEER_TAG.sub("", alt, count=1) if STEER_TAG.match(alt) else alt
+        if alt.startswith("@") or bare.startswith("%"):
+            die(f"template {where}: PERM_VAR({name}, a, b, ...) is a paired use of PERM_VAR(@{name}, ...) and takes "
+                f"no {'label' if alt.startswith('@') else 'likelihood'}: it is no choice point, and follows its definition's pick")
+    alternatives, _, steers = read_alternatives(where, args[1:])
+    if len(alternatives) != len(definition.alternatives):
+        die(f"template {where}: PERM_VAR({name}, ...) holds {len(alternatives)} alternatives and the "
+            f"PERM_VAR(@{name}, ...) it pairs with holds {len(definition.alternatives)}; a paired use needs as many")
+    return Paired(name, alternatives, steers)
 
 
 def candidates(template, boost=None):
