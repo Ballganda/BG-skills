@@ -2820,16 +2820,21 @@ class SlotPool:
 
         Another search in the background is not counted: it yields its slots (see BackgroundPool).
         """
-        count = 1
+        return 1 + len(self.foreground())
+
+    def foreground(self):
+        """The names of the other foreground searches whose heartbeat is fresh. A stale heartbeat is cleared away."""
+        names = []
         for beat in self.dir.glob("*.writer"):
             if beat == self.beat:
                 continue
             if not self.stale(beat):
-                count += not beat.name.startswith(BACKGROUND)
+                if not beat.name.startswith(BACKGROUND):
+                    names.append(beat.name[:-len(".writer")])
             else:
                 with contextlib.suppress(OSError):
                     beat.unlink()
-        return count
+        return sorted(names)
 
     def heartbeat(self):
         while not self.closed.wait(self.beat_s):
@@ -4927,7 +4932,7 @@ def cmd_search(a):
         out["background"] = found["report"]
     if repeat:
         out["repeat"] = True
-    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings)
+    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings, pool.id)
     if budget:
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
@@ -4960,11 +4965,15 @@ def search_detail(t, code):
 #   heartbeat      touched every few seconds while it lives
 #   results.jsonl  one line per candidate it tried, written as each comes, so a kill loses none
 #   done.json      written as it ends on its own: the end reason and the seed of a match
-#   log            its standard output and error
-# The next `search` call for the ticket, `search --stop`, and `release` end it.
+#   log            its standard output and error, and a line for each step of its life
+# The next `search` call for the ticket, `search --stop`, and `release` end it. A search collected
+# with nothing tried leaves its log beside the round's files, as `background.log`.
 
 BACKGROUND_MIN_S = 1.0  # a background search is not started for less time than this
 BACKGROUND_YIELD_S = 0.05  # how often a background search that waits on a foreground block looks again
+BACKGROUND_STOP_S = 10.0  # how long stopping a background search waits for its process to be gone
+BACKGROUND_LOG_BYTES = 65536  # how much of a log's end is kept
+SYNCHRONIZE = 0x00100000  # the right to wait on a Windows process
 JOB_OBJECT_TERMINATE = 0x0008  # the right to end a Windows Job Object opened by name
 
 
@@ -5033,15 +5042,13 @@ def own_job(token):
         return None
 
 
-def process_tree(pids):
+def process_tree(pids, until):
     """The processes and every descendant of them that the host lists now, on a host with `ps`."""
     children = {}
-    with contextlib.suppress(OSError):
-        listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout
-        for line in listed.splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    for line in run_until(["ps", "-A", "-o", "pid=,ppid="], until).splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
     tree, todo = [], list(pids)
     while todo:
         pid = todo.pop()
@@ -5051,13 +5058,47 @@ def process_tree(pids):
     return tree
 
 
-def kill_background(token, pids):
+def run_until(command, until):
+    """Run a host command no longer than until `until`. Returns its output, or "" when it could not run or ran out of time."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, errors="replace",
+                              timeout=max(0.5, until - time.perf_counter())).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def process_gone(pid, until):
+    """Whether a process has ended. One the host cannot answer for counts as gone: there is nothing to wait for.
+
+    Never by a signal: on Windows the usual "is it alive" signal ends the process.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            k = kernel32()
+            k.OpenProcess.restype = ctypes.c_void_p
+            k.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+            k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            handle = k.OpenProcess(SYNCHRONIZE, 0, pid)
+            if not handle:
+                return True
+            ended = k.WaitForSingleObject(handle, 0) == 0
+            k.CloseHandle(handle)
+            return ended
+        except (OSError, AttributeError):
+            return True
+    state = run_until(["ps", "-o", "stat=", "-p", str(pid)], until).strip()
+    return not state or state.startswith("Z")  # a zombie has ended: it only waits to be reaped
+
+
+def kill_background(token, pids, until, by_job=True):
     """Kill a background search with every descendant, compilers and what they started included.
 
-    On Windows that is its Job Object, or `taskkill /T` when it has not come far enough to have one.
-    Elsewhere the search leads its own session and each compile its own process group, so no one
-    signal reaches them all: the search is stopped first, so that it starts nothing more, then its
-    process tree is listed and every group in it killed.
+    On Windows that is its Job Object, or `taskkill /T` when it has not come far enough to have one
+    (or when by_job is False). Elsewhere the search leads its own session and each compile its own
+    process group, so no one signal reaches them all: the search is stopped first, so that it starts
+    nothing more, then its process tree is listed and every group in it killed. No host command it
+    runs is waited for past `until`.
     """
     if os.name == "nt":
         job = None
@@ -5066,19 +5107,19 @@ def kill_background(token, pids):
             k = kernel32()
             k.OpenJobObjectW.restype = ctypes.c_void_p
             k.OpenJobObjectW.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p]
-            job = k.OpenJobObjectW(JOB_OBJECT_TERMINATE, 0, job_name(token))
+            job = by_job and k.OpenJobObjectW(JOB_OBJECT_TERMINATE, 0, job_name(token))
             if job:
                 k.TerminateJobObject(job, 1)
                 k.CloseHandle(job)
         if not job:
             for pid in pids:
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+                run_until(["taskkill", "/T", "/F", "/PID", str(pid)], until)
         return
     for pid in pids:
         with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGSTOP)
     own = os.getpgid(0)
-    for pid in process_tree(pids):
+    for pid in process_tree(pids, until):
         with contextlib.suppress(OSError):
             group = os.getpgid(pid)
             if group != own:
@@ -5087,13 +5128,14 @@ def kill_background(token, pids):
             os.kill(pid, signal.SIGKILL)
 
 
-def start_background(t, end, counts, results, ceiling, settings):
+def start_background(t, end, counts, results, ceiling, settings, caller):
     """Leave a detached process searching the round's template on. Returns the seconds it may run, or 0 when none was started.
 
     One is started when the block ended on a plateau or at its deadline with time left under the
     ceiling and candidates left untried. It inherits no standard handle and, on Windows, starts with
     no console of this one's and in its own process group (elsewhere in its own session): otherwise
-    this call, and the shell that ran it, would wait until it ended.
+    this call, and the shell that ran it, would wait until it ended. `caller` is this call's name in
+    the slot pool: the search does not take a heartbeat this call left behind for a foreground block.
     """
     budget = round(ceiling - counts["wall_s"], 1)
     if (not settings["background"] or end not in ("plateau", "deadline") or budget < BACKGROUND_MIN_S
@@ -5107,7 +5149,8 @@ def start_background(t, end, counts, results, ceiling, settings):
     try:
         d.mkdir(parents=True)
         (d / "heartbeat").write_text(token, encoding="utf-8")
-        (d / "spawn.json").write_text(json.dumps({"token": token, "budget_s": budget, "unix": now()}), encoding="utf-8")
+        (d / "spawn.json").write_text(json.dumps({"token": token, "budget_s": budget, "unix": now(), "writer": caller}),
+                                       encoding="utf-8")
         with (d / "log").open("ab") as log:
             how = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
             if os.name == "nt":
@@ -5139,6 +5182,8 @@ class Background:
         if spawn.get("token") != token:
             die("search --background is set only by this tool, on the search it leaves running")
         self.budget = float(spawn.get("budget_s") or 0)
+        self.caller = spawn.get("writer") if isinstance(spawn.get("writer"), str) else None
+        self.began, self.waited, self.waiting_on = time.perf_counter(), 0.0, None
         self.lock, self.stopped = threading.Lock(), threading.Event()
         self.known, self.end, self.seed, self.until = set(), "stopped", None, None
         self.job = own_job(token)
@@ -5147,13 +5192,29 @@ class Background:
         (self.dir / "run.json").write_text(json.dumps({"pid": os.getpid(), "scratch": self.scratch}), encoding="utf-8")
         self.results = (self.dir / "results.jsonl").open("a", encoding="utf-8", newline="\n")
         atexit.register(self.close)
+        self.say(f"started: process {os.getpid()}, budget {self.budget} s, started by {self.caller}")
         threading.Thread(target=self.heartbeat, args=(search_settings()["slot_heartbeat_s"],), daemon=True).start()
+
+    def say(self, text):
+        """Add a line to the log, with the seconds since this process began: what is left to read when it built nothing."""
+        with contextlib.suppress(OSError, ValueError):
+            print(f"[{time.perf_counter() - self.began:8.2f}] {text}", file=sys.stderr, flush=True)
+
+    def yielding(self, names, seconds):
+        """Note the foreground searches a build waits on (said when they change), or with no names the wait's end."""
+        with self.lock:
+            self.waited += seconds
+            if names == self.waiting_on:
+                return
+            self.waiting_on = names
+        self.say(f"waiting on the foreground: {' '.join(names)}" if names else "the foreground is clear: building")
 
     def heartbeat(self, every):
         beat = self.dir / "heartbeat"
         while not self.stopped.wait(every):
             if read_json(self.dir / "spawn.json").get("token") != self.token:
                 self.stopped.set()  # another search has taken this one's place
+                self.say("stopping: spawn.json no longer names this search")
                 return
             with contextlib.suppress(OSError):
                 os.utime(beat)
@@ -5182,6 +5243,7 @@ class Background:
             memo.seen[memo.key("src", source_bytes(template.render(template.vector(r["seed"]))))] = e
             self.known.add(r["seed"])
         self.until = time.perf_counter() + self.budget
+        self.say(f"ready: {len(self.known)} candidates already tried, {self.budget} s from now")
 
     def over(self):
         """Whether the search's time is up."""
@@ -5199,6 +5261,7 @@ class Background:
 
     def ended(self, end, best):
         self.end, self.seed = end, best.get("seed")
+        self.say(f"ended: {end}, {round(self.waited, 1)} worker-seconds spent waiting on the foreground")
 
     def close(self):
         """Say how the search ended. Runs as the process ends, by any road but a kill."""
@@ -5232,7 +5295,9 @@ class BackgroundPool(SlotPool):
 
     Its name starts with BACKGROUND, so no foreground search counts it as a writer or shares the slots
     with it. Before each build it waits until no foreground search beats. A build it has in hand runs
-    to its end, so a foreground block has the slot back within one compile.
+    to its end, so a foreground block has the slot back within one compile. The call that started it
+    is no foreground block: it had left the pool before it started this search, so a heartbeat under
+    its name is one it failed to remove, and is not waited on.
     """
 
     def __init__(self, settings, run):
@@ -5244,36 +5309,61 @@ class BackgroundPool(SlotPool):
     def share(self):
         return self.size  # every slot no foreground block wants
 
+    def foreground(self):
+        return [name for name in super().foreground() if name != self.run.caller]
+
     def acquire(self, prefer=0):
-        while self.count_writers() > 1 and not (self.closed.is_set() or self.run.stopped.is_set() or self.run.over()):
+        while not (self.closed.is_set() or self.run.stopped.is_set() or self.run.over()):
+            names = self.foreground()
+            if not names:
+                self.run.yielding([], 0)
+                break
+            self.run.yielding(names, BACKGROUND_YIELD_S)
             time.sleep(BACKGROUND_YIELD_S)
         return super().acquire(prefer)
 
 
 def stop_background(tid):
-    """End a ticket's background search now, with every process under it. Returns its folder, or None when the ticket has none.
+    """End a ticket's background search now, with every process under it.
 
+    Returns its folder and what the stop saw (for a kept log), or (None, {}) when the ticket has none.
     It is killed only while its heartbeat is fresh and it has not said it is done, so a process
-    that has since taken its process id is never touched. Its slots, its heartbeat in the pool and
-    its scratch folder are cleared away, since a killed search cannot do that.
+    that has since taken its process id is never touched. The kill is asked for at once, and the
+    stop then waits for the process to be gone, so that its results are whole and its files free.
+    It waits no longer than BACKGROUND_STOP_S from its start: a process still there then is killed
+    once more, by its process tree, and the stop goes on with what the search had written. Its
+    slots, its heartbeat in the pool and its scratch folder are cleared away, since a killed search
+    cannot do that.
     """
-    d = background_dir(tid)
-    token = read_json(d / "spawn.json").get("token")
+    d, began = background_dir(tid), time.perf_counter()
+    until = began + BACKGROUND_STOP_S
+    spawn = read_json(d / "spawn.json")
+    token = spawn.get("token")
     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]+", token):
         if d.exists():
             remove_tree(d)
-        return None
-    run = read_json(d / "run.json")
+        return None, {}
+    run, done = read_json(d / "run.json"), read_json(d / "done.json")
+    saw = {"spawn": spawn, "run": run, "done": done, "unix": now(), "heartbeat_age_s": None, "killed": False}
+    with contextlib.suppress(OSError):
+        saw["heartbeat_age_s"] = round(time.time() - (d / "heartbeat").stat().st_mtime, 1)  # by the wall clock: it spans processes
     if not (d / "done.json").exists():
-        try:
-            age = time.time() - (d / "heartbeat").stat().st_mtime  # by the wall clock: it spans processes
-        except OSError:
-            age = None
+        age = saw["heartbeat_age_s"]
         if age is not None and age <= search_settings()["slot_stale_s"]:
             pids = [run.get("pid")]
             with contextlib.suppress(OSError, ValueError):
                 pids.append(int((d / "pid").read_text(encoding="utf-8")))
-            kill_background(token, sorted({p for p in pids if isinstance(p, int) and not isinstance(p, bool) and p > 0}))
+            pids = sorted({p for p in pids if isinstance(p, int) and not isinstance(p, bool) and p > 0})
+            kill_background(token, pids, until)
+            gone = False
+            while not gone:
+                gone = all(process_gone(p, until) for p in pids)
+                if gone or time.perf_counter() >= until:
+                    break
+                time.sleep(0.05)
+            if not gone:
+                kill_background(token, pids, time.perf_counter() + 2.0, by_job=False)
+            saw.update(killed=True, gone=gone, stop_s=round(time.perf_counter() - began, 2))
     scratch = run.get("scratch")
     if isinstance(scratch, str) and Path(scratch).name.startswith("decomp-background-"):
         remove_tree(scratch)
@@ -5286,12 +5376,13 @@ def stop_background(tid):
                     slot.unlink()
         with contextlib.suppress(OSError):
             beat.unlink()
-    return d
+    saw["foreground"] = sorted(b.name for b in slots.glob("*.writer") if not b.name.startswith(BACKGROUND))
+    return d, saw
 
 
 def discard_background(tid):
     """End a ticket's background search and drop what it found."""
-    d = stop_background(tid)
+    d, _ = stop_background(tid)
     if d:
         remove_tree(d)
 
@@ -5303,6 +5394,22 @@ def winner_file(t, template, seed):
     return winner
 
 
+def keep_log(state, log, saw):
+    """Keep the log of a background search that tried nothing, in place of the last kept one. Returns the file, or None.
+
+    It is the evidence for why nothing was built: the search's own lines and any error it died of,
+    then one line of what the call that stopped it saw. It stays on this machine, beside the round's files.
+    """
+    if log and not log.endswith(b"\n"):
+        log += b"\n"
+    path = state / "background.log"
+    try:
+        path.write_bytes(log + ("collected: " + json.dumps(saw, sort_keys=True) + "\n").encode("utf-8"))
+    except OSError:
+        return None
+    return path
+
+
 def collect_background(t):
     """Stop the ticket's background search and take in what it found. Returns None when the ticket had none.
 
@@ -5312,13 +5419,17 @@ def collect_background(t):
     written as a winner and becomes what `verify --template-round` records; it adds no attempt, since
     its round is already counted. The match is the natural one with the lowest seed, or else the
     steered one the search reduced. With a natural match, `summary` is the whole summary to print in
-    place of a new round.
+    place of a new round. A search that tried nothing leaves its log (see keep_log), named in the
+    report under `log`.
     """
-    d = stop_background(t["id"])
+    d, saw = stop_background(t["id"])
     if d is None:
         return None
     state = search_dir(t["id"])
     new, done = read_results(d / "results.jsonl"), read_json(d / "done.json")
+    log = b""
+    with contextlib.suppress(OSError):
+        log = (d / "log").read_bytes()[-BACKGROUND_LOG_BYTES:]
     with contextlib.suppress(OSError):
         (d / "spawn.json").unlink()  # first, so that a folder a dying process still holds is not collected twice
     remove_tree(d)
@@ -5333,6 +5444,10 @@ def collect_background(t):
     if new:
         (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
     report = {"end": str(done.get("end") or "stopped"), "tried": len(new)}
+    if not new:
+        kept = keep_log(state, log, saw)
+        if kept:
+            report["log"] = str(kept)
     natural = sorted(r["seed"] for r in new
                      if r.get("result") == "bytes-match" and not template.steering(template.vector(r["seed"])))
     seed = natural[0] if natural else None
