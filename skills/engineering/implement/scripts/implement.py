@@ -194,7 +194,8 @@ def cmd_begin(store, args):
             git("branch", args.integration, args.base)
         store.save(ledger)
         store.activate(args.integration)
-    print(f"begin: {'reused' if existed else 'created'} {args.integration}")
+    print(f"begin: reused {args.integration}" if existed
+          else f"begin: created {args.integration} from {args.base}")
     return OK
 
 

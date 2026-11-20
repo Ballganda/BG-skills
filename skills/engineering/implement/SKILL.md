@@ -57,13 +57,13 @@ If the user asks what a report means, explain it in plain language.
 
 ## The script
 
-Every mechanical step is one command of `scripts/implement.py` beside this file, run as `python3 <this skill's directory>/scripts/implement.py <command>`. Each prints one fixed line; errors go to stderr as `error: <text>`. Exit codes: 0 ok, 1 merge conflict, 2 bad arguments or a Ticket the run cannot take, 3 nothing ready, 4 environment problem, 5 the test command failed. Run `--help` for arguments.
+Every mechanical step is one command of `scripts/implement.py` beside this file, run as `<python> <this skill's directory>/scripts/implement.py <command>`. Each prints one fixed line; errors go to stderr as `error: <text>`. Exit codes: 0 ok, 1 merge conflict, 2 bad arguments or a Ticket the run cannot take, 3 nothing ready, 4 environment problem, 5 the test command failed. Run `--help` for arguments.
 
-Before the first command, run `python3 --version`. If Python 3 is missing, tell the user to install it and stop.
+Before the first command, find `<python>`: ask `python3`, then `python`, then `py` for `--version`, and use the first whose answer is a Python 3 version for every script command in the run. A name that is missing, prints an install hint, or answers Python 2 counts as missing. Only when every name fails, tell the user to install Python 3 and stop.
 
 | Command | Does | Prints |
 | --- | --- | --- |
-| `begin INTEGRATION TICKET[:TIER]...` | creates or reuses the integration branch, opens the run's ledger | `begin: created or reused <branch>` |
+| `begin INTEGRATION TICKET[:TIER]... [--base BRANCH]` | creates the integration branch at BASE (default HEAD) or reuses it, opens the run's ledger | `begin: created <branch> from <base>`, or `begin: reused <branch>` |
 | `ready [--cap N] [--tracker T]` | lists batch Tickets whose blockers are merged, up to the free slots | `ticket ID TIER` per Ticket, or `ready: none` (exit 3) |
 | `start TICKET [--slug TEXT]` | claims a Ticket, creates or reuses its worktree and branch | `start: created or reused branch=B worktree=W` |
 | `status` | one line per batch Ticket | `ticket ID STATE TIER attempts=N branch=B worktree=W`, plus `missing=` when either is gone |
@@ -76,9 +76,9 @@ Before the first command, run `python3 --version`. If Python 3 is missing, tell 
 
 ## Steps
 
-1. Read the spec and the batch Tickets.
+1. Read the spec and the batch Tickets. When they build on work not yet in the default branch (an open PR, a named spec branch), that branch is the base; otherwise the base is the default branch tip. State the base with the resolved batch.
 2. (Optional) If Tickets need shared exploration, start one explorer with a fresh context window to save markdown notes to a directory outside the repo; pass its path to implementers.
-3. Run `begin` with the integration branch name and the batch Tickets with their tiers. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
+3. Run `begin` with the integration branch name, the batch Tickets with their tiers, and `--base` set to the step 1 base. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec and Tickets.
 4. Run `ready --cap 3` (or the user's cap). For each Ticket it lists, run `start`, then start an implementer on the printed worktree, on its tier's model. The implementer:
    - calls the Skill tool with `tdd` at pre-agreed seams where possible;
    - typechecks and runs the single relevant test file as it goes, and the full suite once at the end (a run that would outlast the tool timeout runs in the background);

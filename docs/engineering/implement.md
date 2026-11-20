@@ -23,7 +23,7 @@ If the plan lives only in the thread, say so when you invoke it, so the orchestr
 ## Prerequisites
 
 - **An issue tracker**, for ticket work. The skill reads the tickets from, and resolves them on, the tracker [bg-setup](bg-setup.md) configured. If none has been configured, it stops and tells you to run that first. Work described in chat needs no tracker.
-- **Python 3**, for ticket work. The mechanical steps run through a script that needs only the standard library; if `python3` is missing, the run tells you to install it and stops. Work described in chat does not use the script.
+- **Python 3**, for ticket work. The mechanical steps run through a script that needs only the standard library; the run tries `python3`, `python`, then `py`, uses the first that answers with a Python 3 version, and tells you to install Python 3 and stops only when none does. Work described in chat does not use the script.
 - **A harness that runs subagents**, ideally in the background with a git worktree each. On a harness that runs them one at a time, a multi-ticket batch still works, only serially.
 - **The right branch checked out.** Chat work commits to the branch you are on; ticket work lands on an integration branch the run creates or reuses.
 
@@ -54,7 +54,7 @@ A pull request opens only if your tracker closes work through PRs or you ask for
 
 ## The orchestration script
 
-The mechanical steps of a ticket run are one command each of `scripts/implement.py`, shipped beside the skill, so the orchestrator spends tokens on decisions and not on git: `begin` creates or reuses the integration branch and opens a ledger, `ready` lists the tickets whose blockers have merged, `start` claims one and creates its worktree and branch, `test` runs a command in a ticket's worktree and logs the output, `merge` lands a branch on the integration branch, `fail` records a failed attempt, and `clean` removes finished worktrees. Each prints one line. `ready` reads blocking edges from a local tracker and from GitHub; on any other tracker the orchestrator computes readiness itself and passes ticket ids to `start`. Implementers run the full suite themselves, so `test` is the orchestrator's check after their merge.
+The mechanical steps of a ticket run are one command each of `scripts/implement.py`, shipped beside the skill, so the orchestrator spends tokens on decisions and not on git: `begin` creates the integration branch, starting from the branch your spec builds on when that work is not yet in the default branch (the base is stated before work starts, and `begin` names it), or reuses it, and opens a ledger, `ready` lists the tickets whose blockers have merged, `start` claims one and creates its worktree and branch, `test` runs a command in a ticket's worktree and logs the output, `merge` lands a branch on the integration branch, `fail` records a failed attempt, and `clean` removes finished worktrees. Each prints one line. `ready` reads blocking edges from a local tracker and from GitHub; on any other tracker the orchestrator computes readiness itself and passes ticket ids to `start`. Implementers run the full suite themselves, so `test` is the orchestrator's check after their merge.
 
 The ledger lives in the repository's git directory, never committed. That is what makes a run resumable: in a new chat, `status` shows each ticket's state, attempts, and any missing worktree or branch, and the run continues from there.
 
