@@ -1806,6 +1806,10 @@ SUMMARY_TOKENS = 600  # the summary's size cap
 TOKEN_CHARS = 4  # how the cap is measured: characters of the summary's JSON per token
 WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
 WINDOW_WIDTH = 120  # characters kept of each of those lines
+CUT_MARK = " ..."  # ends a window line that was cut, inside the width
+# What the summary says when the best candidate's report holds fewer than 2 lines: a header at most.
+EMPTY_REPORT = ("the diff report holds no instruction diff, so the window shows nothing to plan the next template on: "
+                "the fix is a diff adapter whose report holds one line per instruction")
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
 CHOICE_CODE = re.compile(r"([A-Za-z_]+)(\d+)")
@@ -2580,12 +2584,14 @@ def offset_line(lines, offset):
 def window(report, first_differ=None):
     """The lines of a diff report the summary shows, each cut to a fixed width.
 
+    A line longer than WINDOW_WIDTH is cut inside the width and ends in CUT_MARK, so a cut never passes for the whole line.
     With first_differ, the window is centred on the line holding that offset, with WINDOW_LINES // 2 lines of
     context each side. Without it, or when no line holds it, it is the report's first lines.
     """
     try:
         with open(report, encoding="utf-8", errors="replace") as f:
-            lines = [line.rstrip("\n")[:WINDOW_WIDTH] for line in f]
+            lines = [line.rstrip("\n") for line in f]
+        lines = [line if len(line) <= WINDOW_WIDTH else line[:WINDOW_WIDTH - len(CUT_MARK)] + CUT_MARK for line in lines]
     except OSError:
         return []
     at = None if first_differ is None else offset_line(lines, first_differ)
@@ -3868,6 +3874,8 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
         out["winner"] = str(winner)
     elif "score" in best:
         out["window"] = list(best["window"])
+        if len(out["window"]) < 2:  # the window holds 2 lines or more whenever the report does
+            out["notice"] = out.get("notice", []) + [EMPTY_REPORT]
     else:
         out["failure"] = best["failure"][-FAILURE_CHARS:]
     if results:
