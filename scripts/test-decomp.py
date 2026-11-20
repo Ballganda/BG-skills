@@ -2794,8 +2794,10 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     r, out = search(p, NEVER)
     expect(out is not None, "the round should run", r)
     got = perf_log(p)
-    expect([x["kind"] for x in got] == ["calibration", "block"], f"a cold cache calibrates once, then one block: {got}", r)
-    rec = got[1]
+    expect([x["kind"] for x in got] == ["calibration"] * 4 + ["block"] and [x.get("probe") for x in got[:4]]
+           == [None, "single-function", "batching", "resolved-compiler"],
+           f"a cold cache calibrates once (the double compile, then one record per probe), then one block: {got}", r)
+    rec = got[4]
     expect(PERF_FIELDS <= set(rec), f"the block record lacks {PERF_FIELDS - set(rec)}", r)
     expect(rec["ticket"] == TID and rec["round"] == 1 and rec["block"] == 1 and rec["workers_end"] == 2, f"identity: {rec}", r)
     expect(rec["compiled"] == out["counts"]["compiled"] and rec["end_reason"] == "exhausted", f"counts and end: {rec}", r)
@@ -2804,7 +2806,7 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     expect(0.0 <= rec["idle_frac"] <= 1.0 and rec["t_compile_p95_ms"] >= rec["t_compile_p50_ms"] > 0, f"timings: {rec}", r)
     r, out = search(p, NEVER)
     got = perf_log(p)
-    expect([x["kind"] for x in got] == ["calibration", "block", "block"] and got[2]["round"] == 2 and got[2]["block"] == 2,
+    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 2 and got[5]["block"] == 2,
            f"a warm cache adds one block record and no calibration: {got}", r)
 
 
@@ -2858,6 +2860,206 @@ def test_search_raises_io_jitter_when_p95_is_far_above_the_median_compile(base):
     r, out = fresh(p, NEVER)
     rec = perf_log(p)[-1]
     expect("io-jitter" in rec["flags"], f"p95 far above the median compile raises io-jitter: {rec}", r)
+
+
+# ---------- calibration probes ----------
+
+# A unit of two marked functions. The fake compiler takes longer while the other function's body is in
+# the source, and logs which form it was given. The fake diff reads the target function alone, so
+# cutting the other body leaves the bytes as they were; with USES_G in the target, the bytes depend
+# on that body being there, which only a candidate shows.
+HELPER = "// @decomp u0001-00402000\nint g(void) { SLOW_BODY; return 2; }\n"
+TWO_FUNCTIONS = HELPER + MATCHING
+CALLS_HELPER = HELPER + MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int right_a; USES_G;) return 1; }\n"
+FORM_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1:4]
+text = open(src).read()
+whole = "SLOW_BODY" in text
+open(log, "a").write(("full" if whole else "cut") + chr(10))
+time.sleep(0.3 if whole else 0)
+open(obj, "w").write(text)
+"""
+TARGET_DIFF_PY = """import hashlib, json, sys
+text = open(sys.argv[1]).read()
+body = text[text.index("int f("):]
+n = body.count("WRONG") + ("USES_G" in body and "SLOW_BODY" in text)
+open(sys.argv[2], "w").write("report" + chr(10))
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+"""
+# A fake batch compiler: one call builds every source it is given into the object folder, after a
+# wait per call and a wait per source, and logs how many sources the call held.
+BATCH_BUILD_PY = """import os, sys, time
+objdir, log, per_call, per_source = sys.argv[1:5]
+sources, bad = sys.argv[5:], 0
+open(log, "a").write("batch %d" % len(sources) + chr(10))
+time.sleep(float(per_call) + float(per_source) * len(sources))
+for s in sources:
+    text = open(s).read()
+    if "SYNTAX_ERROR" in text:
+        bad = 1
+        continue
+    open(os.path.join(objdir, os.path.splitext(os.path.basename(s))[0] + ".obj"), "w").write(text)
+sys.exit(bad)
+"""
+WAIT_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1:4]
+text = open(src).read()
+open(log, "a").write("single" + chr(10))
+time.sleep(0.3)
+if "SYNTAX_ERROR" in text:
+    sys.exit("error C2143: syntax error")
+open(obj, "w").write(text)
+"""
+# A fake resolved compiler: `build_resolve` prints its argument list and one variable, and the compiler
+# it names logs each run with that variable. With ALTER it writes other bytes than the build adapter.
+RESOLVE_PY = """import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+print(json.dumps({"argv": [sys.executable, os.path.join(here, "direct_build.py"), "{source}", "{obj}"] + sys.argv[1:],
+                  "env": {"RESOLVED": "yes"}}))
+"""
+DIRECT_BUILD_PY = """import os, sys
+src, obj, log = sys.argv[1:4]
+open(log, "a").write("resolved " + os.environ.get("RESOLVED", "") + chr(10))
+open(obj, "w").write(open(src).read() + ("altered" if "ALTER" in sys.argv[4:] else ""))
+"""
+BATCHED = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int right_a;) PERM_GENERAL(int WRONG_b;, int right_b;) "
+                  "PERM_GENERAL(int WRONG_c;, SYNTAX_ERROR, int right_c;) return 1; }\n")
+
+
+def probes(p):
+    """The performance log's probe records, by probe: the last of each."""
+    return {x["probe"]: x for x in perf_log(p) if x["kind"] == "calibration" and "probe" in x}
+
+
+def form_project(base, diff):
+    """A two-function unit whose compiler is faster on the single-function source. Returns (project, the logged forms)."""
+    log = Path(base) / "forms.log"
+    p = search_project(base, config={"build": PY + f' "{{tools}}/form_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+                                     "diff": PY + ' "{tools}/probe_diff.py" "{obj}" "{report}"'},
+                       files={"tools/form_build.py": FORM_BUILD_PY, "tools/probe_diff.py": diff},
+                       source=HELPER + STUCK)
+    tune(p, workers=1)
+    return p, lambda: log.read_text().split()
+
+
+def test_search_rejects_a_single_function_build_that_changes_the_bytes(base):
+    p, forms = form_project(base, COUNT_DIFF_PY)  # this diff hashes the whole object, so the cut shows in the bytes
+    r, out = search(p, TWO_FUNCTIONS)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "dropped" and got.get("identical") is False and "bytes changed" in got.get("reason", ""),
+           f"the probe should drop the single-function build: {got}", r)
+    expect(got["t_probe_ms"] < got["t_ref_ms"], f"though it was faster: {got}", r)
+    expect(out is not None and out["end"] == "match" and out["counts"]["single_function"] is False, f"the round runs: {out}", r)
+    expect(forms().count("cut") == 2 and forms()[-out["counts"]["compiled"]:] == ["full"] * out["counts"]["compiled"],
+           f"only the probe's two builds were cut, and every candidate was built whole: {forms()}", r)
+
+
+def test_search_keeps_a_single_function_build_that_is_faster_and_byte_identical(base):
+    p, forms = form_project(base, TARGET_DIFF_PY)
+    r, out = search(p, TWO_FUNCTIONS)
+    got = probes(p).get("single-function", {})
+    expect(got.get("outcome") == "kept" and got.get("identical") is True, f"the probe should keep it: {got}", r)
+    expect(out is not None and out["end"] == "match" and out["best"] == {"code": "A1 B2", "differ_bytes": 0}
+           and out["counts"]["single_function"] is True, f"the round matches under the single-function build: {out}", r)
+    built = out["counts"]["compiled"]
+    expect(forms()[-built - 1:] == ["cut"] * built + ["full"],
+           f"candidates are built cut, and the match is confirmed on the full unit: {forms()}", r)
+    winner = Path(out["winner"]).read_text()
+    expect("SLOW_BODY" in winner, "the winner is the whole unit, not the cut source", r)
+    before = len(forms())
+    r, out = search(p, TWO_FUNCTIONS.replace("int right_b;", "int right_b2;"))
+    expect("full" not in forms()[before:-1] and len([x for x in perf_log(p) if x.get("probe")]) == 3,
+           f"a later round keeps the answer without probing again: {forms()[before:]}", r)
+
+
+def test_search_drops_the_single_function_build_when_its_match_fails_on_the_full_unit(base):
+    p, forms = form_project(base, TARGET_DIFF_PY)
+    r, out = search(p, CALLS_HELPER)
+    log = [x for x in perf_log(p) if x.get("probe") == "single-function"]
+    expect([x["outcome"] for x in log] == ["kept", "dropped"] and "did not hold" in log[1]["reason"],
+           f"the baseline kept it, the match dropped it: {log}", r)
+    expect(out is not None and out["end"] == "exhausted" and "winner" not in out and out["best"]["differ_bytes"] == 2
+           and out["counts"]["single_function"] is False, f"the round reports the full unit's result: {out}", r)
+    before = len(forms())
+    r, out = search(p, CALLS_HELPER.replace("USES_G;", "USES_G; int other;"))
+    expect("cut" not in forms()[before:], f"the next round builds the full unit: {forms()[before:]}", r)
+
+
+def batch_project(base, per_call, per_source):
+    log = Path(base) / "calls.log"
+    batch = PY + f' "{{tools}}/batch_build.py" "{{objdir}}" "{log.as_posix()}" {per_call} {per_source} {{sources}}'
+    p = search_project(base, config={"build": PY + f' "{{tools}}/slow_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+                                     "build_batch": batch},
+                       files={"tools/batch_build.py": BATCH_BUILD_PY, "tools/slow_build.py": WAIT_BUILD_PY})
+    tune(p, workers=1)
+    return p, lambda: log.read_text().splitlines()
+
+
+def test_search_keeps_batching_that_is_faster_and_byte_identical(base):
+    p, calls = batch_project(base, 0.3, 0)  # one wait per call, however many sources: a batch is cheaper per candidate
+    r, out = search(p, BATCHED)
+    got = probes(p).get("batching", {})
+    expect(got.get("outcome") == "kept" and got.get("batch") == 16 and set(got["sizes_ms"]) == {"4", "8", "16"}
+           and got["t_probe_ms"] < got["t_ref_ms"], f"the probe should keep batches of 16: {got}", r)
+    expect(out is not None and out["end"] == "match" and out["best"] == {"code": "A1 B1 C2", "differ_bytes": 0}
+           and out["counts"]["batch"] == 16, f"the batched round finds the match: {out}", r)
+    expect([x for x in calls() if x.startswith("batch")] == ["batch 4", "batch 8", "batch 16", "batch 5", "batch 7"],
+           f"after the probe, the sweep is one compiler call and the rest another: {calls()}", r)
+    expect(calls().count("single") == 6,  # the gate's check, the double compile, and the probes' three reference builds
+           f"no candidate of the block was built singly: {calls()}", r)
+    expect(out["counts"]["compiled"] == 12 and out["counts"]["build_fail"] == 4,
+           f"a candidate that fails in a batch fails alone: {out['counts']}", r)
+
+
+def test_search_drops_batching_that_is_slower(base):
+    p, calls = batch_project(base, 0, 0.5)  # a longer wait per source than a single build takes
+    r, out = search(p, BATCHED)
+    got = probes(p).get("batching", {})
+    expect(got.get("outcome") == "dropped" and got.get("batch") == 1 and "not faster" in got.get("reason", ""),
+           f"the probe should drop batching: {got}", r)
+    expect(out is not None and out["end"] == "match" and out["counts"]["batch"] == 1, f"the round runs unbatched: {out}", r)
+    expect([x for x in calls() if x.startswith("batch")] == ["batch 4"], f"no block build is batched: {calls()}", r)
+
+
+def test_search_records_each_probe_and_skips_those_the_adapters_do_not_support(base):
+    p = search_project(base)
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    expect(set(got) == {"single-function", "batching", "resolved-compiler"}, f"one record per probe: {perf_log(p)}", r)
+    expect(all(x["outcome"] == "skipped" and x["kind"] == "calibration" and x["ticket"] == TID for x in got.values()),
+           f"a one-function unit and adapters without the two modes skip all three: {got}", r)
+    expect("build_resolve" in got["resolved-compiler"]["reason"] and "build_batch" in got["batching"]["reason"],
+           f"each skip gives its reason: {got}", r)
+    expect(out is not None and out["counts"]["single_function"] is False and out["counts"]["batch"] == 1, "the round runs", r)
+
+
+def resolve_project(base, *more):
+    log = Path(base) / "resolved.log"
+    args = "".join(f' "{x}"' for x in (log.as_posix(),) + more)
+    p = search_project(base, config={"build": PY + f' "{{tools}}/slow_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+                                     "build_resolve": PY + ' "{tools}/resolve.py"' + args},
+                       files={"tools/resolve.py": RESOLVE_PY, "tools/direct_build.py": DIRECT_BUILD_PY,
+                              "tools/slow_build.py": WAIT_BUILD_PY})
+    tune(p, workers=1)
+    return p, lambda: [x for x in log.read_text().splitlines() if x.startswith("resolved")]
+
+
+def test_search_probes_the_resolved_compiler_and_records_it_without_using_it(base):
+    p, resolved = resolve_project(base)
+    r, out = search(p, MATCHING)
+    got = probes(p).get("resolved-compiler", {})
+    expect(got.get("outcome") == "eligible" and got.get("identical") is True and got["t_probe_ms"] < got["t_ref_ms"],
+           f"a faster byte-identical resolved compiler is recorded as eligible: {got}", r)
+    expect(resolved() == ["resolved yes"] * 2, f"it ran with the adapter's environment, in the probe only: {resolved()}", r)
+    expect(out is not None and out["end"] == "match", f"the block builds through the build adapter: {out}", r)
+
+
+def test_search_drops_a_resolved_compiler_that_changes_the_bytes(base):
+    p, resolved = resolve_project(base, "ALTER")
+    r, out = search(p, MATCHING)
+    got = probes(p).get("resolved-compiler", {})
+    expect(got.get("outcome") == "dropped" and got.get("identical") is False, f"other bytes drop the mode: {got}", r)
+    expect(out is not None and out["end"] == "match", f"the round runs: {out}", r)
 
 
 # A fake `wineserver` that logs each start and then idles until it is killed. Linux and macOS only: Windows
