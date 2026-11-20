@@ -3520,7 +3520,7 @@ def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails
     expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
 
 
-PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "call_s", "workers_min", "workers_max", "workers_end", "expanded",
+PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "call_s", "collect_s", "workers_min", "workers_max", "workers_end", "expanded",
                "compiled", "unique_objects", "build_fail", "killed", "src_dedupe_hits", "t_compile_p50_ms",
                "t_compile_p95_ms", "t_ref_ms", "stage_ms", "idle_frac", "best_score_start", "best_score_end",
                "t_to_best_s", "end_reason", "model_latency_s", "writers_active"}
@@ -4730,7 +4730,185 @@ def test_collecting_a_background_search_stuck_in_a_compile_is_bounded(base):
     expect(r.returncode == 0 and found is not None and found["end"] == "stopped",
            f"the stop form returns what the background search had: {r.stdout}", r)
     expect(took < 15, f"collecting should wait no longer than its 10 s bound, it took {took:.1f} s", r)
+    expect("overrun" not in found and "error" not in found and found.get("ran_s") is not None and found.get("budget_s"),
+           f"a search stopped within its time is no overrun and no error, and the report holds its seconds: {found}", r)
     expect_background_dead(p, beat, r)
+
+
+def once_a_search_is_in_the_pool(p, act):
+    """Start a thread that calls act(the heartbeat) once, as soon as a foreground search has joined the slot pool.
+
+    By then the search has read its settings, and its block is still to run. An act that raises
+    OSError is tried again. Returns (the names of the heartbeats acted on, a function that ends the thread).
+    """
+    import threading
+    slots, seen, done = slot_folder(p), [], threading.Event()
+
+    def watch():
+        while not (seen or done.is_set()):
+            for beat in slots.glob("*.writer"):
+                if beat.name.startswith("bg-") or seen:
+                    continue
+                try:
+                    act(beat)
+                    seen.append(beat.name)
+                except OSError:
+                    pass
+            time.sleep(0.005)
+
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+
+    def end():
+        done.set()
+        thread.join()
+    return seen, end
+
+
+def test_a_background_search_that_dies_of_an_error_reports_it_and_its_log_holds_the_traceback(base):
+    p = background_project(base)
+    local = p.root / ".decomp" / "local.json"
+    settings = local.read_text()
+    # The settings file stops being JSON once the call has read it: the background search it leaves raises on reading it.
+    seen, end = once_a_search_is_in_the_pool(p, lambda beat: local.write_text("{ not JSON"))
+    try:
+        r, out = search(p, wide(8))
+        end()
+        expect(seen, "the test should have changed the settings file while the call's block ran", r)
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search should die of the error")
+        local.write_text(settings)
+        r, found = stop_background(p)
+        expect(found is not None and found["end"] == "error" and "JSONDecodeError" in found.get("error", "")
+               and found["tried"] == 0, f"a search that died of an error says so, with the error's text: {r.stdout}", r)
+        log = kept_log(p).read_text(encoding="utf-8", errors="replace")
+        expect(found.get("log") and "Traceback (most recent call last)" in log and "died of an error: " + found["error"] in log,
+               f"the kept log holds the error and its traceback: {log}", r)
+        expect(not background_folder(p).exists(), "the background search's other files are cleared away", r)
+    finally:
+        end()
+        local.write_text(settings)
+        stop_background(p)
+
+
+def end_outright(pid):
+    """Kill a process from outside, with no chance to write anything, and return once the host no longer runs it."""
+    if os.name == "nt":
+        def gone():  # the host knows no such process: taskkill fails
+            return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True).returncode != 0
+    else:
+        import signal
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+        def gone():  # no such process, or a zombie that only waits to be reaped
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+            return not state or state.startswith("Z")
+    expect(wait_for(gone, seconds=30), f"process {pid} should be gone once killed")
+
+
+def test_a_background_search_killed_from_outside_is_collected_as_an_error_with_no_report(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        d = background_folder(p)
+        expect(wait_for(lambda: (d / "run.json").exists() and "pid" in (d / "run.json").read_text()),
+               "the background search should say which process it is")
+        for pid in sorted({json.loads((d / "run.json").read_text())["pid"], int((d / "pid").read_text())}):
+            end_outright(pid)
+        expect(not (d / "done.json").exists(), "a killed process writes no report")
+        r, found = stop_background(p)
+        expect(r.returncode == 0 and found is not None and found["end"] == "error"
+               and "left no report" in found.get("error", ""),
+               f"a search whose process was gone with no report is an error that says so: {r.stdout}", r)
+        expect(not background_folder(p).exists(), "the background search's files are cleared away", r)
+    finally:
+        stop_background(p)
+
+
+def backdate_background(p, seconds):
+    """Make a running background search read as started `seconds` earlier than it was. Returns its budget."""
+    path = background_folder(p) / "spawn.json"
+    spawn = json.loads(path.read_text())
+    spawn["at"] -= seconds
+    fresh = path.with_name("spawn.new")
+    fresh.write_text(json.dumps(spawn))
+
+    def swap():  # in one step, so the search never reads a half-written file; a reader can hold the old one a moment
+        try:
+            os.replace(fresh, path)
+        except OSError:
+            return False
+        return True
+    expect(wait_for(swap, seconds=20), "spawn.json should take the new start time")
+    return spawn["budget_s"]
+
+
+def test_a_background_search_alive_long_past_its_budget_is_collected_as_killed_and_marked_overrun(base):
+    p, beat = hung_background(base)  # stuck in a compile, so its time's end does not end it
+    budget = backdate_background(p, 600)
+    r, found = stop_background(p)
+    expect(r.returncode == 0 and found is not None and found["end"] == "killed" and found.get("overrun") is True,
+           f"a search still alive long after its budget is killed, and the report marks the overrun: {r.stdout}", r)
+    expect(found["budget_s"] == budget and found["ran_s"] > budget + 10,
+           f"the report holds the seconds it ran against its budget: {found}", r)
+    expect_background_dead(p, beat, r)
+
+
+def test_a_heartbeat_the_call_could_not_remove_is_named_in_the_next_background_log(base):
+    p = background_project(base)
+
+    def hold(beat):
+        """Turn the call's heartbeat into a folder that is not empty: no search can remove that, on any host."""
+        if beat.is_file():
+            beat.unlink()
+        beat.mkdir(exist_ok=True)  # fails when the call wrote its heartbeat again in between: the next pass tries again
+        (beat / "held").write_text("x")
+
+    seen, end = once_a_search_is_in_the_pool(p, hold)
+    try:
+        r, out = search(p, wide(8))
+        end()
+        expect(seen, "the test should have held the call's heartbeat while its block ran", r)
+        expect(r.returncode == 0 and out is not None and out.get("continues_s"),
+               f"a heartbeat that cannot be removed fails nothing, and the search goes on in the background: {out}", r)
+        line = f"could not remove the heartbeat {seen[0]}"
+
+        def log():
+            f = background_folder(p) / "log"
+            return f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        expect(wait_for(lambda: line in log() and "ready: " in log()),
+               f"the background search's log should hold the line: {line}\n{log()}", r)
+        text = log()
+        expect(text.index("started: process") < text.index(line) < text.index("ready: "),
+               f"the line is copied at the search's start: {text}", r)
+    finally:
+        end()
+        stop_background(p)
+
+
+def test_search_counts_the_seconds_it_spent_collecting_a_background_search(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        first = out["counts"]
+        expect(isinstance(first.get("collect_s"), float) and 0 <= first["collect_s"] <= first["call_s"],
+               f"a call with nothing to collect still states the seconds: {first}", r)
+        expect(wait_for(lambda: background_tried(p) >= 1), "the background search should build candidates")
+        tune(p, workers=1)
+        r, out = search(p, NEVER)
+        expect(out is not None and out.get("background"), f"the call collects the background search: {out}", r)
+        c, rec = out["counts"], perf_log(p)[-1]
+        expect(isinstance(c.get("collect_s"), float) and 0 <= c["collect_s"] <= c["call_s"],
+               f"the summary's collecting seconds are no larger than the whole call's: {c}", r)
+        expect(rec["collect_s"] == c["collect_s"] and rec["collect_s"] <= rec["call_s"],
+               f"the performance record holds the same collecting seconds, within its own call seconds: {rec}", r)
+    finally:
+        stop_background(p)
 
 
 def test_a_case_receives_its_scratch_folder_in_resolved_form(base):
