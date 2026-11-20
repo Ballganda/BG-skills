@@ -3244,6 +3244,122 @@ def test_search_starts_no_wineserver_when_the_toolchain_does_not_use_wine(base):
     expect(out["end"] == "match" and not log.exists(), "no wine prerequisite, no wineserver", r)
 
 
+# ---------- template search: learning across rounds, mutation, crossover, and stop advice ----------
+
+def learn_template(b="tag_b", note=""):
+    """Two choice points. Alternative 2 of each has one WRONG, alternative 0 two, alternative 1 three: 2 is the one that helps."""
+    return in_function(
+        "PERM_GENERAL(tag_a0 WRONG_1 WRONG_2, tag_a1 WRONG_1 WRONG_2 WRONG_3, tag_a2 WRONG_1) "
+        f"PERM_GENERAL({b}0 WRONG_4 WRONG_5, {b}1 WRONG_4 WRONG_5 WRONG_6, {b}2 WRONG_4) {note}")
+
+
+def two_rounds(base, second, first=None, **constants):
+    """Run two rounds on one worker. Returns (the second summary, the candidates the second round built, in order)."""
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    tune(p, workers=1, **constants)
+    r, out = search(p, first or learn_template())
+    expect(out is not None, "the first round should print a summary", r)
+    built = len(log.read_text().splitlines())
+    cache = p.root / ".decomp" / "search-cache.json"
+    if cache.exists():
+        cache.unlink()  # the second round builds what it tries instead of reading the first's results
+    r, out = search(p, second)
+    expect(out is not None, "the second round should print a summary", r)
+    return r, out, log.read_text().splitlines()[built:]
+
+
+def singles(order):
+    """The alternative each one-change candidate of a round changes, in build order."""
+    return [next(x for x in line.split() if not x.endswith("0")) for line in order[1:] if len([x for x in line.split() if not x.endswith("0")]) == 1]
+
+
+def test_search_second_round_starts_a_kept_label_from_what_the_first_learned(base):
+    r, out, order = two_rounds(base, learn_template(note="/* round two */"))
+    got = singles(order)[:4]
+    expect(got.index("tag_a2") < got.index("tag_a1") and got.index("tag_b2") < got.index("tag_b1"),
+           f"both kept choice points should try the alternative that helped before the one that hurt: {got}", r)
+    expect(got[:2] and {got[0], got[1]} == {"tag_a2", "tag_b2"}, f"the helpful alternatives lead the sweep: {got}", r)
+
+
+def test_search_second_round_resets_an_edited_label_to_its_priors(base):
+    r, out, order = two_rounds(base, learn_template(b="tag_e", note="/* round two */"))
+    got = singles(order)[:4]
+    expect(got == ["tag_a2", "tag_e1", "tag_e2", "tag_a1"],
+           f"A keeps what it learned and the edited B is back at uniform priors, in template order: {got}", r)
+
+
+def test_search_mutation_and_crossover_only_combine_the_written_alternatives(base):
+    r, out, order = two_rounds(base, grid(6), first=grid(6), budget=60)
+    arms = out["counts"].get("arm_picks")
+    expect(arms and arms["mutate"] > 0 and arms["cross"] > 0, f"the second round should mutate and cross over: {out['counts']}", r)
+    for line in order:
+        words = line.split()
+        expect([w[4] for w in words] == list("abcdef") and all(w[5] in "012" for w in words),
+               f"every candidate holds one written alternative of each choice point: {line}", r)
+
+
+def test_search_first_round_of_a_template_neither_mutates_nor_crosses_over(base):
+    log = Path(base) / "order.log"
+    p = search_project(base, files={"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))})
+    tune(p, workers=1, budget=40)
+    r, out = search(p, grid(6))
+    expect(out is not None and "arm_picks" not in out["counts"], f"a first block has no parents: {out}", r)
+
+
+def load_tool():
+    """decomp.py as a module, for the one rule no command line can set up: how the samplers' shares move."""
+    import importlib.util
+    kept, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec = importlib.util.spec_from_file_location("decomp_tool", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+    finally:
+        sys.dont_write_bytecode = kept
+    return tool
+
+
+def share_of_arms(tool, rewarded, picks=150):
+    """Run the arms for `picks` picks where only candidates of the `rewarded` sampler bring the best score down."""
+    import random
+    template = tool.parse_template(grid(6))
+    rng = random.Random(3)
+    sampler = tool.Sampler(template, set(), [0], None, rng)
+    parents = [(1000.0, f"o{i}", v) for i, v in enumerate(([1] * 6, [2] * 6, [0, 1, 2, 0, 1, 2]))]
+    arms = tool.Arms(sampler, parents, rng)
+    results, best = [{"seed": 0, "differ_bytes": 1000.0, "object": "o-base"}], 1000.0
+    for _ in range(picks):
+        sampler.learn(results)
+        arms.learn(results)
+        seed = arms.pick()
+        d = best * 0.95 if arms.owner[seed] == rewarded else 5000.0
+        best = min(best, d)
+        # A rewarded candidate carries no object hash, so it never becomes a parent: the parents stay
+        # as diverse as they began, and only the share each sampler earns by its gains is measured.
+        results.append({"seed": seed, "differ_bytes": d, "object": None if d < 5000.0 else f"s{seed}"})
+    return arms.picked
+
+
+def test_search_gives_a_sampler_that_keeps_finding_gains_a_larger_share_of_the_compiles(base):
+    tool = load_tool()
+    for winner in ("mutate", "cross"):
+        got = share_of_arms(tool, winner)
+        others = [n for a, n in got.items() if a != winner]
+        expect(got[winner] > 1.5 * max(others), f"the sampler that finds gains should lead: {got}")
+        expect(min(others) >= 0.05 * sum(got.values()), f"a sampler that fell behind keeps a share: {got}")
+
+
+def test_search_advises_stopping_after_two_rounds_with_no_new_best_score(base):
+    p = search_project(base)
+    r, out = search(p, NEVER)
+    expect(out is not None and "stop" not in out, f"one flat round is no reason to stop: {out}", r)
+    r, out = search(p, NEVER)
+    expect(out is not None and "no new best" in out.get("stop", ""), f"two flat rounds should carry stop advice: {out}", r)
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and "stop" not in out, f"a round that matches carries none: {out}", r)
+
+
 def rmtree(path):
     def retry(func, p, _):
         os.chmod(p, stat.S_IWRITE)
