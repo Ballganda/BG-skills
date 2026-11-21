@@ -2128,6 +2128,35 @@ def test_search_summary_stays_under_the_cap_and_holds_no_source(base):
     expect("WRONG" not in r.stdout and "int f" not in r.stdout, "the summary holds no candidate source", r)
 
 
+def long_effects(points=8, alternatives=12):
+    """A template whose effects table has long rows: long labels, and each alternative changes the score."""
+    rows = []
+    for i in range(points):
+        label = "@effect_of_choice_point_" + chr(97 + i) * 12
+        alts = [f"int WRONG_{chr(97 + i)}{chr(97 + k)}; " * (k + 1) for k in range(alternatives)]  # k + 1 wrong lines each
+        rows.append("PERM_GENERAL(" + ", ".join([label] + alts) + ")")
+    return MARK + "int f(void) { int WRONG_now; " + " ".join(rows) + " return 1; }\n"
+
+
+def test_search_summary_holds_the_whole_background_report_and_stays_under_the_cap(base):
+    p = search_project(base)
+    tune(p, workers=1, deadline_s=1, ceiling_s=30, background=1)
+    try:
+        r, out = search(p, long_effects(alternatives=11))  # long labels make the background report's best code long
+        expect(out is not None and out.get("continues_s"), f"the search goes on in the background: {out}", r)
+        expect(wait_for(lambda: background_tried(p) >= 2), "the background search builds candidates")
+        tune(p, workers=4, deadline_s=8, ceiling_s=30)
+        forget_latency(p)
+        r, out = search(p, long_effects(alternatives=7))
+        line = r.stdout.splitlines()[0]
+        found = out.get("background") if out else None
+        expect(found is not None and found["end"] == "stopped" and "best" in found, f"the call collected the background search: {out}", r)
+        expect(len(line) <= 600 * 4, f"the printed line, background report included, is {len(line)} characters", r)
+        expect(out.get("effects"), f"the rows the cap keeps are still there: {out}", r)
+    finally:
+        stop_background(p)
+
+
 def test_search_reports_the_build_failure_when_no_candidate_builds(base):
     r, out = search(search_project(base), MATCHING.replace("return 1;", "SYNTAX_ERROR"))
     expect(out is not None and out["end"] == "abort-buildfail" and out["best"] is None, "no candidate is the best", r)
@@ -3665,6 +3694,43 @@ def test_search_starts_with_the_cores_divided_by_the_active_writers(base):
     expect(out is not None and out["counts"]["workers"] == 5, f"a set worker count is kept: {out}", r)
 
 
+def search_beside_a_newcomer(p, template):
+    """Search while a second foreground search joins the pool after this one did. Returns (process, summary)."""
+    import threading
+    got = {}
+    runner = threading.Thread(target=lambda: got.update(done=search(p, template)))
+    runner.start()
+    wait_for(lambda: any(f.name != "555-new.writer" for f in slot_folder(p).glob("*.writer")), 30)
+    writer(p, "555-new", -3600)  # fresh for the rest of the case
+    runner.join()
+    return got["done"]
+
+
+def newcomer_project(base, **search_settings):
+    """4 cores, a compiler that takes 0.3 s, and a heartbeat every second: the block outlasts the first one."""
+    build = PY + ' "{tools}/wait_build.py" "{source}" "{obj}" "{tools}/built.log"'
+    p = search_project(base, config={"build": build}, files={"tools/wait_build.py": WAIT_BUILD_PY})
+    tune(p, **dict({"cores": 4, "slot_heartbeat_s": 1.0}, **search_settings))
+    return p
+
+
+def test_search_counts_the_writers_again_at_its_first_heartbeat_and_cuts_its_workers(base):
+    p = newcomer_project(base)
+    r, out = search_beside_a_newcomer(p, wide(5))
+    c = out["counts"] if out else {}
+    expect(c.get("writers_active") == 2 and c.get("workers") == 2,
+           f"a writer that joined after this search counts, and 4 cores start 2 workers each: {c}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["kind"] == "block" and rec["writers_active"] == 2, f"the block record holds the corrected count: {rec}", r)
+
+
+def test_search_with_a_fixed_worker_count_corrects_only_its_writer_count(base):
+    p = newcomer_project(base, workers=3)
+    r, out = search_beside_a_newcomer(p, wide(5))
+    c = out["counts"] if out else {}
+    expect(c.get("writers_active") == 2 and c.get("workers") == 3, f"a set worker count is kept: {c}", r)
+
+
 def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails(base):
     # The one case that reaches into the tool: no command line can make the platform's call fail.
     import importlib.util
@@ -3765,6 +3831,62 @@ def test_search_raises_slow_compile_for_a_block_30_percent_slower_per_worker(bas
     seed_perf(p, 3, compiled=1, wall_s=1000.0)  # a median so slow the next block is faster than it
     fresh(p, NEVER)
     expect("slow-compile" not in perf_log(p)[-1]["flags"], "a block faster than the median raises nothing", r)
+
+
+def unrounded(value):
+    """The numbers of a record (nested ones too) that differ from themselves rounded to 3 places."""
+    if isinstance(value, dict):
+        return [x for v in value.values() for x in unrounded(v)]
+    return [value] if isinstance(value, float) and round(value, 3) != value else []
+
+
+def test_search_writes_every_number_of_a_block_record_rounded(base):
+    p = search_project(base)
+    tune(p, workers=2)
+    for _ in range(3):  # an even count of compile times: the median is the mean of two rounded values
+        r, out = fresh(p, wide(3))
+        rec = perf_log(p)[-1]
+        expect(rec["kind"] == "block" and rec["compiled"] % 2 == 0, f"a block with an even count of compiles: {rec}", r)
+        expect(unrounded(rec) == [], f"every number is rounded to 3 places: {unrounded(rec)} in {rec}", r)
+
+
+HANG_TEMPLATE = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, int HANG;) return 1; }\n"
+
+
+def hang_project(base):
+    beat = Path(base) / "beat"
+    build = PY + f' "{{tools}}/hang_build.py" "{{source}}" "{{obj}}" "{beat.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/hang_build.py": HANG_BUILD_PY})
+    tune(p, workers=1, hang_floor_s=2, hang_start_s=10)
+    return p
+
+
+def test_search_raises_no_slow_compile_for_a_block_that_killed_a_hung_compile(base):
+    p = hang_project(base)
+    r, out = search(p, wide(2))
+    seed_perf(p, 3)  # 1,000,000 compiles per worker-second
+    r, out = fresh(p, wide(2))
+    expect("slow-compile" in perf_log(p)[-1]["flags"], f"a block without a kill raises it: {perf_log(p)[-1]}", r)
+    r, out = fresh(p, HANG_TEMPLATE)
+    rec = perf_log(p)[-1]
+    expect(rec["killed"] == 1 and rec["compiled"] >= 2, f"the block killed the hang and measured: {rec}", r)
+    expect("slow-compile" not in rec["flags"], f"a block that killed a compile raises no slow-compile: {rec}", r)
+    seed_perf(p, 4, killed=1, compiled=1, wall_s=1000000.0)  # more such blocks than fast ones would pull the median down
+    r, out = fresh(p, wide(2))
+    expect("slow-compile" in perf_log(p)[-1]["flags"], f"the rate of a block with a kill is left out of the median: {perf_log(p)[-1]}", r)
+
+
+def test_search_passes_over_a_block_with_a_kill_in_a_slow_compile_streak(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 12)
+    seed_perf(p, 2, flags=["slow-compile"])
+    seed_perf(p, 1, killed=2, flags=[])  # a hang says nothing about speed: it neither adds nor ends the streak
+    r, out = fresh(p, NEVER)
+    got = [n for n in out.get("notice", []) if n.startswith("slow-compile")]
+    expect(len(got) == 1 and got[0].startswith("slow-compile in 3 blocks in a row of this unit"),
+           f"two flagged blocks, a block with a kill, then a slow block show the notice: {out.get('notice')}", r)
 
 
 def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
@@ -4319,6 +4441,33 @@ def test_search_records_each_probe_and_skips_those_the_adapters_do_not_support(b
     expect("build_resolve" in got["resolved-compiler"]["reason"] and "build_batch" in got["batching"]["reason"],
            f"each skip gives its reason: {got}", r)
     expect(out is not None and out["counts"]["single_function"] is False and out["counts"]["batch"] == 1, "the round runs", r)
+
+
+def test_search_records_a_skipped_probe_once_per_ticket_and_reason(base):
+    p = search_project(base)
+    for n in range(3):  # a changed text outside the target function probes again, and every probe skips for the same reason
+        r, out = search(p, f"int outside{n};\n" + NEVER)
+        expect(out is not None, "the round runs", r)
+    skipped = [(x["probe"], x["reason"]) for x in perf_log(p) if x["kind"] == "calibration" and x.get("outcome") == "skipped"]
+    expect(len(skipped) == 3 and {s[0] for s in skipped} == {"single-function", "batching", "resolved-compiler"},
+           f"one skipped record per probe and reason, not one per round: {skipped}", r)
+
+
+def test_search_records_a_skipped_probe_again_when_its_reason_changes(base):
+    p, forms = form_project(base, TARGET_DIFF_PY, probe_min_chars=None)
+    search(p, TWO_FUNCTIONS)
+    search(p, "int outside;\n" + TWO_FUNCTIONS)
+    r, out = search(p, TWO_FUNCTIONS.replace("SLOW_BODY;", "SLOW_BODY; int pad;"))  # the text it would cut is longer
+    reasons = [x["reason"] for x in perf_log(p) if x.get("probe") == "single-function"]
+    expect(len(reasons) == 2 and reasons[0] != reasons[1], f"a skip for another reason is a new record: {reasons}", r)
+
+
+def test_search_records_a_probe_that_is_not_skipped_every_time_it_runs(base):
+    p, forms = form_project(base, TARGET_DIFF_PY)
+    search(p, TWO_FUNCTIONS)
+    r, out = search(p, "int outside;\n" + TWO_FUNCTIONS)
+    outcomes = [x["outcome"] for x in perf_log(p) if x.get("probe") == "single-function"]
+    expect(outcomes == ["kept", "kept"], f"an outcome that is not a skip is recorded every time: {outcomes}", r)
 
 
 def resolve_project(base, *more):

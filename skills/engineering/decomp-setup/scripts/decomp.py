@@ -3002,6 +3002,8 @@ class SlotPool:
         self.closed = threading.Event()
         self.held, self.busy, self.reclaimed = set(), 0, 0  # slots held; workers holding or waiting for one
         self.writers = self.writers_at_start = 1
+        self.beaten = False  # whether the first heartbeat has counted the writers again
+        self.on_recount = None  # called when that count is higher than the starting one: the tuner's cut
         self.left = None  # the line for a heartbeat this search could not remove as it left (see close)
 
     def open(self):
@@ -3077,6 +3079,20 @@ class SlotPool:
             with self.lock:
                 self.writers = writers
                 self.lock.notify_all()
+            if not self.beaten:
+                self.beaten = True
+                self.recounted(writers)
+
+    def recounted(self, writers):
+        """At the first heartbeat: a higher writer count than the search started with becomes its starting count.
+
+        Two searches that joined in the same second each saw the other's heartbeat or not. A lower count
+        changes nothing. The tuner, once it exists, cuts its worker count to match (see Tuner.recount).
+        """
+        if writers > self.writers_at_start:
+            self.writers_at_start = writers
+            if self.on_recount:
+                self.on_recount()
 
     def start_workers(self):
         """The worker count a search starts with: the cores divided by the active writers."""
@@ -3837,7 +3853,7 @@ class Tuner:
     def __init__(self, pool, launcher, settings, start, most, fixed=False, reference=None, batched=False):
         self.pool, self.launcher, self.settings, self.batched = pool, launcher, settings, batched
         self.start = self.target = self.low = self.high = start
-        self.most, self.floor = most, max(1, start // 2)
+        self.most, self.floor, self.fixed = most, max(1, start // 2), fixed
         self.adjusts = not fixed and settings["tune_s"] > 0
         self.tick_s = settings["tune_s"] or SEARCH_DEFAULTS["tune_s"]
         self.reference = reference if settings["reference_s"] > 0 else None
@@ -3853,6 +3869,23 @@ class Tuner:
         self.short = False  # whether the pool then gave it less than the floor
         self.worker_s = self.starved_s = self.watched_s = 0.0
         self.refs, self.base = [], None
+        pool.on_recount = self.recount
+        self.recount()  # the first heartbeat may have counted more writers before this tuner existed
+
+    def recount(self):
+        """Cut the starting count to the cores divided by the writers the pool now counts, when it is above that.
+
+        The floor follows, and so does the block's own worker count. A fixed worker count is never changed.
+        """
+        cap = self.pool.start_workers()
+        with self.lock:
+            if self.fixed or self.start <= cap:
+                return
+            self.start, self.floor = cap, max(1, cap // 2)
+            if self.target > cap:
+                self.set(cap)
+            if self.block:
+                self.block.workers = cap
 
     def admit(self, index):
         """Hold worker `index` back while the count is at or under it. False once the block has ended."""
@@ -4314,6 +4347,14 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
         out.update(insights(template, results, best))
     if stop and not out.get("stop"):
         out["stop"] = stop
+    return capped(out)
+
+
+def capped(out):
+    """The summary held under the token cap, whatever it holds by now (`background`, `repeat`, `continues_s`).
+
+    The `background` report is never dropped or cut: the other parts give way. Applying it again changes nothing.
+    """
     cap = SUMMARY_TOKENS * TOKEN_CHARS
     for key in ("window", "next", "effects"):  # what the cap drops first, a row at a time
         while len(json.dumps(out)) > cap and out.get(key):
@@ -4634,7 +4675,7 @@ def perf_flags(rec, past):
     with the earlier blocks of its own unit among the last PERF_WINDOW of them: another unit's
     headers say nothing about this one's speed.
     slow-compile: compiles per worker-second PERF_DROP or more below the median of those blocks,
-    once PERF_MIN exist.
+    once PERF_MIN exist. A block that killed a compile raises none, and its rate joins no median.
     io-jitter: the block's p95 compile time over PERF_JITTER times its own median. No history is read.
     expander-starved: the workers waited for a candidate for over PERF_SHARE of the block's worker
     time, counted up to the last candidate handed out.
@@ -4648,8 +4689,8 @@ def perf_flags(rec, past):
     if rec["compiled"] < PERF_COMPILES * rec["workers_end"]:  # served by the cache or ended at once: nothing to measure
         return flags
     rate = block_rate(rec)
-    rates = [x for x in map(block_rate, past) if x is not None]
-    if rate is not None and len(rates) >= PERF_MIN:
+    rates = [x for x in map(block_rate, [r for r in past if not r.get("killed")]) if x is not None]  # a hang's rate is no baseline
+    if rate is not None and not rec.get("killed") and len(rates) >= PERF_MIN:
         median = statistics.median(rates)
         if rate <= (1 - PERF_DROP) * median:
             flags["slow-compile"] = (f"each worker built {rate:.1f} compiles a second, {round(100 * (1 - rate / median))} "
@@ -4695,6 +4736,8 @@ def perf_notices(flags, past, unit):
         for r in reversed(mine):
             if flag not in TUNER_FLAGS and not could_measure(r):
                 continue
+            if flag == "slow-compile" and r.get("killed"):  # a hang says nothing about speed: passed over
+                continue
             if flag not in (r.get("flags") or []):
                 break
             streak += 1
@@ -4717,7 +4760,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     final = best["score"].differ_bytes if "score" in best else None
     tuning = perf.get("tuning") or {}  # the Tuner's report: without one the worker count never moved
     worker_s = tuning.get("worker_s") or workers * wall
-    return {
+    rec = {
         "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
         **({"repeat": True} if repeat else {}), "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
         "collect_s": counts.get("collect_s", 0.0),
@@ -4727,7 +4770,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
         "t_ref_base_ms": tuning.get("t_ref_base_ms"), "t_ref_max_ms": tuning.get("t_ref_max_ms"),
         "expanded": perf["expanded"], "compiled": counts["compiled"], "unique_objects": memo_counts["unique_objects"],
         "build_fail": counts["build_fail"], "killed": launcher.killed, "src_dedupe_hits": memo_counts["src_dedupe_hits"],
-        "t_compile_p50_ms": statistics.median(ms) if ms else None,
+        "t_compile_p50_ms": round(statistics.median(ms), 2) if ms else None,
         "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
         "t_ref_ms": tuning.get("t_ref_ms") or (round(launcher.samples[0] * 1000, 2)
                                                if launcher.samples and counts.get("batch", 1) < 2 else None),
@@ -4737,6 +4780,7 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
         "end_reason": end, "model_latency_s": None if latency is None else round(latency, 2),
         "writers_active": counts.get("writers_active", 1),  # the searches in the slot pool when this one started
     }
+    return {k: round(v, 3) if isinstance(v, float) else v for k, v in rec.items()}  # no number is written unrounded
 
 
 def log_block(compiler, rec):
@@ -4877,7 +4921,15 @@ def as_ms(seconds):
 
 
 def probe_record(t, compiler, probe, began, outcome, reason, ref=None, took=None, **more):
-    """Add one probe's calibration record to the performance log."""
+    """Add one probe's calibration record to the performance log.
+
+    A `skipped` record is written once per ticket, probe and reason: the log already holding one says the same.
+    A record with another outcome, or a skip for another reason, is always written.
+    """
+    if outcome == "skipped" and any(r.get("kind") == "calibration" and r.get("outcome") == "skipped"
+                                    and r.get("ticket") == t["id"] and r.get("probe") == probe and r.get("reason") == reason
+                                    for r in perf_records()):
+        return
     append_perf({"kind": "calibration", "probe": probe, "unix": now(), "ticket": t["id"], "compiler": compiler,
                  "wall_s": round(time.perf_counter() - began, 3), "outcome": outcome, "reason": reason,
                  "t_ref_ms": as_ms(ref), "t_probe_ms": as_ms(took), **more})
@@ -5395,7 +5447,7 @@ def search_call(a):
     if budget:
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
-    print(json.dumps(out))
+    print(json.dumps(capped(out)))
     search_call.owed = None
     if not repeat:  # a repeat is no round: the next block's ceiling is measured from the last counted round
         (state / "ended").write_text(str(time.time()), encoding="utf-8")
@@ -5829,6 +5881,9 @@ class BackgroundPool(SlotPool):
     def foreground(self):
         return [name for name in super().foreground() if name != self.run.caller]
 
+    def recounted(self, writers):
+        """A background search yields to every foreground block, so a later writer changes nothing for it."""
+
     def acquire(self, prefer=0):
         while not (self.closed.is_set() or self.run.stopped.is_set() or self.run.over()):
             names = self.foreground()
@@ -6057,7 +6112,7 @@ def collect_background(t):
             keep_notices(t["id"], [IDENTITY_NAME] if notices else [])
             found["summary"] = summary(template, "match", best, {"space": template.space(), "tried": len(results)},
                                        winner, results, notices=notices)
-            found["summary"]["background"] = report
+            found["summary"] = capped({**found["summary"], "background": report})
     return found
 
 
