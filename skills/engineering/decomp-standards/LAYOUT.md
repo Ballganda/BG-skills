@@ -832,6 +832,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - A round that builds even one candidate is not a repeat.
 - `background`: only when the call collected a background search: its report (see [Background search](#background-search)), with `log` when it tried nothing.
   - The cap never drops `background`.
+  - The cap applies to the whole printed line, `background`, `repeat` and `continues_s` included: the other parts give way, in the order above.
+  - The same holds for the summary a collected natural match prints.
 
 #### Counts
 
@@ -847,6 +849,11 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `unique_objects`: distinct objects scored.
 - `hashing`: `object`, or `function` when the compiler's objects differ between two compiles of one source.
 - `workers`: the count the block started with.
+  - It is the cores divided by the active writers, unless `workers` is set.
+  - At its first heartbeat the search counts the writers again.
+  - A higher count becomes its starting count: `workers` is cut to the cores divided by it when above that, and the tuner's floor follows.
+  - A lower count changes nothing, and neither does a block that ends before its first heartbeat.
+  - A set `workers` is never cut.
 - `wall_s`: the block's seconds: the time candidates were tried, without the calibration before it.
 - `call_s`: the seconds of the whole `search` call, from its start to the summary.
   - It covers calibration, probes, and the block.
@@ -860,6 +867,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `single_function`: whether candidates were built as the single-function source.
 - `batch`: candidates per compiler call; 1 is no batching.
 - `writers_active`: searches running on this machine when the round started, this one included.
+  - A higher count at the search's first heartbeat replaces it, so two searches started together report the same count.
+  - A set `workers` still corrects `writers_active`.
 - `slots`: the pool's size.
 - `slots_reclaimed`: slots taken back from a search that stopped beating.
 - A block that sampled adds these:
@@ -956,6 +965,8 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `outcome`: `kept`, `dropped`, or `skipped`.
   - `eligible` stands in place of `kept` for the resolved compiler, which is never used.
 - `reason`.
+- A `skipped` record is written once per ticket, probe and reason: the log already holding one says the same.
+  - A skip for another reason is written, and so is every record with another outcome.
 - `t_ref_ms`: a build the usual way.
 - `t_probe_ms`: the probed mode, per candidate.
 - `identical`: where bytes were compared.
@@ -967,6 +978,8 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 
 #### A block record
 
+- Every number is rounded where it is written: milliseconds to 2 places, seconds and shares to 3.
+  - That covers the median and p95 compile times.
 - `unit`, `round`, `block`.
 - `repeat`: `true` on the record of a repeat, a round served wholly from the result cache; a counted round's record has no such field.
   - A repeat's `round` is the number of the last counted round, the one it repeated.
@@ -991,6 +1004,7 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `best_score_end`: the `differ_bytes` of this block's own best candidate; `null` when none was scored.
   - It is the block's best, not the ticket's, so it can be worse than `best_score_start`.
 - `t_to_best_s`, `end_reason`, `model_latency_s`, `writers_active`.
+  - `writers_active` is the corrected count (see the summary's `writers_active`).
 - The `flags` it raised and those it `shown`.
 - `unique_objects` is `null` when the round had no object identity (see [Result cache](#result-cache)).
 
@@ -998,6 +1012,10 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 
 - Flags compare a block with the earlier blocks of its own unit, taken from the last 20 block records of the same compiler: another unit's headers say nothing about this one's speed.
 - `slow-compile`: raised when compiles per worker-second are down 30 percent or more against the median of those blocks, once 3 exist, so a unit's first blocks raise nothing.
+  - A block that killed one or more compiles raises no `slow-compile`: a hang is not a slow machine.
+  - In the streak such a block is passed over, like a block that could not measure.
+  - Its rate is left out of the medians later blocks are compared with.
+  - The other flags are unchanged.
 - The next three read the block alone.
 - `io-jitter`: its p95 compile time is above 3 times its own median compile time.
 - `expander-starved`: `idle_frac` is above 20 percent.
