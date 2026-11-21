@@ -4569,7 +4569,9 @@ def test_search_rounds_keep_every_learned_likelihood_above_zero_and_a_frozen_cho
     began = [1.0, 1.0, 1.0]  # the frozen choice point's: the writer gave none
     for n in range(1, 11):
         r, out, kept = series_round(p, n)
-        expect(out["inert"] == ["A"], f"round {n}: the ignored choice point is frozen: {out}", r)
+        seen = out["counts"]["unique_objects"]
+        expect(out["end"] == "exhausted" and out["inert"] == [f"A: {seen} of {seen} objects"],
+               f"round {n}: the ignored choice point ends frozen, its freeze held against every object: {out}", r)
         expect(sorted(kept) == ["A", "B", "C"], f"round {n}: every choice point has kept likelihoods: {kept}", r)
         for label, weights in kept.items():
             expect(min(weights) >= 0.01 and max(weights) == 1, f"round {n}: {label} is within the floor and 1: {weights}", r)
