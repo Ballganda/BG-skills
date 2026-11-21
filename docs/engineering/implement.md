@@ -70,7 +70,7 @@ Each ticket carries a **tier** from [ticket-gen](ticket-gen.md), and the tier pi
 | Standard (also any ticket with no tier, and chat work) | Sonnet | One retry on the Hard model, then reported |
 | Hard | The top model | Reported, not retried |
 
-A repo set up before the models doc existed runs on these defaults until you rerun setup. A ticket that still fails after its retry is stopped and listed in the final reply, so a bad ticket never climbs every tier.
+The explorer runs on the Mechanical model (the Exploration row) and returns locations only: files, covering tests, commands, and where a named thing is defined and used. The implementer does its own interpreting. A repo set up before the models doc existed runs on these defaults until you rerun setup. A ticket that still fails after its retry is stopped and listed in the final reply, so a bad ticket never climbs every tier.
 
 On Claude Code, each subagent runs as one of the plugin's **restricted agents** (implementer, explorer, merger, plus the reviewer [code-review](code-review.md) uses), each with only the tools its role needs, so it starts from a lower token floor. The orchestrator overrides the agent's model at dispatch. Other harnesses get the same roles and models through a general subagent.
 

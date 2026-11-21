@@ -86,6 +86,10 @@ There is no official guidance, and the agent's default is unhelpful. It tends to
 **Where did `decision-mapping` go?**
 It is this skill. v1.1 renamed it to `wayfinder`, and you invoke it as `/wayfinder`. "Decision map" was jargon, and it was also inaccurate, because only one of the four ticket types is a decision by itself. The new name gave the skill one consistent vocabulary (destination, fog of war, frontier, the map) instead of an invented term on top. The unit kept the word "decision": a wayfinder ticket is a **decision ticket**, so that people do not read it as an implementation ticket.
 
+**Which kind of model does its subagent run on?**
+
+The default: the research subagents run on the Standard model (Sonnet by default), because they gather sources and then weigh them. They follow the Research row of the models doc [bg-setup](./bg-setup.md) writes. Change the row, and every dispatch of that kind follows.
+
 ## It's working if
 
 - The destination is written down and agreed before a single ticket exists.

@@ -79,7 +79,7 @@ Before the first command, find `<python>`: ask `python3`, then `python`, then `p
 ## Steps
 
 1. Read the spec and the batch Tickets. When they build on work not yet in the default branch (an open PR, a named spec branch), that branch is the base; otherwise the base is the default branch tip. State the base and the attribution lines with the resolved batch.
-2. (Optional) If Tickets need shared exploration, start one explorer with a fresh context window to save markdown notes to a directory outside the repo; pass its path to implementers.
+2. (Optional) If Tickets need shared exploration, start one explorer with a fresh context window, on the models doc's Exploration task (default the Mechanical model), to save markdown notes of locations only (files, covering tests, commands, definitions and uses) to a directory outside the repo; pass its path to implementers, who do their own interpreting.
 3. Run `begin` with the integration branch name, the batch Tickets with their tiers, `--base` set to the step 1 base, and `--attribution` set to the run's lines when it has any. If the tracker closes work through PRs, or the user asks, open a draft PR after the first merge, marked as closing the spec only, with the Tickets listed by reference and no closing keyword (the tracker doc's Closing work section names the keywords). If the integration branch already has an open PR, update it instead of opening another.
 4. Run `ready --cap 3` (or the user's cap). For each Ticket it lists, run `start`, then start an implementer on the printed worktree, on its tier's model. The implementer:
    - calls the Skill tool with `tdd` at pre-agreed seams where possible;
