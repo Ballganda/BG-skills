@@ -436,7 +436,16 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - A round tries the baseline first, then every one-choice-changed candidate, then the rest of the space.
 - Each group goes most likely first (with several workers, candidates are handed out in that order and finish in any).
 - When the rest does not fit the block's budget, it is sampled instead (see [Sampling](#sampling)).
-- A choice point whose alternatives all give the baseline's object is **inert**: it is frozen at its first alternative and not varied afterwards.
+- A choice point whose alternatives all give the baseline's object is **inert**: it is frozen at its first alternative.
+  - The freeze is a guess made at the baseline, so it is tried again wherever the code changes.
+  - The first time a candidate gives an object the block has not seen, the block owes one retry per other alternative of every choice point then frozen.
+  - A retry is that candidate with the one choice point set to the one alternative, and nothing else changed.
+  - Owed retries are handed out before the next candidate of the rest of the space, in the order the objects appeared.
+  - A retry that gives that candidate's object again leaves the choice point frozen.
+  - A retry that gives anything else (another object, a build failure, a guardrail refusal) unfreezes the choice point for the rest of the block.
+  - The candidates that vary an unfrozen choice point join the rest of the space, and the retries still owed for it are dropped.
+  - A retry is a candidate like any other: it counts in `compiled` and toward the budget, the deadline and the plateau.
+  - A choice point is not tried again against a candidate whose object the block has already seen.
 - The round stops at the first exact match that uses only natural alternatives.
 - A match that needs steering is kept while the rest of the block looks for a natural one.
 - When the block ends without a natural match, the match with the fewest steering choices is reduced further.
@@ -476,6 +485,8 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - The block's budget is the compiles it is expected to fit: its compile rate over the one-change sweep, times the seconds its deadline leaves.
 - A block served wholly from the cache has no rate, and tries the whole space.
 - Sampling applies when the candidates left after the sweep, inert choice points frozen, outnumber the budget left.
+  - It is judged again when a choice point is unfrozen, which then is free for the sampler, mutation and crossover.
+  - Owed retries are handed out before the sampler's next pick.
 - Then the tool picks them one at a time, each from every result in so far.
 - Each alternative holds a belief that it helps.
   - It starts at the alternative's share of its choice point's likelihoods (history and closeness included).
@@ -565,6 +576,8 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - Every 30 seconds the block recompiles its reference candidate, the baseline, in a folder of its own, holding a compile slot like any build.
 - Its base is the median of the block's first 2 × workers compile times.
 - When the block built nothing before it, the base is the first reference compile.
+- Under batching a compile time is a call's time shared among its candidates, so the base is the first reference compile instead.
+  - It is made as the block begins, and a failed one gives no base: the next that passes becomes it.
 - A reference compile more than 30 percent over the base halves the worker count, down to the floor.
 - It also raises `contention-or-throttle` in the [performance log](#performance-log).
 
@@ -577,6 +590,9 @@ A block ends on the first of these that holds:
 - `abort-buildfail`: more than half of the first 2 × workers builds failed. Fix the template.
 - `exhausted`: every candidate was tried, or more than 90 percent of the last 100 candidates repeated a source already tried.
   - A block that finished its last pass (see `deadline`) ends here.
+  - It is reported only when no retry of a frozen choice point is owed (see [A round](#a-round)).
+  - So every candidate was tried, or was left out by a freeze that held against every object the block found.
+  - A block whose deadline or plateau comes with retries owed ends on that reason.
 - `plateau`: the last 200 scored candidates, and no fewer than a quarter of all scored in the block, brought no new best score and no new object.
   - It is no new best score alone when the round has no object identity: see [Result cache](#result-cache).
 - `deadline`: the block ran for 10 seconds and built 200 candidates, or reached its ceiling first.
@@ -584,20 +600,26 @@ A block ends on the first of these that holds:
   - A block with the `budget` constant set also ends here once it built that many candidates.
   - The last pass: when the deadline comes with no more candidates left in the space than the block runs workers, the block does not end here.
   - It hands them out, waits for them, and ends `exhausted`, so it leaves no background search.
+  - Owed retries count among the candidates left.
+  - A last pass that brings a new retry or unfreezes a choice point does not build what that adds, and ends `deadline`.
   - Plateau and repeats do not end a last pass.
   - A match and a hung compile's kill still apply, so the overrun is the compile in hand plus the last pass, or the hang limit at most.
+  - Under batching a worker starts no batch once the deadline has come, unless it is in the last pass.
+  - So the overrun is one batch: its compiler call and the diffs of its candidates.
 
 ### Background search
 
 - When a block ends on `plateau` or `deadline` with time left under the ceiling and candidates untried, `search` prints its summary, with `continues_s`.
 - It leaves a detached process searching the same template on for that many seconds.
 - That process builds only what the round has not tried.
+- Its block freezes, retries and unfreezes by the same rule (see [A round](#a-round)), judged from the results the round already holds.
 - It ends on a match, its time, or the end of the space.
 - It is no attempt.
 - It yields to foreground blocks.
   - No foreground search counts it as a writer.
   - It starts no build while any foreground search on this machine has a fresh heartbeat in the pool.
-  - A block has its slots back within one compile.
+  - A block has its slots back within one compile, or within one batch under batching.
+- Under batching it starts no batch once its time has come or it was stopped.
 - The call that started it is the one exception: that call left the pool before it started the search.
 - So a heartbeat still under its name is one it failed to remove, and the search does not wait on it.
 - A call that cannot remove its own heartbeat as it leaves the pool does not fail.
@@ -764,7 +786,11 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - Once the ticket has read it in full, the line is the name `no-instruction-diff` alone (see [Adapter notices](#adapter-notices)).
 - `failure`: the end of the first failure log (only when none was scored).
 - `effects`: the choice points that change the score, at most 8, largest first, each with its alternatives' change in differing bytes against the baseline (`{"B": {"B1": -2}}`).
-- `inert`: the labels of the frozen choice points.
+- `inert`: the choice points still frozen when the round ended, each as `"<label>: <n> of <m> objects"`.
+  - `m` is the round's distinct objects, and `n` is how many of them the freeze was tried against and held, the baseline's included.
+  - `n` is below `m` only when the block ended with retries owed.
+  - A choice point is safe to leave out of the next round when `n` equals `m`, and is worth another round when it does not.
+  - A choice point unfrozen during the block is not listed: it is a free choice point when the round ends.
 - `next`: the next two closest candidates, each as the choices where it differs from the best, then its `differ_bytes`.
 - `pairs`: at most 3 pairs of alternatives whose joint effect differs from the sum of their single effects, largest first, such as `B2+D2: -6 bytes`.
   - Negative means they help more together than apart.
@@ -772,7 +798,7 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - It is the mean `differ_bytes` of those holding both, less those holding only one, less those holding only the other, plus those holding neither.
   - It appears only when a pair shows one.
 - `stop`: advice to stop.
-  - It is given when every choice point is inert (no alternative changes the object).
+  - It is given when every choice point is inert (no alternative changes the object) and every `inert` entry holds all of the round's objects.
   - It is given after 2 template rounds in a row that brought no new best score.
   - A round brings a new best score when it is lower in `differ_bytes` than every earlier attempt on the ticket, checks included.
   - A repeat is no round here.
@@ -905,6 +931,7 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `wall_s`: the seconds of the block alone, or of the calibration alone.
 - `t_ref_ms`: the median of the block's reference compiles.
   - Without one, it is the first passing compile of the block, or of the calibration.
+  - Under batching it is always a single build's time, so `null` without a reference compile.
 
 #### A probe's calibration record
 
