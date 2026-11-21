@@ -4339,7 +4339,9 @@ def batch_project(base, per_call, per_source):
     p = search_project(base, config={"build": PY + f' "{{tools}}/slow_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
                                      "build_batch": batch},
                        files={"tools/batch_build.py": BATCH_BUILD_PY, "tools/slow_build.py": WAIT_BUILD_PY})
-    tune(p, workers=1)
+    # The reference interval and the ceiling are far above any run: no periodic reference compile adds a single
+    # build, and the probes' share of the ceiling never runs out, however slow the machine is.
+    tune(p, workers=1, reference_s=3600, ceiling_s=3600)
     return p, lambda: log.read_text().splitlines()
 
 
