@@ -2134,6 +2134,48 @@ def test_search_reports_the_build_failure_when_no_candidate_builds(base):
     expect(2 <= out["counts"]["build_fail"] <= 6 and "C2143" in out["failure"], "the summary carries the compiler's error", r)
 
 
+BROKEN_A = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, SYNTAX_ERROR a1;, SYNTAX_ERROR a2;, SYNTAX_ERROR a3;) "
+                   "PERM_GENERAL(int WRONG_b0;, int WRONG_b1; int WRONG_b2;) return 1; }\n")
+
+
+def test_search_summary_of_an_abort_buildfail_names_the_failure_and_the_choice_point(base):
+    p = search_project(base)
+    tune(p, workers=2, buildfail_frac=0.2)
+    r, out = search(p, BROKEN_A)
+    expect(out is not None and out["end"] == "abort-buildfail" and out["best"] is not None, f"a scored baseline: {out}", r)
+    expect("C2143" in out.get("failure", ""), f"the summary carries the compiler's error: {out}", r)
+    expect(out.get("window"), f"and still the window: {out}", r)
+    rows = out.get("build_failed", [])
+    expect(len(rows) == 1 and rows[0].startswith("A: ") and rows[0].endswith(" alternatives failed to build"),
+           f"one row, for the choice point whose alternatives failed: {rows}", r)
+    expect(len(rows[0].split()) == 8 and int(rows[0].split()[1]) <= int(rows[0].split()[3]) <= 3,
+           f"it holds the failed and tried counts: {rows}", r)
+
+
+def test_search_summary_holds_no_failure_or_build_failed_when_the_block_ends_another_way(base):
+    p = search_project(base)
+    tune(p, buildfail_frac=0.99)
+    r, out = search(p, BROKEN_A)
+    expect(out is not None and out["end"] != "abort-buildfail" and out["counts"]["build_fail"] > 0,
+           f"some builds failed but the block did not abort: {out}", r)
+    expect("failure" not in out and "build_failed" not in out, f"neither key is given: {out}", r)
+
+
+def test_an_abort_buildfail_summary_with_long_rows_stays_under_the_cap_and_keeps_failure(base):
+    tool = load_tool()
+    template = tool.parse_template(wide(12))
+    n = len(template.choices)
+    results = [{"seed": 0, "code": "x", "result": "differ", "differ_bytes": 8, "object": "o"}]
+    for i in range(n):
+        vector = [1 if j == i else 0 for j in range(n)]
+        results.append({"seed": template.seed(vector), "code": "x", "result": "build-fail", "differ_bytes": None, "object": None})
+    best = {"seed": 0, "score": tool.Score("differ", 8, ""), "window": ["x" * 118] * 7, "failure": "C2143 " * 200}
+    tool.SUMMARY_TOKENS = 200
+    out = tool.summary(template, "abort-buildfail", best, {"space": 4096}, None, results)
+    expect(len(json.dumps(out)) <= 200 * tool.TOKEN_CHARS, f"the summary is {len(json.dumps(out))} characters")
+    expect(out.get("failure", "").endswith("C2143 "), f"failure is kept: {out}")
+
+
 def test_search_detail_returns_one_candidates_source_and_score(base):
     p = search_project(base)
     search(p, NEVER)
@@ -4671,7 +4713,9 @@ def test_search_rounds_keep_every_learned_likelihood_above_zero_and_a_frozen_cho
     began = [1.0, 1.0, 1.0]  # the frozen choice point's: the writer gave none
     for n in range(1, 11):
         r, out, kept = series_round(p, n)
-        expect(out["inert"] == ["A"], f"round {n}: the ignored choice point is frozen: {out}", r)
+        seen = out["counts"]["unique_objects"]
+        expect(out["end"] == "exhausted" and out["inert"] == [f"A: {seen} of {seen} objects"],
+               f"round {n}: the ignored choice point ends frozen, its freeze held against every object: {out}", r)
         expect(sorted(kept) == ["A", "B", "C"], f"round {n}: every choice point has kept likelihoods: {kept}", r)
         for label, weights in kept.items():
             expect(min(weights) >= 0.01 and max(weights) == 1, f"round {n}: {label} is within the floor and 1: {weights}", r)
@@ -4763,6 +4807,40 @@ def test_search_advises_stopping_after_two_rounds_with_no_new_best_score(base):
     expect("repeat" not in out, f"a round that built its candidates is no repeat: {out}", r)
     r, out = search(p, MATCHING)
     expect(out is not None and out["end"] == "match" and "stop" not in out, f"a round that matches carries none: {out}", r)
+
+
+def test_search_stop_advice_counts_flat_rounds_across_a_check_that_scores_no_better(base):
+    p = search_project(base)
+    search(p, NEVER)
+    r, out = search(p, wide(2))
+    expect(out is not None and "2 rounds" in out.get("stop", ""), f"two flat rounds: {out}", r)
+    check_with(p, 9, "--category", "register-allocation")
+    r, out = search(p, wide(3))
+    expect(out is not None and out.get("stop", "").startswith("3 rounds"), f"the check is passed over: {out}", r)
+
+
+def test_search_stop_advice_restarts_after_a_check_that_scores_lower_than_every_earlier_attempt(base):
+    p = search_project(base, source=MARK + "int f(void) { " + "int WRONG; " * 2 + "return 1; }\n")  # 4 bytes
+    r, out = search(p, NEVER)
+    expect(out is not None and out["best"]["differ_bytes"] == 4, f"the rounds score no better than the check: {out}", r)
+    r, out = search(p, wide(2))
+    expect(out is not None and "2 rounds" in out.get("stop", ""), f"two flat rounds: {out}", r)
+    check_with(p, 1, "--category", "register-allocation")
+    r, out = search(p, wide(3))
+    expect(out is not None and "stop" not in out, f"a new best by hand restarts the count: {out}", r)
+
+
+def test_search_stop_advice_counts_from_the_last_match_on(base):
+    p = search_project(base)
+    search(p, NEVER)
+    search(p, wide(2))
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and "stop" not in out, f"a matching round holds none: {out}", r)
+    check_with(p, 1, "--category", "register-allocation")
+    r, out = search(p, wide(3))
+    expect(out is not None and "stop" not in out, f"the first flat round after the match: {out}", r)
+    r, out = search(p, wide(4))
+    expect(out is not None and out.get("stop", "").startswith("2 rounds"), f"the second says 2 rounds: {out}", r)
 
 
 # ---------- template search: a round with nothing new ----------

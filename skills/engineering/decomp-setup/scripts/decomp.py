@@ -3762,6 +3762,8 @@ def run_block(template, memo, options):
     elif block.steered:
         seed = reduce_steering(template, block.steered, lambda at: block.result(at, memo, workers[0]), boost)
         end, best = "match", {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
+    if end == "abort-buildfail" and "score" in best:  # a scored baseline: the summary still gives the first failure log
+        best = dict(best, failure=block.failure)
     wall = block.elapsed()
     block.counts.update(workers=block.workers, wall_s=round(wall, 2))
     if perf is not None:
@@ -4223,24 +4225,43 @@ class Arms:
 
 
 def stop_advice(entries):
-    """The summary's advice to stop after FLAT_ROUNDS template rounds in a row with no new best score, or '' otherwise.
+    """The summary's advice to stop after FLAT_ROUNDS template rounds with no new best score, or '' otherwise.
 
-    entries is the ticket's check trail, the round just ended last. A round brought a new best score
-    when its differ_bytes is below every earlier attempt's, checks included; a round that scored
-    nothing brought none.
+    entries is the ticket's check trail, the round just ended last. Only the records after the last
+    bytes-match count. An attempt brought a new best score when its differ_bytes is below every
+    earlier one's, checks included; one that scored nothing brought none. Walking back, a search
+    with no new best adds one, a search or a check with a new best ends the count, and a check
+    with none is passed over.
     """
+    start = max([i + 1 for i, e in enumerate(entries) if e["result"] == "bytes-match"], default=0)
     flat = 0
-    for i in range(len(entries) - 1, -1, -1):
-        if entries[i]["by"] != "search":
-            break
-        earlier = [e["differ_bytes"] for e in entries[:i] if e["differ_bytes"] is not None and e["differ_bytes"] >= 0]
+    for i in range(len(entries) - 1, start - 1, -1):
+        earlier = [e["differ_bytes"] for e in entries[start:i] if e["differ_bytes"] is not None and e["differ_bytes"] >= 0]
         mine = entries[i]["differ_bytes"]
         if mine is not None and mine >= 0 and (not earlier or mine < min(earlier)):
             break
-        flat += 1
+        flat += entries[i]["by"] == "search"
     if flat >= FLAT_ROUNDS:
         return f"{flat} rounds in a row brought no new best score: stop, release the ticket with a note, or change approach"
     return ""
+
+
+BUILD_FAILED_ROWS = 8  # choice points the summary's build_failed lists
+
+
+def build_failed(template, results):
+    """The rows of the summary's build_failed: each choice point with a one-change candidate that failed to build."""
+    by_seed = {r["seed"]: r["result"] for r in results}
+    rows = []
+    for i, c in enumerate(template.choices):
+        tried = failed = 0
+        for pick in range(1, len(c.alternatives)):
+            got = by_seed.get(template.seed([pick if j == i else 0 for j in range(len(template.choices))]))
+            tried += got is not None
+            failed += got == "build-fail"
+        if failed:
+            rows.append((-failed, c.label, f"{c.label}: {failed} of {tried} alternatives failed to build"))
+    return [row for _, _, row in sorted(rows)[:BUILD_FAILED_ROWS]]
 
 
 EFFECT_ROWS = 8  # choice points the effect table lists
@@ -4311,12 +4332,20 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
             out["notice"] = out.get("notice", []) + [EMPTY_NAME if EMPTY_NAME in stated else EMPTY_REPORT]
     else:
         out["failure"] = best["failure"][-FAILURE_CHARS:]
+    if end == "abort-buildfail":
+        if best.get("failure"):
+            out["failure"] = best["failure"][-FAILURE_CHARS:]
+        rows = build_failed(template, results)
+        if rows:
+            out["build_failed"] = rows
     if results:
         out.update(insights(template, results, best))
     if stop and not out.get("stop"):
         out["stop"] = stop
+    if end == "match":
+        out.pop("stop", None)
     cap = SUMMARY_TOKENS * TOKEN_CHARS
-    for key in ("window", "next", "effects"):  # what the cap drops first, a row at a time
+    for key in ("window", "next", "effects", "build_failed"):  # what the cap drops first, a row at a time
         while len(json.dumps(out)) > cap and out.get(key):
             out[key].pop()
     over = len(json.dumps(out)) - cap
