@@ -2503,8 +2503,9 @@ def test_search_freezes_a_choice_the_compiler_ignores(base):
     template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_b2;) "
                        "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) return 1; }\n")
     r, out = search(p, template)
-    expect(out is not None and out["inert"] == ["B"], f"the ignored choice should be inert: {out}", r)
-    expect(out["counts"]["compiled"] == 4, "the inert choice is not varied after the one-change candidates", r)
+    expect(out is not None and out["inert"] == ["B: 2 of 2 objects"], f"the ignored choice should be inert: {out}", r)
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 6,
+           f"after the sweep of 4 the inert choice is only tried again, twice, against the one new object: {out}", r)
     expect(out["effects"] == [{"A": {"A1": 2}}], f"the effect table lists only choices that change the score: {out['effects']}", r)
     expect("stop" not in out, "a search with a live choice carries no stop advice", r)
 
@@ -2512,9 +2513,86 @@ def test_search_freezes_a_choice_the_compiler_ignores(base):
 def test_search_advises_stopping_when_every_choice_is_inert(base):
     template = MARK + "int f(void) { int WRONG_k; PERM_GENERAL(int IGNORED_x;, int IGNORED_y;) return 1; }\n"
     r, out = search(sweep_project(base), template)
-    expect(out is not None and out["inert"] == ["A"] and out["effects"] == [], f"every choice is inert: {out}", r)
+    expect(out is not None and out["inert"] == ["A: 1 of 1 objects"] and out["effects"] == [], f"every choice is inert: {out}", r)
     expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 2 and "stop searching" in out["stop"],
            "the summary should carry stop advice", r)
+
+
+# A fake compiler that logs each compile's tag_ words in order. Its object holds a word with _h in it (the
+# helper's) only when the source holds tag_b1 (the body that calls the helper), and never a word with _u in it.
+REACH_BUILD_PY = """import re, sys
+text = open(sys.argv[1]).read()
+open(LOG, "a").write(" ".join(re.findall(r"tag_\\w+", text)) + chr(10))
+text = re.sub(r"\\w+_u\\w*", "", text)
+if "tag_b1" not in text:
+    text = re.sub(r"\\w+_h\\w*", "", text)
+open(sys.argv[2], "w").write(text)
+"""
+REACHED = ("PERM_GENERAL(@body, int tag_b0; int WRONG_b;, int tag_b1;{left}) "
+           "PERM_GENERAL(@hloop loop-form, int tag_h0; int WRONG_h;, int tag_h1;{left})")
+UNREAD = in_function("PERM_GENERAL(" + ", ".join(f"int tag_a{i}; int WRONG_a{i};" for i in range(3)) + ") "
+                     + " ".join("PERM_GENERAL(" + ", ".join(f"int tag_u{c}{i};" for i in range(3)) + ")" for c in "pq"))
+
+
+def reach_search(base, template, **constants):
+    """sampled_search with the compiler above. Returns (process, summary, the candidates built, in order)."""
+    build = REACH_BUILD_PY.replace("LOG", repr(str(Path(base) / "order.log")))
+    return sampled_search(base, template, files={"tools/search_build.py": build}, **constants)
+
+
+def test_search_tries_a_frozen_choice_again_once_a_candidate_reaches_its_code_and_finds_the_match(base):
+    r, out, order = reach_search(base, in_function(REACHED.format(left="")))
+    expect(out["end"] == "match" and out["best"] == {"code": "body1 hloop1", "differ_bytes": 0},
+           f"the candidate the freeze at the baseline would hide is the match: {out}", r)
+    expect(out["counts"]["compiled"] == 4 and order[3] == "tag_b1 tag_h1", f"it is the fourth candidate built: {order}", r)
+    expect(out["inert"] == [], f"the retry changed the object, so the choice point is unfrozen: {out['inert']}", r)
+
+
+def test_search_with_a_frozen_choice_unfrozen_by_its_retry_and_no_match_ends_exhausted_with_the_space_built(base):
+    r, out, order = reach_search(base, in_function(REACHED.format(left=" int WRONG_left;")))
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 4 and sorted(order) == sorted(set(order)),
+           f"all 4 candidates are built: {out}", r)
+    expect(out["inert"] == [] and "stop" not in out, f"no choice point stays frozen: {out}", r)
+
+
+def test_search_tries_each_frozen_choice_once_per_alternative_against_each_new_object_and_no_further(base):
+    r, out, order = reach_search(base, UNREAD)
+    c = out["counts"]
+    expect(out["end"] == "exhausted" and c["space"] == 27 and c["compiled"] == 15,
+           f"7 in the sweep, then 4 retries for each of the 2 new objects: {out}", r)
+    both = [line for line in order if "tag_up0" not in line and "tag_uq0" not in line]
+    expect(not both, f"no candidate varies both frozen choice points: {both}", r)
+    expect(out["inert"] == ["B: 3 of 3 objects", "C: 3 of 3 objects"] and c["unique_objects"] == 3,
+           f"each freeze held against every object: {out['inert']}", r)
+    retries = [line.split()[0] for line in order[7:]]
+    expect(retries == ["tag_a1"] * 4 + ["tag_a2"] * 4, f"the retries come in the order the objects appeared: {order[7:]}", r)
+
+
+def test_search_with_retries_owed_at_its_budget_ends_deadline_and_inert_says_what_was_not_tried(base):
+    r, out, order = reach_search(base, UNREAD, budget=9)
+    c = out["counts"]
+    expect(out["end"] == "deadline" and c["compiled"] == 9, f"the budget ends the block with 6 retries owed: {out}", r)
+    held = [int(entry.split(": ")[1].split()[0]) for entry in out["inert"]]
+    expect(len(held) == 2 and min(held) < c["unique_objects"] == 3 and all(e.endswith(" of 3 objects") for e in out["inert"]),
+           f"an entry holds fewer objects than the block found: {out['inert']}", r)
+    expect("stop" not in out, f"no stop advice: {out}", r)
+
+
+def test_search_samples_an_unfrozen_choice_with_a_budget_too_small_for_the_space(base):
+    template = in_function(
+        "PERM_GENERAL(@body, int tag_b0; int WRONG_b;, int tag_b1; int WRONG_c;) "
+        "PERM_GENERAL(@hloop loop-form, " + ", ".join(f"int tag_h{i}; int WRONG_h{i};" for i in range(3)) + ") "
+        + " ".join("PERM_GENERAL(" + ", ".join(f"int tag_{c}{i}; int WRONG_{c}{i};" for i in range(3)) + ")" for c in "wxyz"))
+    r, out, order = reach_search(base, template, budget=40)
+    c = out["counts"]
+    expect(out["end"] == "deadline" and c["space"] == 486 and c["compiled"] == 40 and c["sampled"] > 0,
+           f"the space is sampled up to the budget: {out}", r)
+    expect(sorted(line.count("0") for line in order[:12]) == [5] * 11 + [6]
+           and order[12] == "tag_b1 tag_h1 tag_w0 tag_x0 tag_y0 tag_z0",
+           f"after the sweep of 12 comes the retry against the first new object: {order[:13]}", r)
+    later = [line for line in order[13:] if "tag_h0" not in line]
+    expect(later and out["inert"] == [], f"the unfrozen choice point is varied by later candidates: {order[13:]}", r)
+    expect(len(set(order)) == 40, f"no candidate is built twice: {order}", r)
 
 
 def test_search_effect_table_lists_at_most_eight_choices_and_names_the_next_two(base):
@@ -2564,8 +2642,8 @@ def test_search_compiles_alternatives_with_identical_source_once(base):
     p, builds = counting_project(base)
     r, out = search(p, TWINS)
     expect(out is not None and out["counts"]["space"] == 4, "the template has four candidates", r)
-    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 1,
-           f"the twin is seen once, and the freeze of its inert choice skips the fourth: {out['counts']}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 2,
+           f"the twin is seen at the baseline and again in the retry of its inert choice, and never built: {out['counts']}", r)
     expect(out["counts"]["unique_objects"] == 2 and out["counts"]["hashing"] == "object", "two distinct objects", r)
 
 
@@ -3827,8 +3905,18 @@ def test_search_still_waits_for_the_sweep_when_object_identity_exists_and_freeze
     template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;) "
                        "PERM_GENERAL(int WRONG_d;, int WRONG_d; /* the same bytes */) return 1; }\n")
     r, out = search(p, template)
-    expect(out is not None and out["inert"] == ["B"] and out["counts"]["compiled"] == 3,
-           f"the choice whose alternatives give the baseline's hash is frozen, and only the sweep (3 of the 4) is built: {out}", r)
+    expect(out is not None and out["inert"] == ["B: 2 of 2 objects"] and out["counts"]["compiled"] == 4,
+           f"the choice whose alternatives give the baseline's hash is frozen, and its retry holds against the other object: {out}", r)
+
+
+def test_search_with_no_object_identity_builds_the_whole_space_and_lists_no_inert_choice(base):
+    p, builds = counting_project(base, stamp=True, sha=False)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;) "
+                       "PERM_GENERAL(int WRONG_d;, int WRONG_d; /* the same bytes */, int WRONG_d; /* again */) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 6 == out["counts"]["space"],
+           f"nothing is frozen, so all 6 candidates are built: {out}", r)
+    expect(out["inert"] == [] and "stop" not in out, f"no choice point is listed as inert: {out}", r)
 
 
 def test_search_raises_no_expander_starved_for_a_block_of_24_candidates_with_no_object_identity(base):

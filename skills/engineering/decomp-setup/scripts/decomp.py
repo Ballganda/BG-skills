@@ -2291,20 +2291,47 @@ def one_change(template, boost=None):
     return [0] + [seed for *_, seed in sorted(changed)]
 
 
-def inert_choices(template, results):
-    """The labels of the choice points whose alternatives all gave the baseline's object, among results so far."""
+def freezes(template, results):
+    """The choice points frozen as inert among results so far, as (label, objects the freeze held against, objects found).
+
+    A choice point is frozen when its alternatives all gave the baseline's object, and stays so
+    until a candidate that varies it alone gives another result than the candidate it was made
+    from (a retry: see Block.meet). Its freeze held against an object when a candidate that gave
+    the object, the choice point at its first alternative, was tried with every other alternative
+    of the choice point and gave that object each time. The baseline's object is one of them.
+    """
     by_seed = {r["seed"]: r for r in results}
     base = by_seed.get(0, {}).get("object")
+    if not base:
+        return []
+    vectors = {seed: template.vector(seed) for seed in by_seed}
+    found = {r["object"] for r in results if r.get("object")}
     out = []
     for i, c in enumerate(template.choices):
-        for pick in range(1, len(c.alternatives)):
-            vector = [0] * len(template.choices)
-            vector[i] = pick
-            if not base or by_seed.get(template.seed(vector), {}).get("object") != base:
-                break
+        picks = range(1, len(c.alternatives))
+
+        def tries(vector):
+            return [by_seed.get(template.seed(vector[:i] + [pick] + vector[i + 1:])) for pick in picks]
+
+        if any(r is None or r.get("object") != base for r in tries(vectors[0])):
+            continue
+        held = set()
+        for seed, vector in vectors.items():
+            if vector[i]:
+                continue
+            obj, tried = by_seed[seed].get("object"), tries(vector)
+            if any(r is not None and r.get("object") != obj for r in tried):
+                break  # unfrozen
+            if obj and None not in tried:
+                held.add(obj)
         else:
-            out.append(c.label)
+            out.append((c.label, len(held), len(found)))
     return out
+
+
+def inert_choices(template, results):
+    """The labels of the choice points frozen as inert, among results so far (see freezes)."""
+    return [label for label, _, _ in freezes(template, results)]
 
 
 # ---------- template search: the priors, and which candidates a block tries when it cannot try them all ----------
@@ -2566,10 +2593,12 @@ def block_budget(block):
 
 
 def space_fits(block, inert):
-    """Whether the block can try every candidate the sweep left, the inert choice points frozen."""
+    """Whether the block can try every candidate not handed out yet, the inert choice points frozen."""
     budget = block_budget(block)
-    live = [len(c.alternatives) for c in block.template.choices if c.label not in inert]
-    left = math.prod(live) - 1 - sum(n - 1 for n in live)
+    t = block.template
+    frozen = {i for i, c in enumerate(t.choices) if c.label in inert}
+    left = math.prod(len(c.alternatives) for i, c in enumerate(t.choices) if i not in frozen)
+    left -= sum(1 for seed in block.given if not any(pick for i, pick in enumerate(t.vector(seed)) if i in frozen))
     return budget is None or left <= budget - block.counts["compiled"]
 
 
@@ -2581,12 +2610,14 @@ def sampled(block, inert):
     the block constants, so one worker tries the same candidates in the same order on every run.
     Take each seed with the block's lock held. The counts gain `budget`, `pairwise`, `sampled`, and `explored`.
     A block with parents (a later block) shares its picks between the Sampler, mutation and crossover (Arms).
+    A block makes it again when a choice point is unfrozen: the counts then go on from where they stood.
     """
     rng = random.Random(int(block.settings["seed"]))
-    sampler = Sampler(block.template, set(inert), block.swept, block.boost, rng)
+    sampler = Sampler(block.template, set(inert), block.given, block.boost, rng)
     arms = Arms(sampler, block.parents, rng)
     budget = block_budget(block)
-    block.counts.update(budget=budget, pairwise=0, sampled=0, explored=0)
+    before = {k: block.counts.get(k) or 0 for k in ("pairwise", "sampled", "explored")}
+    block.counts.update(budget=budget, **before)
     for seed in (pairwise_cover(sampler) or []) if budget < PAIRWISE_BELOW else []:
         sampler.mark(seed)
         block.counts["pairwise"] += 1
@@ -2597,7 +2628,7 @@ def sampled(block, inert):
         seed = arms.pick()
         if seed is None:
             return
-        block.counts.update(sampled=sampler.picks, explored=sampler.explored)
+        block.counts.update(sampled=before["sampled"] + sampler.picks, explored=before["explored"] + sampler.explored)
         if arms.active:
             block.counts.update(arm_picks=dict(arms.picked))
         yield seed
@@ -3312,9 +3343,10 @@ class Block:
 
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. The rest waits for the sweep's last result: a choice point whose
-    alternatives all gave the baseline's object is inert, and stays at its first alternative from
-    then on. It does not wait once the round has no object identity (see Memo.blind), as nothing
-    can then be frozen. A match that needs steering does not end the block: it is kept while the rest is tried
+    alternatives all gave the baseline's object is inert, and is frozen at its first alternative.
+    The freeze is a guess made at the baseline, tried again against each new object (see meet): a
+    block is `exhausted` only when no such retry is owed. It does not wait once the round has no
+    object identity (see Memo.blind), as nothing can then be frozen. A match that needs steering does not end the block: it is kept while the rest is tried
     for a natural one (see run_block). boost is the history's (see candidates).
     """
 
@@ -3327,6 +3359,13 @@ class Block:
         self.swept = set(self.sweep)
         self.pending = set(self.sweep)  # the opening seeds with no result yet
         self.seeds = None  # the seeds after the sweep, made when its results are in
+        self.given = set(self.sweep)  # every seed handed out, the sweep's from the start
+        self.flying = set()  # the seeds handed out with no result yet
+        self.frozen = None  # the indexes of the choice points frozen as inert, once the sweep's results are in
+        self.objects = set()  # the distinct objects met since the freeze, the baseline's among them
+        self.owed = collections.deque()  # the retries not handed out yet (see meet)
+        self.retry = {}  # a retry's seed to (the frozen choice point it varies, the object it was made from)
+        self.cut = False  # whether the last pass left a retry or an unfrozen choice point's candidates untried
         self.by_seed = {}  # seed to its result, for every candidate tried
         self.steered, self.natural = [], None  # seeds that match only through steering; the natural match
         self.start = time.perf_counter()  # monotonic and fine-grained: the wall clock steps about 15 ms on Windows
@@ -3381,16 +3420,34 @@ class Block:
                     self.end = "deadline"
                     return None
                 if self.sweep:
-                    return self.sweep.popleft()
-                if not self.held():
+                    return self.hand(self.sweep.popleft())
+                if self.held():
+                    self.lock.wait(0.05)  # the sweep's last builds are still out: what is inert is not known yet
+                    continue
+                if self.seeds is None:
+                    self.seeds = self.rest()
+                seed = self.following()
+                if seed is not None:
+                    return seed
+                if not (self.frozen and self.flying) or self.last:
                     break
-                self.lock.wait(0.05)  # the sweep's last builds are still out: what is inert is not known yet
-            if self.seeds is None:
-                self.seeds = self.rest()
-            seed = next(self.seeds, None)
-            if seed is None:
-                self.end = "exhausted"
-            return seed
+                self.lock.wait(0.05)  # a candidate still out may bring a new object, and with it a retry
+            self.end = "deadline" if self.owed or self.cut else "exhausted"  # the last pass left some untried
+            return None
+
+    def hand(self, seed):
+        """Note a seed as handed out. Call with the lock held."""
+        self.given.add(seed)
+        self.flying.add(seed)
+        return seed
+
+    def following(self):
+        """The next seed after the sweep: an owed retry before the next of the rest. None when there is none now.
+        The last pass hands out only what it counted. Call with the lock held, the rest made."""
+        if self.owed and not self.last:
+            return self.hand(self.owed.popleft())
+        seed = next(self.seeds, None)
+        return seed if seed is None else self.hand(seed)
 
     def held(self):
         """Whether the rest waits for the sweep's results. It does not once no choice point can be frozen. Call with the lock held."""
@@ -3402,6 +3459,9 @@ class Block:
         When so, the block goes on past its deadline until they are built: plateau and repeats end it
         no more, a match and a run of failed builds still do, and a hung compile is still killed.
         Before the sweep's results are in, what is left is counted as if no choice point were inert.
+        Owed retries count among the candidates left. A retry that comes to be owed during the last
+        pass is not built, nor are the candidates of a choice point unfrozen in it: the block then
+        ends `deadline` (see take).
         """
         n = self.running()
         if self.sweep or self.held():
@@ -3410,9 +3470,11 @@ class Block:
         if self.seeds is None:
             self.seeds = self.rest()
         counts = dict(self.counts)  # a sampled space counts its picks: these are not tried if the block ends here
-        left = list(itertools.islice(self.seeds, n + 1))
+        left = list(itertools.islice(self.owed, n + 1))
+        left += itertools.islice(self.seeds, n + 1 - len(left))
         self.last = len(left) <= n
         if self.last:
+            self.owed.clear()
             self.seeds = iter(left)
         else:
             self.counts = counts
@@ -3431,24 +3493,62 @@ class Block:
         with self.lock:
             while len(seeds) < n and not self.end:
                 if self.sweep:
-                    seeds.append(self.sweep.popleft())
+                    seeds.append(self.hand(self.sweep.popleft()))
                     continue
-                seed = None if self.held() or self.seeds is None else next(self.seeds, None)
+                seed = None if self.held() or self.seeds is None else self.following()
                 if seed is None:
                     break
                 seeds.append(seed)
         return seeds
 
     def rest(self):
-        """The seeds after the sweep: the space, most likely first, less the sweep and every candidate that varies
-        an inert choice point. Call with the lock held, the sweep's results in."""
+        """The seeds after the sweep: the space, most likely first, less every seed handed out and every candidate
+        that varies a frozen choice point. Made when the sweep's results are in, which is when the inert choice
+        points are frozen, and again when one is unfrozen (see meet). Call with the lock held."""
         t = self.template
-        inert = inert_choices(t, self.results)
+        if self.frozen is None:
+            inert = inert_choices(t, self.results)
+            self.frozen = {i for i, c in enumerate(t.choices) if c.label in inert}
+            for r in sorted(self.results, key=lambda r: r["seed"] != 0) if self.frozen else []:  # the baseline's first
+                self.meet(r["seed"], r["object"])
+        frozen = set(self.frozen)
+        inert = [c.label for i, c in enumerate(t.choices) if i in frozen]
         if not space_fits(self, inert):
             return sampled(self, inert)
-        frozen = {i for i, c in enumerate(t.choices) if c.label in inert}
         return (seed for seed in candidates(t, self.boost)
-                if seed not in self.swept and not any(pick for i, pick in enumerate(t.vector(seed)) if i in frozen))
+                if seed not in self.given and not any(pick for i, pick in enumerate(t.vector(seed)) if i in frozen))
+
+    def meet(self, seed, obj):
+        """Take in one result for the freeze. Call with the lock held, once the inert choice points are frozen.
+
+        A retry is a candidate that brought a new object, with one frozen choice point set to one
+        other alternative. One that gives anything but that object (another object, a failed
+        build, a refusal) unfreezes its choice point for the rest of the block: the retries still
+        owed for it are dropped, and the rest is made again with the choice point free. The first
+        time an object appears, other than the baseline's, one retry is owed per other alternative
+        of every choice point then frozen.
+        """
+        t = self.template
+        at = self.retry.get(seed)
+        if at and at[0] in self.frozen and obj != at[1]:
+            self.frozen.discard(at[0])
+            self.owed = collections.deque(s for s in self.owed if self.retry[s][0] != at[0])
+            if self.last:
+                self.cut = True
+            elif self.seeds is not None:
+                self.seeds = self.rest()
+        if not obj or obj in self.objects:
+            return
+        self.objects.add(obj)
+        if not seed:
+            return  # the baseline's object: the sweep tried every frozen choice point against it
+        vector = t.vector(seed)
+        for i in sorted(self.frozen):
+            for pick in range(1, len(t.choices[i].alternatives)):
+                s = t.seed(vector[:i] + [pick] + vector[i + 1:])
+                if s not in self.given and s not in self.retry:
+                    self.retry[s] = (i, obj)
+                    self.owed.append(s)
 
     def mostly_failing(self):
         return bool(self.early) and sum(self.early) > self.settings["buildfail_frac"] * len(self.early)
@@ -3467,10 +3567,13 @@ class Block:
                                  "differ_bytes": score.differ_bytes, "object": e.get("o")})
             self.by_seed[seed] = score.result
             self.pending.discard(seed)
+            self.flying.discard(seed)
             self.lock.notify_all()
             self.counts["guardrail"] += score.result == "guardrail"
             self.counts["compiled"] += how == "built"
             self.counts["build_fail"] += score.result == "build-fail"
+            if self.frozen is not None:
+                self.meet(seed, e.get("o"))
             gain = new_object
             if rank(score) is None:
                 self.failure = self.failure or score.log
@@ -3496,7 +3599,8 @@ class Block:
                 self.since_gain = 0 if gain else self.since_gain + 1
             if self.last:
                 return  # the last pass is built whole
-            if len(self.recent) == self.recent.maxlen and sum(self.recent) > s["repeat_frac"] * len(self.recent):
+            if (len(self.recent) == self.recent.maxlen and sum(self.recent) > s["repeat_frac"] * len(self.recent)
+                    and not self.owed):
                 self.end = self.end or "exhausted"
             if self.since_gain >= max(s["plateau_compiles"], s["plateau_frac"] * self.scored, 1):
                 self.end = self.end or "plateau"
@@ -4079,7 +4183,8 @@ NEXT_ROWS = 2  # runners-up the summary names
 def insights(template, results, best):
     """What the round's results show: the effect table, the inert choice points, and the next two candidates.
 
-    The table lists each choice point that changes the score, with its alternatives' change in
+    An `inert` entry names a frozen choice point and how many of the round's distinct objects its
+    freeze held against (see freezes). The table lists each choice point that changes the score, with its alternatives' change in
     differing bytes against the baseline, largest effect first. A runner-up is the best other
     candidate, named by the choices where it departs from the best.
     """
@@ -4097,8 +4202,9 @@ def insights(template, results, best):
         if deltas:
             effects.append((max(abs(d) for d in deltas.values()), c.label, deltas))
     effects.sort(key=lambda e: (-e[0], e[1]))
+    frozen = freezes(template, results)
     out = {"effects": [{label: deltas} for _, label, deltas in effects[:EFFECT_ROWS]],
-           "inert": inert_choices(template, results)}
+           "inert": [f"{label}: {held} of {found} objects" for label, held, found in frozen]}
     if "seed" in best:
         top = template.vector(best["seed"])
         scored = sorted((r for r in results if r["seed"] != best["seed"] and r["differ_bytes"] is not None
@@ -4108,7 +4214,7 @@ def insights(template, results, best):
     pairs = interacting_pairs(template, results)
     if pairs:
         out["pairs"] = pairs
-    if template.choices and len(out["inert"]) == len(template.choices):
+    if template.choices and len(frozen) == len(template.choices) and all(held == found for _, held, found in frozen):
         out["stop"] = "every choice point is inert: no alternative changes the object, so stop searching this template"
     return out
 
