@@ -2778,24 +2778,42 @@ def rank(score):
     return (score.differ_bytes, -score.first_differ)  # equal bytes: the later first difference is closer
 
 
-OFFSET_TOKEN = re.compile(r"(?<![0-9A-Za-z])(?:0[xX])?([0-9A-Fa-f]+)(?![0-9A-Za-z])")
+LEAD_OFFSET = re.compile(r"^[\s!-/:-@\[-`{-~]*(0[xX])?([0-9A-Fa-f]+)(?![0-9A-Za-z_])")  # only white space and punctuation before it
+
+
+def line_offset(line):
+    """A report line's own offset as (digits, written with 0x), or None: the first whole number, with only white space
+    and punctuation before it. A line led by a word, such as a header, has none. A letters-only token needs a colon after it."""
+    m = LEAD_OFFSET.match(line)
+    if not m or not (m.group(1) or re.search(r"[0-9]", m.group(2)) or line[m.end():m.end() + 1] == ":"):
+        return None
+    return m.group(2), bool(m.group(1))
 
 
 def offset_line(lines, offset):
-    """Index of the first report line holding offset as a whole number, in hex (0x optional, zeros ignored) or decimal."""
-    want = {format(offset, "x"), str(offset)}
-    for i, line in enumerate(lines):
-        if any((m.group(1).lstrip("0") or "0").lower() in want for m in OFFSET_TOKEN.finditer(line)):
-            return i
-    return None
+    """Index of the report line holding the instruction that contains the byte at offset, or None.
+
+    That is the line whose own offset is the greatest one not above offset (the first of several equal ones).
+    An offset written with 0x is hex. One without it is hex when any line's own offset holds a hex letter, else decimal."""
+    own = [line_offset(line) for line in lines]
+    hexed = any(o and re.search(r"[A-Fa-f]", o[0]) for o in own)
+    best, at = None, None
+    for i, o in enumerate(own):
+        if o is None:
+            continue
+        value = int(o[0], 16 if o[1] or hexed else 10)
+        if value <= offset and (best is None or value > best):
+            best, at = value, i
+    return at
 
 
 def window(report, first_differ=None):
     """The lines of a diff report the summary shows, each cut to a fixed width.
 
     A line longer than WINDOW_WIDTH is cut inside the width and ends in CUT_MARK, so a cut never passes for the whole line.
-    With first_differ, the window is centred on the line holding that offset, with WINDOW_LINES // 2 lines of
-    context each side. Without it, or when no line holds it, it is the report's first lines.
+    With first_differ, the window is centred on the line of the instruction that contains that byte (see offset_line),
+    with WINDOW_LINES // 2 lines of context each side. Without it, or when no line's offset is at or below it, it is the
+    report's first lines.
     """
     try:
         with open(report, encoding="utf-8", errors="replace") as f:
