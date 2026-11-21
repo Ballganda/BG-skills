@@ -4279,6 +4279,57 @@ def test_search_second_round_resets_an_edited_label_to_its_priors(base):
            f"A keeps what it learned and the edited B is back at uniform priors, in template order: {got}", r)
 
 
+def series_template(n):
+    """Round n of one template: A is ignored by the compiler, and every alternative of B and of C scores worse than the baseline.
+
+    B1 is far worse and is held by five candidates, so its belief falls by about half a round.
+    """
+    return in_function(
+        f"/* round {n} */ " + "int WRONG_k; " * 10
+        + "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) "
+        + "PERM_GENERAL(int ok_b;, " + "int WRONG_b; " * 100 + ") "
+        + "PERM_GENERAL(int ok_c;, int WRONG_c1;, int WRONG_c2;, int WRONG_c3;, int WRONG_c4;)")
+
+
+def series_round(p, n):
+    """Run round n of the series, given the time of a first round. Returns (process, summary, the kept likelihoods by label)."""
+    state = p.root / ".decomp" / "search" / TID
+    if (state / "ended").exists():
+        forget_latency(p)
+    r, out = search(p, series_template(n))
+    expect(r.returncode == 0 and out is not None and "end" in out, f"round {n} should exit 0 and print a summary: {out}", r)
+    kept = json.loads((state / "learned.json").read_text(encoding="utf-8"))
+    return r, out, {label: entry["weights"] for label, entry in kept.items()}
+
+
+def test_search_rounds_keep_every_learned_likelihood_above_zero_and_a_frozen_choice_learns_nothing(base):
+    p = sweep_project(base)
+    tune(p)
+    began = [1.0, 1.0, 1.0]  # the frozen choice point's: the writer gave none
+    for n in range(1, 11):
+        r, out, kept = series_round(p, n)
+        expect(out["inert"] == ["A"], f"round {n}: the ignored choice point is frozen: {out}", r)
+        expect(sorted(kept) == ["A", "B", "C"], f"round {n}: every choice point has kept likelihoods: {kept}", r)
+        for label, weights in kept.items():
+            expect(min(weights) >= 0.01 and max(weights) == 1, f"round {n}: {label} is within the floor and 1: {weights}", r)
+        expect(kept["A"] == began, f"round {n}: the frozen choice point keeps what it began the round with: {kept['A']}", r)
+        expect(kept["B"][1] < 1 and all(w < 1 for w in kept["C"][1:]), f"round {n}: the free choice points learn: {kept}", r)
+    expect(kept["B"] == [1.0, 0.01], f"the alternative that always hurt ends on the floor: {kept}", r)
+
+
+def test_search_reads_a_kept_likelihood_of_zero_as_the_floor(base):
+    p = sweep_project(base)
+    tune(p)
+    series_round(p, 1)
+    path = p.root / ".decomp" / "search" / TID / "learned.json"
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    kept["B"]["weights"] = [0.0, 0.0]
+    kept["C"]["weights"] = [0.0, -1.0, "x", None, 1.0]
+    path.write_text(json.dumps(kept), encoding="utf-8")
+    r, out, kept = series_round(p, 2)
+    expect(all(min(w) >= 0.01 for w in kept.values()), f"the round keeps likelihoods within the floor: {kept}", r)
+
+
 def test_search_mutation_and_crossover_only_combine_the_written_alternatives(base):
     r, out, order = two_rounds(base, grid(6), first=grid(6), budget=60)
     arms = out["counts"].get("arm_picks")
@@ -4560,6 +4611,48 @@ def test_the_next_search_reports_what_the_background_search_found(base):
         r, out = search(p, NEVER)
         expect(out is not None and "background" not in out, f"a background search is reported once: {out}", r)
     finally:
+        stop_background(p)
+
+
+def expect_collected_report(p, r, code, word):
+    """A refused call that had collected a background search: one JSON line holding the report, the refusal as it was."""
+    lines = r.stdout.splitlines()
+    expect(len(lines) == 1, f"standard output holds one line: {r.stdout!r}", r)
+    out = json.loads(lines[0])
+    found = out.get("background")
+    expect(list(out) == ["background"] and isinstance(found, dict), f"the line holds the report alone: {out}", r)
+    expect(found["end"] in ("stopped", "exhausted") and found["tried"] >= 2 and "differ_bytes" in found.get("best", {}),
+           f"it is the search's report: {found}", r)
+    expect(r.returncode == code and word in r.stderr, f"the refusal and its exit code are unchanged: {r.stderr!r}", r)
+    expect(not background_folder(p).exists(), "the background search's files are cleared away")
+    r, found = stop_background(p)
+    expect(r.returncode == 0 and found is None, f"the search is reported once: {found}", r)
+
+
+def test_a_search_refused_for_no_choice_point_still_prints_the_background_report_it_collected(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: background_tried(p) >= 2), "the background search should build candidates")
+        r, out = search(p, STUCK)
+        expect_collected_report(p, r, 1, "choice point")
+    finally:
+        stop_background(p)
+
+
+def test_a_search_refused_for_a_misspelt_constant_still_prints_the_background_report_it_collected(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(3))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        # The search ends by itself first: stopping a live one reads the block constants, and is refused before it collects.
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search should end by itself")
+        tune(p, deadline=1)
+        r, out = search(p, NEVER)
+        expect_collected_report(p, r, 1, "deadline_s")
+    finally:
+        tune(p)
         stop_background(p)
 
 
