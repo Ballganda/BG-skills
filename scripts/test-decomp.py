@@ -4032,7 +4032,7 @@ def test_search_keeps_batching_that_is_faster_and_byte_identical(base):
            and out["counts"]["batch"] == 16, f"the batched round finds the match: {out}", r)
     expect([x for x in calls() if x.startswith("batch")] == ["batch 4", "batch 8", "batch 16", "batch 5", "batch 7"],
            f"after the probe, the sweep is one compiler call and the rest another: {calls()}", r)
-    expect(calls().count("single") == 6,  # the gate's check, the double compile, and the probes' three reference builds
+    expect(calls().count("single") == 7,  # the gate's check, the double compile, the probes' three reference builds, and the block's base
            f"no candidate of the block was built singly: {calls()}", r)
     expect(out["counts"]["compiled"] == 12 and out["counts"]["build_fail"] == 4,
            f"a candidate that fails in a batch fails alone: {out['counts']}", r)
