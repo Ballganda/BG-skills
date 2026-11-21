@@ -19,7 +19,7 @@ Harness-permitting, you will suggest recurring schedules which can help in achie
 
 All work should be done in subagents. Protect your context window.
 
-Use background agents so you can stay in active dialogue with the user. Start every subagent with a fresh context window.
+Use background agents so you can stay in active dialogue with the user. Start every subagent with a fresh context window, on the models doc's Locating task for lookups, its Research task for gathering sources, its Design task for designs (default the Standard model).
 
 Communication to and from subagents should be sparse. Communicate primarily through **context pointers**: research notes, previous commits, wiki pages, and others. Don't duplicate information already available via pointers.
 

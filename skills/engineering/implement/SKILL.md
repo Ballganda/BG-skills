@@ -4,12 +4,12 @@ description: "Implement a Ticket batch, a spec, or work described in chat, by or
 disable-model-invocation: true
 ---
 
-You are the orchestrator, even for a single Ticket. Never implement in your own context: every unit of work goes to an implementer subagent started with a fresh context window, so your context stays small enough to track the whole run.
+You are the orchestrator, even for a single Ticket. Never implement in your own context: every unit of work goes to an implementer subagent started with a fresh context window, on the Ticket's tier model, so your context stays small enough to track the whole run.
 
 ## Input
 
 - **Tickets**: resolve a **Ticket batch** (below) and run the Steps. If no issue tracker is configured, tell the user to run `/bg-setup`. For a Ticket reference, fetch it from the issue tracker and state its title first; if the reference is ambiguous, ask.
-- **No Tickets** (work described in chat, or a spec not split into Tickets): a batch of one at the Standard tier. Start a single implementer subagent with a fresh context window, hand it the description (or a pointer to the spec), and the run's attribution lines (see Rules), and have it do the implementer work from step 4 in the current checkout, without the bullets marked *Tickets only*, committing to the current branch. Skip the task graph, the integration branch, the worktree, and the script: the no-Tickets path never calls it.
+- **No Tickets** (work described in chat, or a spec not split into Tickets): a batch of one at the Standard tier. Start a single implementer subagent with a fresh context window, on the Standard tier model, hand it the description (or a pointer to the spec), and the run's attribution lines (see Rules), and have it do the implementer work from step 4 in the current checkout, without the bullets marked *Tickets only*, committing to the current branch. Skip the task graph, the integration branch, the worktree, and the script: the no-Tickets path never calls it.
 
 ## Ticket batch
 
@@ -39,7 +39,7 @@ On Claude Code, start the role's plugin agent (`bg-skills:<agent>`) and override
 ## Rules
 
 - Tickets form a **task graph**; the **frontier** is the batch Tickets that are ready. The script's ledger tracks merges, since the tracker's blocked-by count lags until issues close.
-- At most 3 implementer subagents at once (the user may override per run), run in the background, each with a fresh context window, its own worktree, and its own branch.
+- At most 3 implementer subagents at once (the user may override per run), run in the background, each with a fresh context window, on its Ticket's tier model, its own worktree, and its own branch.
 - **One attribution per run.** Settle the run's commit attribution lines at the start: the user's instructions when they give any, otherwise your harness's, otherwise none (a run with none adds none). State them with the resolved batch. Give every implementer and merger the lines word for word, the one content passed by value, and tell it they replace the lines of its own harness for every commit it makes, merges of the integration branch into its branch included. The script adds them to its merge commits.
 - Talk to subagents through **context pointers** (spec, Ticket, notes path, commits), never pasted content.
 - **Retry once, then report.** When an implementer reports failing tests or a blocker, start one fresh implementer for that Ticket on the next tier's model (Mechanical to Standard, Standard to Hard). If the retry fails too, stop work on the Ticket and list it in the final reply. A Hard Ticket that fails is not retried.
@@ -86,7 +86,7 @@ Before the first command, find `<python>`: ask `python3`, then `python`, then `p
    - typechecks and runs the single relevant test file as it goes, and the full suite once at the end (a run that would outlast the tool timeout runs in the background, and the project's own rule says how to wait for it);
    - commits;
    - merges the integration branch tip into its branch before reporting done.
-5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window. On a failing report or a failing `test`, run `fail` and apply the retry rule. After each successful `merge`, close that Ticket with the tracker doc's Close operation, the comment naming the integration branch and the merge commit; the tracker's blocked-by counts then agree with the ledger. After the last merge of the batch, run `test --integration` once with the project's full suite command, one run per batch and not one per merge, and report a failure in the final reply.
+5. On each passing report, run `test` with the project's full suite command, then `merge`. Implementers already ran the full suite before merging the integration tip into their branch, so `test` is the orchestrator's check of that merged state; skip it when the report gives no reason to doubt it. On a `merge: conflict`, resolve it trivially yourself, or start a merger with a fresh context window, on the models doc's Merging task (default the Standard model). On a failing report or a failing `test`, run `fail` and apply the retry rule. After each successful `merge`, close that Ticket with the tracker doc's Close operation, the comment naming the integration branch and the merge commit; the tracker's blocked-by counts then agree with the ledger. After the last merge of the batch, run `test --integration` once with the project's full suite command, one run per batch and not one per merge, and report a failure in the final reply.
 6. Run `ready` again for newly ready batch Tickets, within the cap, and repeat from step 4 until it prints `ready: none` and no implementer is running.
 7. When the batch is done, update the PR body's Ticket list if a PR exists, and mark the draft PR ready only if every sub-issue of the spec is closed.
 8. If at least one lesson line came back, call the Skill tool with `retro`, passing the lesson-line mode and the collected lesson lines. It only suggests; change nothing on its findings. If no lesson came back, skip this step.
