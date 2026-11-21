@@ -222,6 +222,79 @@ def test_test_fails_with_a_nonzero_exit_and_keeps_the_log(base):
     expect(r.returncode == USAGE, "a ticket outside the batch", r)
 
 
+def merged_one(base):
+    p = begun(base)
+    _, _, wt = start(p, "1")
+    work(p, wt, "one.txt", "1\n", "ticket one")
+    r = p.run("merge", "1")
+    expect(r.returncode == OK, "a clean merge", r)
+    return p
+
+
+def log_of(r):
+    return Path(r.stdout.strip().split("log=", 1)[1])
+
+
+SEE_MERGED = py("import os;print(os.path.exists('one.txt'), os.path.exists('later.txt'))")
+
+
+def test_test_integration_runs_at_the_tip_in_a_temporary_worktree_gone_afterwards(base):
+    p = merged_one(base)
+    r = p.run("test", "--integration", SEE_MERGED)
+    expect(r.returncode == OK and r.stdout.startswith("test: pass log="), "a passing integration run", r)
+    expect(log_of(r).read_text(encoding="utf-8").strip() == "True False",
+           "the command sees the merged files and not main's later ones")
+    common = Path(p.git("rev-parse", "--path-format=absolute", "--git-common-dir"))
+    expect(not (common / "implement" / "test-worktree").exists(), "the temporary worktree is gone")
+    expect(p.git("worktree", "list", "--porcelain").count("worktree ") == 2, "no worktree is left behind")
+
+
+def test_test_integration_uses_the_worktree_that_has_the_branch_checked_out(base):
+    p = merged_one(base)
+    p.git("checkout", "-q", INTEGRATION)
+    r = p.run("test", "--integration", py("import os;print(os.getcwd())"))
+    expect(r.returncode == OK, "a passing integration run", r)
+    expect(Path(log_of(r).read_text(encoding="utf-8").strip()).resolve() == p.root.resolve(),
+           "the command runs in the checkout that holds the branch")
+
+
+def test_test_integration_fails_with_the_test_failed_code_and_a_log(base):
+    p = merged_one(base)
+    r = p.run("test", "--integration", py("import sys;print('boom');sys.exit(3)"))
+    expect(r.returncode not in (OK, CONFLICT, USAGE, ENV) and r.stdout.startswith("test: fail log="), "a failing run", r)
+    expect("boom" in log_of(r).read_text(encoding="utf-8"), "the log holds the output")
+
+
+def test_test_integration_log_cannot_collide_with_a_ticket_log_and_a_second_run_keeps_the_first(base):
+    p = merged_one(base)
+    r1 = p.run("test", "--integration", py("print('first')"))
+    r2 = p.run("test", "--integration", py("print('second')"))
+    expect(r1.returncode == OK and r2.returncode == OK, "both runs pass", r2)
+    expect(log_of(r1) != log_of(r2), "a second run writes another log")
+    expect("first" in log_of(r1).read_text(encoding="utf-8"), "the first log is kept")
+    expect("second" in log_of(r2).read_text(encoding="utf-8"), "the second log holds its own output")
+    for log in (log_of(r1), log_of(r2)):
+        expect("@" in log.name, "the name holds a character no ticket id can hold")
+
+
+def test_test_integration_refuses_a_dirty_integration_checkout(base):
+    p = merged_one(base)
+    p.git("checkout", "-q", INTEGRATION)
+    (p.root / "src.txt").write_text("edited\n")
+    r = p.run("test", "--integration", py("print('ran')"), clean=False)
+    expect(r.returncode == ENV and "uncommitted" in r.stderr and r.stdout == "", "a dirty checkout is refused", r)
+
+
+def test_test_on_a_merged_ticket_is_a_usage_error_naming_the_integration_option(base):
+    p = merged_one(base)
+    r = p.run("test", "1", "true")
+    expect(r.returncode == USAGE and "--integration" in r.stderr, "test on a merged ticket", r)
+    r = p.run("test", "--integration", "true", "extra")
+    expect(r.returncode == USAGE, "the option takes no ticket id", r)
+    r = p.run("test", "--integration")
+    expect(r.returncode == USAGE, "the option needs a command", r)
+
+
 def test_merge_brings_the_ticket_commits_into_the_integration_branch(base):
     p = begun(base)
     _, branch, wt = start(p, "1")
