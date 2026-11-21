@@ -747,7 +747,9 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `end`: why the block ended (see [How a block ends](#how-a-block-ends)).
 - `best`: the closest candidate's `code` and `differ_bytes`, or `null` when none was scored.
 - `window`: 7 lines of the best candidate's diff report (no match only).
-  - When the `diff` adapter reports `first_differ`, the window is centred on the first report line holding that offset, with 3 lines of context each side.
+  - When the `diff` adapter reports `first_differ`, the window is centred on the report line whose own offset is the greatest one not above it, with 3 lines of context each side.
+  - Of several lines with that offset, the first in the report is the centre.
+  - Without `first_differ`, with no line offset, or with every line offset above it, the window is the report's first lines.
   - Otherwise, or when no line holds it, it is the report's first lines.
   - A report line longer than 120 characters is cut inside that width and ends in ` ...`, so a line without the mark is whole.
   - When the report holds fewer than 2 lines, `notice` gains one line.
@@ -1048,7 +1050,11 @@ Every change to a path a tag freezes (a contract change, a skill upgrade, an inv
   - `{symbols}` is the path of the symbol map in the tree being built.
   - The JSON may also carry `first_differ`, the byte offset of the first difference (optional, a non-negative integer).
   - `search` uses `first_differ` to break ties and to place the diff window, and everything else ignores it.
-  - The report holds one line per instruction, each with its offset in the function as a whole number (hex, `0x` optional, or decimal), on 32-bit and 64-bit targets alike.
+  - The report holds one line per instruction, each leading with its offset in the function as a whole number (hex, `0x` optional, or decimal), on 32-bit and 64-bit targets alike.
+  - Only the number a line leads with is its offset: after nothing but white space and punctuation (a diff mark, `+`, `0x`, a bracket). No other number on the line is read, and a line led by a word has none.
+  - `0x` makes the reading certain. Without it the report is read as hex when any line's offset holds a hex letter, and as decimal otherwise.
+  - `first_differ` may fall inside an instruction, such as in an operand or a displacement.
+  - A report that prints both sides of a differing instruction may give both lines the same offset.
   - A disassembler prints 8-digit or 16-digit addresses by target, so an adapter that parses its output reads both widths.
   - A report of a header line alone is a fault in the adapter.
   - `first_differ` and `function_sha256` stay optional where the contract does not allow template search.
