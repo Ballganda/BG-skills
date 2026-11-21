@@ -4228,7 +4228,7 @@ def test_a_background_search_starts_no_batch_after_its_time(base):
     # A call takes 3 s. The foreground block ends after one; the background search has 1.5 s or so, which end
     # during its first call while its second worker waits for the slot.
     p, starts, ends = timed_batch_project(base, 0, 0.75, 1.5, workers=2, slots=1, reference_s=0, deadline_s=0.5,
-                                          ceiling_s=4.8, background=1)
+                                          ceiling_s=4.8, background=1, probe_cost_frac=100)  # the probes are not under test
     try:
         r, out = search(p, wide(12))
         returned = time.time()
