@@ -194,6 +194,97 @@ def local_dir():
     return checkout_dir()
 
 
+TEMP_SWEEP_S = 86400  # a temp entry older than this belongs to no command that is still running
+TEMP_HELD_S = 2.0  # how long the removal of a temp folder waits for a held file to be let go
+_TEMP = {"parent": None, "under": None, "made": []}
+
+
+def temp_parent():
+    """The one folder in the system temp folder that holds every temp folder this tool makes for this project.
+
+    It is named for the tool and the project: `decomp-`, the main checkout's folder name, and a short hash
+    of that folder's path. Every worktree of the checkout shares it.
+    """
+    if _TEMP["parent"] is None:
+        home = checkout_dir().parent
+        name = re.sub(r"[^0-9A-Za-z_.]", "_", home.name)[:40]
+        mark = sha(os.path.normcase(str(home)).encode("utf-8", "replace"))[:8]
+        _TEMP["parent"] = Path(tempfile.gettempdir()) / f"decomp-{name}-{mark}"
+    return _TEMP["parent"]
+
+
+def temp_dir(kind):
+    """Make a temp folder of this command, the only way the tool makes one. The command's exit removes it, at the latest."""
+    parent = _TEMP["under"] or temp_parent()
+    for _ in range(40):
+        try:
+            os.makedirs(parent, exist_ok=True)
+            path = tempfile.mkdtemp(prefix=kind + "-", dir=parent)
+        except OSError:  # another command removed the parent, empty, as it left: make it again
+            time.sleep(0.05)
+            continue
+        _TEMP["made"].append(path)
+        return path
+    die(f"cannot make a temp folder under {parent}")
+
+
+def drop_temp(path):
+    """Remove a temp folder this command made. A worktree leaves git's list first.
+
+    A folder that a held file keeps is tried again for a short while, then left to a later command's
+    sweep: the command does not fail.
+    """
+    if os.path.basename(path).startswith("wt-"):
+        git("worktree", "remove", "--force", path, check=False)
+    remove_tree(path, TEMP_HELD_S)
+    with contextlib.suppress(ValueError):
+        _TEMP["made"].remove(path)
+
+
+@contextlib.contextmanager
+def temp_folder(kind):
+    """A temp folder for the length of a `with` block, removed however the block ends."""
+    path = temp_dir(kind)
+    try:
+        yield path
+    finally:
+        drop_temp(path)
+
+
+def drop_temps():
+    """As a command exits, by any road but a kill: remove its temp folders that are left, and the parent once empty."""
+    for path in reversed(list(_TEMP["made"])):
+        drop_temp(path)
+    if _TEMP["parent"] is not None:
+        with contextlib.suppress(OSError):
+            os.rmdir(_TEMP["parent"])
+
+
+def sweep_temp():
+    """As a command starts: remove the entries of the temp parent older than a day, left by a command that was killed.
+
+    A younger entry may belong to a command that is still running, so it stays. With nothing to remove
+    this is one folder listing. An entry that cannot be removed is left where it is.
+    """
+    old = []
+    try:
+        with os.scandir(temp_parent()) as entries:
+            for e in entries:
+                with contextlib.suppress(OSError):
+                    if time.time() - e.stat(follow_symlinks=False).st_mtime > TEMP_SWEEP_S:
+                        old.append(e.path)
+    except OSError:
+        return
+    for path in old:
+        if os.path.basename(path).startswith("wt-"):
+            git("worktree", "remove", "--force", path, check=False)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+
+
 def on_host(entry):
     """True when a manifest entry applies to this system: no `hosts`, or one that sys.platform starts with."""
     hosts = entry.get("hosts")
@@ -971,7 +1062,7 @@ def build_and_diff(environment, t, compiler, tree, report):
         bad += [f"{rel}: {v}" for v in scan((Path(tree) / rel).read_text(encoding="utf-8", errors="replace"))]
     if bad:
         return "guardrail", None, "\n".join(bad)
-    with tempfile.TemporaryDirectory(prefix="decomp-obj-") as objdir:
+    with temp_folder("obj") as objdir:
         obj, failure = build_unit(environment, t, compiler, tree, t["source"], objdir, report)
         if failure:
             return "build-fail", None, failure
@@ -995,13 +1086,12 @@ class Worktree:
         self.ref = ref
 
     def __enter__(self):
-        self.path = tempfile.mkdtemp(prefix="decomp-wt-")
+        self.path = temp_dir("wt")
         git("worktree", "add", "--detach", self.path, self.ref)
         return self.path
 
     def __exit__(self, *exc):
-        git("worktree", "remove", "--force", self.path, check=False)
-        shutil.rmtree(self.path, ignore_errors=True)
+        drop_temp(self.path)  # from git's list as well as from disk
 
 
 # ---------- commands ----------
@@ -1116,6 +1206,8 @@ def cmd_release(a):
         accepted = "claimed" if a.to == "blocked-reference" else "claimed or blocked-reference"
         die(f"{a.id} is {t['status']}; release needs {accepted}")
     discard_background(a.id)
+    for kept in (check_dir(a.id), *winner_dirs(a.id)):  # the ticket's diff report and winning sources
+        remove_tree(kept)
     with contextlib.suppress(OSError):
         (search_dir(a.id) / NOTICES_FILE).unlink()  # the ticket's next round states each adapter notice in full
     print(f"{a.id} -> {move(a.id, event)}")
@@ -1201,12 +1293,20 @@ def gate(t):
                    f"or after {GATE_STALL} attempts with no fall in differ_bytes")
 
 
+def check_dir(tid):
+    """Where a ticket's last `check` keeps its diff report: on this machine only, shared by every worktree."""
+    return checkout_dir() / "check" / tid
+
+
 def cmd_check(a):
     t, _ = read_ticket(a.id)
     if a.category and a.category not in CATEGORIES:
         die(f"unknown category {a.category}; the mismatch categories are {', '.join(sorted(CATEGORIES))}")
     environment, compiler = prepare(t)
-    report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
+    report = check_dir(t["id"]) / "diff.txt"  # one path per ticket: this check's report replaces the last one's
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_bytes(b"")
+    report = str(report)
     result, n, log = build_and_diff(environment, t, compiler, os.getcwd(), report)
     category = "" if result == "bytes-match" else a.category or ("build-fail" if result == "build-fail" else "")
     append_trail(t["id"], "check", result, n, category)
@@ -1415,7 +1515,9 @@ def cmd_revalidate(a):
     bad, skipped, measured = len(gone), 0, 0
     for i in gone:
         print(f"REGRESSED {i} on {ref}: the candidate holds no such ticket")
-    with (contextlib.nullcontext(str(ROOT)) if judging else Worktree(ref)) as tree:
+    # One report path for the whole run: nothing reads a report after its ticket is judged.
+    with (contextlib.nullcontext(str(ROOT)) if judging else Worktree(ref)) as tree, temp_folder("rep") as reports:
+        report = str(Path(reports) / "diff.txt")
         if a.header:
             name = Path(a.header).name.casefold()  # every ticket that reaches the header, through any chain
             ts = [t for t in ts if (Path(tree) / t["source"]).exists() and any(
@@ -1429,7 +1531,8 @@ def cmd_revalidate(a):
                 print(f"SKIPPED {t['id']}: {why}")
                 continue
             measured += 1
-            report = str(Path(tempfile.mkdtemp(prefix="decomp-rep-")) / "diff.txt")
+            with contextlib.suppress(OSError):
+                os.unlink(report)
             result, n, _ = build_and_diff(environment, t, built_with[t["unit"]], tree, report)
             ok = result == "bytes-match"
             if not ok:
@@ -1546,8 +1649,8 @@ def cmd_link(a):
     from_source = sum(f["size"] for mine in source.values() for f in mine)
     linked = dict(edition=edition["name"], units=sorted(source), source_bytes=from_source, in_scope_bytes=in_scope)
     first, why = None, ""
-    with Worktree(CFG["integration_branch"]) as tree:
-        objdir = Path(tempfile.mkdtemp(prefix="decomp-link-"))
+    with Worktree(CFG["integration_branch"]) as tree, temp_folder("link") as objdir:
+        objdir = Path(objdir)
         objects = []
         for unit, mine in sorted(source.items()):
             t = next(t for t in ts if t["unit"] == unit)
@@ -1756,17 +1859,20 @@ def cmd_sync(a):
     def push(key, title, body, close):
         entry = state["units"].get(key) if key != "progress" else state.get("progress")
         h = sha(body.encode())
-        f = Path(tempfile.mkdtemp(prefix="decomp-gh-")) / "body.md"
-        f.write_text(body, encoding="utf-8")
-        if not entry:
-            out = subprocess.run(["gh", "issue", "create", "--repo", repo, "--title", title, "--body-file", str(f)],
-                                 capture_output=True, text=True, check=True).stdout.strip()
-            entry = {"number": int(out.rstrip("/").split("/")[-1]), "hash": h, "closed": False}
-        elif entry["hash"] != h:
-            subprocess.run(["gh", "issue", "edit", str(entry["number"]), "--repo", repo, "--body-file", str(f)], check=True)
-            entry["hash"] = h
+        if not entry or entry["hash"] != h:
+            with temp_folder("gh") as folder:  # the body file is gone once the call that used it returns
+                f = Path(folder) / "body.md"
+                f.write_text(body, encoding="utf-8")
+                if not entry:
+                    out = subprocess.run([gh_path, "issue", "create", "--repo", repo, "--title", title, "--body-file", str(f)],
+                                         capture_output=True, text=True, check=True).stdout.strip()
+                    entry = {"number": int(out.rstrip("/").split("/")[-1]), "hash": h, "closed": False}
+                else:
+                    subprocess.run([gh_path, "issue", "edit", str(entry["number"]), "--repo", repo, "--body-file", str(f)],
+                                   check=True)
+                    entry["hash"] = h
         if close and not entry["closed"]:
-            subprocess.run(["gh", "issue", "close", str(entry["number"]), "--repo", repo], check=True)
+            subprocess.run([gh_path, "issue", "close", str(entry["number"]), "--repo", repo], check=True)
             entry["closed"] = True
         if key == "progress":
             state["progress"] = entry
@@ -1790,7 +1896,7 @@ def cmd_sync(a):
     first = state.get("progress") is None
     n = push("progress", "decomp progress", "\n".join(lines) + "\n", False)
     if first:
-        subprocess.run(["gh", "issue", "pin", str(n), "--repo", repo], check=False)
+        subprocess.run([gh_path, "issue", "pin", str(n), "--repo", repo], check=False)
     state_p.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
     print(f"synced {len(units)} unit issues and progress issue #{n}")
 
@@ -5018,7 +5124,7 @@ def search_call(a):
     launcher = Launcher(environment, settings, start)
     launcher.pool = pool
     tree = os.getcwd()
-    scratch = tempfile.mkdtemp(prefix="decomp-search-")
+    scratch = temp_dir("search")
     try:
         workers = [Worker(Path(scratch) / f"w{i}", launcher, t, compiler, tree, text) for i in range(count)]
         cache, ctx = load_cache(), search_context(t, compiler, tree, text)
@@ -5074,7 +5180,7 @@ def search_call(a):
             trailed[-1]["differ_bytes"] if trailed else None, rounds if repeat else rounds + 1, len(mine) + 1, repeat))
     finally:
         pool.close()
-        shutil.rmtree(scratch, ignore_errors=True)
+        drop_temp(scratch)
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
@@ -5082,8 +5188,7 @@ def search_call(a):
     save_learned(state, learned_weights(searched, results, written))
     winner = None
     if end == "match":
-        winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
-        winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
+        winner = winner_file(t, template, best["seed"], winner_dirs(t["id"])[0])
     held = ([IDENTITY_NAME] if memo.blind() else []) + ([EMPTY_NAME] if empty_report(best, winner) else [])
     stated = stated_notices(t["id"])  # a notice is in full the first round of the ticket that holds it
     if IDENTITY_NAME in held:
@@ -5360,7 +5465,7 @@ class Background:
         self.blind = False  # whether its block had no object identity (see Memo.blind)
         self.job = own_job(token)
         # Every scratch folder of this process goes under one folder, which the call that kills it removes.
-        self.scratch = tempfile.tempdir = tempfile.mkdtemp(prefix="decomp-background-")
+        self.scratch = _TEMP["under"] = temp_dir("background")
         (self.dir / "run.json").write_text(json.dumps({"pid": os.getpid(), "scratch": self.scratch}), encoding="utf-8")
         self.results = (self.dir / "results.jsonl").open("a", encoding="utf-8", newline="\n")
         atexit.register(self.close)
@@ -5567,7 +5672,7 @@ def stop_background(tid):
         else:
             saw["died"] = True
     scratch = run.get("scratch")
-    if isinstance(scratch, str) and Path(scratch).name.startswith("decomp-background-"):
+    if isinstance(scratch, str) and Path(scratch).name.startswith("background-") and Path(scratch).parent == temp_parent():
         remove_tree(scratch)
     slots = local_dir() / "slots"
     for beat in slots.glob(f"{BACKGROUND}*-{token}.writer"):
@@ -5589,9 +5694,16 @@ def discard_background(tid):
         remove_tree(d)
 
 
-def winner_file(t, template, seed):
-    """Write a candidate as plain C outside the repository tree, and return the file."""
-    winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
+def winner_dirs(tid):
+    """Where a ticket's winning sources are kept, in its round state: a round's own, and a collected background search's."""
+    return search_dir(tid) / "winner", search_dir(tid) / "winner-background"
+
+
+def winner_file(t, template, seed, folder):
+    """Write a candidate as plain C into folder, in place of the winner kept there, and return the file."""
+    remove_tree(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    winner = folder / Path(t["source"]).name
     winner.write_bytes(source_bytes(template.render(template.vector(seed))))
     return winner
 
@@ -5694,7 +5806,7 @@ def collect_background(t):
     if seed is not None:
         best = {"seed": seed, "score": Score("bytes-match", 0, ""), "window": []}
         record_round(t, template, best, results, count=False)
-        winner = winner_file(t, template, seed)
+        winner = winner_file(t, template, seed, winner_dirs(t["id"])[1])
         report.update(end="match", natural=bool(natural), winner=str(winner))
         if natural:
             report["discarded"] = "the new template was not searched: the last one already matches with no steering"
@@ -5765,7 +5877,11 @@ def main():
     CFG.setdefault("integration_branch", "main")
     CFG.setdefault("frozen", {"decomp-setup": ["decomp.json", "toolchain.json", "DECOMP.md", "tools"],
                               "decomp-start": ["inventory.json", "expected"]})
-    a.f(a)
+    sweep_temp()
+    try:
+        a.f(a)
+    finally:
+        drop_temps()
 
 
 if __name__ == "__main__":
