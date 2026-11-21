@@ -2844,6 +2844,7 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
     "probe_gain": 0.05,  # a calibration probe keeps a build mode only when it is faster by this share
     "probe_runs": 2,  # builds a calibration probe times of each mode; the fastest counts
     "probe_min_chars": 2000,  # the single-function probe is skipped when it would cut less body text (an unmeasured estimate)
+    "probe_cost_frac": 0.5,  # the batching and resolved-compiler probes together cost at most this share of the block's ceiling; 0 is off
     "budget": 0,  # the compiles a block fits, and its end once it built them; 0 works it out from the deadline
     "seed": 0,  # seeds the random picks of a space too large to try whole
     "cores": 0,  # the physical cores to plan for; 0 asks the platform
@@ -4935,6 +4936,25 @@ def probe_record(t, compiler, probe, began, outcome, reason, ref=None, took=None
                  "t_ref_ms": as_ms(ref), "t_probe_ms": as_ms(took), **more})
 
 
+class ProbeShare:
+    """What the batching and resolved-compiler probes of one calibration share: the cost bound in seconds, what
+    the two have used so far, and the baseline's single build with its byte identity, taken at most once."""
+
+    def __init__(self, bound):
+        self.bound, self.spent, self.single = bound, 0.0, None
+
+    def over(self, cost, extra=0.0):
+        """Whether a step predicted to cost `cost` seconds does not fit: with the probes' use so far and `extra`."""
+        return self.bound <= 0 or self.spent + extra + cost > self.bound
+
+    def baseline(self, worker, text, hashing, ref):
+        """(object, identity) of the baseline built singly; the identity is None when it does not build."""
+        if self.single is None:
+            obj, failure = worker.build(text) if ref is not None else ("", "no reference")
+            self.single = (obj, None if failure else object_print(worker, obj, hashing))
+        return self.single
+
+
 class BatchWorker(Worker):
     """A build slot that compiles several candidates in one call of the `build_batch` adapter.
 
@@ -5049,25 +5069,40 @@ def probe_single(t, compiler, worker, text, reference):
     return keep, took if keep else ref
 
 
-def probe_batch(t, compiler, worker, text, hashing, ref):
+def probe_batch(t, compiler, worker, text, hashing, ref, share):
     """Probe batching on the baseline. Returns the candidates per compiler call to use: 1 for no batching.
 
     Each size is one call that builds the baseline that many times. A size is kept when every
     object equals the single build's and the time per candidate beats the best so far. The first
     size that is not faster ends the probe, and one that changes the bytes drops batching.
+    A size whose predicted cost (its candidates times the best time per candidate so far) does not fit
+    the share's bound is not tried, nor are the larger ones: the best size so far is kept. Under
+    `function` hashing one object of a batch, the last, is diffed; under `object` hashing every object's hash is compared.
     """
     began, launcher = time.perf_counter(), worker.environment
+
+    def record(outcome, reason, took=None, **more):
+        share.spent += time.perf_counter() - began
+        probe_record(t, compiler, PROBES[1], began, outcome, reason, ref, took, **more)
+
     if not CFG.get("build_batch"):
-        probe_record(t, compiler, PROBES[1], began, "skipped", "decomp.json holds no build_batch adapter")
+        record("skipped", "decomp.json holds no build_batch adapter")
         return 1
-    obj, failure = worker.build(text) if ref is not None else ("", "no reference")
-    want = None if failure else object_print(worker, obj, hashing)
-    if want is None:
-        probe_record(t, compiler, PROBES[1], began, "skipped", "the baseline does not build")
+    if ref is None:
+        record("skipped", "the baseline does not build")
         return 1
-    batcher = BatchWorker(worker, BATCH_SIZES[-1])
-    size, best, sizes, reason = 1, ref, {}, ""
+    batcher, want = None, None
+    size, best, sizes, reason, cut = 1, ref, {}, "", None
     for n in BATCH_SIZES:
+        if share.over(n * best, time.perf_counter() - began):
+            cut = (n, n * best)
+            break
+        if batcher is None:
+            want = share.baseline(worker, text, hashing, ref)[1]
+            if want is None:
+                record("skipped", "the baseline does not build")
+                return 1
+            batcher = BatchWorker(worker, BATCH_SIZES[-1])
         start = time.perf_counter()
         try:
             built = batcher.build_batch([text] * n)
@@ -5081,7 +5116,7 @@ def probe_batch(t, compiler, worker, text, hashing, ref):
         if any(failed for _, failed in built):
             size, reason = 1, f"a batch of {n} did not build every object"
             break
-        if any(object_print(batcher, o, hashing) != want for o, _ in built):
+        if any(object_print(batcher, o, hashing) != want for o, _ in (built if hashing == "object" else built[-1:])):
             size, reason = 1, f"a batch of {n} changed the bytes"
             break
         if not faster(per, best, launcher.settings):
@@ -5090,29 +5125,42 @@ def probe_batch(t, compiler, worker, text, hashing, ref):
         size, best = n, per
     if size > 1:
         reason = f"batches of {size} are byte-identical and faster"
-    probe_record(t, compiler, PROBES[1], began, "kept" if size > 1 else "dropped", reason, ref, best if size > 1 else None,
-                 batch=size, sizes_ms=sizes)
+    more = {}
+    if cut:  # only the first or a later size that fit and was kept can come before it
+        used = share.spent + time.perf_counter() - began
+        reason = (reason + "; " if reason else "") + (f"a batch of {cut[0]} was not tried: its predicted cost, {cut[1]:.1f} s, "
+                                                      f"with the {used:.1f} s the probes used is over the bound of {share.bound:.1f} s")
+        more = {"predicted_s": round(used + cut[1], 3), "bound_s": round(share.bound, 3)}
+    record("kept" if size > 1 else "skipped" if cut else "dropped", reason, best if size > 1 else None,
+           batch=size, sizes_ms=sizes, **more)
     return size
 
 
-def probe_resolved(t, compiler, worker, text, hashing, ref):
+def probe_resolved(t, compiler, worker, text, hashing, ref, share):
     """Probe the resolved-compiler mode on the baseline, and record the outcome. Nothing uses the mode.
 
     The `build_resolve` adapter prints the compiler's argument list and environment once; the
     probe then runs the compiler itself, with no adapter and no wrapper in between, and compares
     the object and the time with the build adapter's. `eligible` means byte-identical and faster.
     Running tools outside the wrapper departs from the wrapper rule, so a block never does it:
-    adopting the mode needs an ADR first.
+    adopting the mode needs an ADR first. It is skipped when its predicted cost, the reference time
+    times one more than the probe's runs, does not fit what is left of the share's bound.
     """
     began, launcher = time.perf_counter(), worker.environment
 
     def record(outcome, reason, took=None, **more):
+        share.spent += time.perf_counter() - began
         probe_record(t, compiler, PROBES[2], began, outcome, reason, ref, took, **more)
 
     if not CFG.get("build_resolve"):
         return record("skipped", "decomp.json holds no build_resolve adapter")
-    obj, failure = worker.build(text) if ref is not None else ("", "no reference")
-    want = None if failure else object_print(worker, obj, hashing)
+    if ref is None:
+        return record("skipped", "the baseline does not build")
+    cost = ref * (1 + max(1, int(launcher.settings["probe_runs"])))
+    if share.over(cost):
+        return record("skipped", f"its predicted cost, {cost:.1f} s, with the {share.spent:.1f} s the probes used is over the "
+                      f"bound of {share.bound:.1f} s", predicted_s=round(share.spent + cost, 3), bound_s=round(share.bound, 3))
+    obj, want = share.baseline(worker, text, hashing, ref)
     if want is None:
         return record("skipped", "the baseline does not build")
     r = adapter(CFG["build_resolve"], t, compiler, "{obj}", "", worker.tree, launcher, "{source}")
@@ -5147,8 +5195,11 @@ def probe_resolved(t, compiler, worker, text, hashing, ref):
     record("eligible" if identical and quick else "dropped", reason, took, identical=identical)
 
 
-def build_modes(t, compiler, worker, text, hashing, cache, ctx):
+def build_modes(t, compiler, worker, text, hashing, cache, ctx, ceiling):
     """The build modes a block uses for this ticket: {"single": bool, "batch": candidates per call, "key": cache key}.
+
+    The batching and resolved-compiler probes together cost at most `probe_cost_frac` of `ceiling`,
+    the ceiling of the block this call is about to run (see ProbeShare).
 
     They come from the calibration probes, run on the baseline and kept in the cache with the
     answer of the double compile. The key adds to the search context the source outside the target
@@ -5172,8 +5223,9 @@ def build_modes(t, compiler, worker, text, hashing, cache, ctx):
     single, ref = probe_single(t, compiler, worker, text, reference)
     launcher.single = single  # the later probes measure the form a block will build
     try:
-        batch = probe_batch(t, compiler, worker, text, hashing, ref)
-        probe_resolved(t, compiler, worker, text, hashing, ref)
+        share = ProbeShare(launcher.settings["probe_cost_frac"] * ceiling)
+        batch = probe_batch(t, compiler, worker, text, hashing, ref, share)
+        probe_resolved(t, compiler, worker, text, hashing, ref, share)
     finally:
         launcher.single = False
     if not (reference and reference[1]):  # a baseline that does not build leaves no answer to keep
@@ -5380,7 +5432,7 @@ def search_call(a):
             append_perf({"kind": "calibration", "unix": now(), "ticket": t["id"], "compiler": compiler,
                          "wall_s": round(time.perf_counter() - began, 3),
                          "t_ref_ms": round(launcher.samples[0] * 1000, 2) if launcher.samples else None})
-        mode = build_modes(t, compiler, workers[0], baseline, hashing, cache, ctx)
+        mode = build_modes(t, compiler, workers[0], baseline, hashing, cache, ctx, ceiling)
         launcher.single = mode["single"]
         if mode["batch"] > 1:
             workers = [BatchWorker(w, mode["batch"]) for w in workers]

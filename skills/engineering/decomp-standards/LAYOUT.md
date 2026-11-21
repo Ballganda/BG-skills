@@ -694,6 +694,7 @@ Each number above is a default.
 - `probe_gain`: 0.05; the share by which a calibration probe's mode must be faster to be kept.
 - `probe_runs`: 2; the builds a probe times of each mode, of which the fastest counts.
 - `probe_min_chars`: 2000; the least body text, in characters, the single-function probe must be able to cut to run; an estimate, not measured.
+- `probe_cost_frac`: 0.5; the share of the block's ceiling that the batching and resolved-compiler probes may cost together; 0 switches both off.
 - `tune_s`: 2; the tuning tick; 0 keeps the starting worker count.
 - `tune_gain`: 0.05.
 - `tune_loss`: 0.1.
@@ -711,6 +712,22 @@ Each number above is a default.
 - Each probe writes one calibration record to the [performance log](#performance-log).
 - The answers are kept in the result cache until something the cache key covers changes.
 - Those are the source outside the target function, the `build_batch` or `build_resolve` command, or anything else the cache key covers.
+- An answer reached under the cost bound is kept like any other, under the same key.
+- The probes run again when the key changes, not when a later block has a longer ceiling.
+
+#### The cost bound
+
+- The batching and resolved-compiler probes of one calibration share one bound, in seconds.
+- The bound is `probe_cost_frac` times the ceiling of the block the call is about to run.
+- That ceiling is the time since the ticket's last round, never more than `ceiling_s`.
+- Before each batching size and before the resolved-compiler probe, `search` predicts that step's cost.
+- A step whose predicted cost, added to what the two probes have used, is over the bound is not run.
+- The single-function probe and the double compile that settles the hashing are outside the bound.
+- The reference time is one single build of the baseline.
+- A batching size of n candidates is predicted at n times the best time per candidate so far, which starts at the reference time.
+- The resolved-compiler probe is predicted at the reference time times one more than `probe_runs`.
+- Diff runs are not predicted.
+- The baseline's single build and its byte identity are taken once per calibration, and both probes use them.
 
 #### Single-function build
 
@@ -738,6 +755,13 @@ Each number above is a default.
 - One compiler call builds 4, then 8, then 16 copies of the baseline.
 - A size is kept while every object equals the single build's and the time per candidate keeps falling.
 - A size that changes the bytes drops batching.
+- The first size that is not faster by `probe_gain` ends the probe.
+- Under `function` hashing one diff run per size compares the last object of the batch with the single build's function bytes.
+- A batch that changed the bytes of another position passes the probe; `check` and `verify` build singly, so no wrong match follows.
+- Under `object` hashing every object's file hash is compared, with no diff run.
+- A size that does not fit the [cost bound](#the-cost-bound) is not tried, and neither are the larger ones.
+- The best size proven so far is kept, and the record's `reason` names the size not tried, its predicted cost and the bound.
+- When the first size does not fit, the outcome is `skipped` and nothing is built for it.
 - A worker then takes up to that many candidates at a time, builds the unseen ones in one call, and diffs each as before.
 - A candidate whose object is missing after the call is a build-fail.
 - It is skipped without the adapter.
@@ -745,6 +769,8 @@ Each number above is a default.
 #### Resolved compiler
 
 - It needs a `build_resolve` adapter.
+- It is skipped when its predicted cost does not fit what is left of the [cost bound](#the-cost-bound).
+- The record's `reason` then holds the predicted cost and the bound.
 - The probe runs the compiler from the argument list and environment the adapter hands over, with no adapter and no wrapper in between.
 - It records `eligible` when that is faster and byte-identical.
 - It is measured only: no block builds this way, because it departs from the wrapper rule, and adopting it needs an ADR.
@@ -935,6 +961,9 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `t_probe_ms`: the probed mode, per candidate.
 - `identical`: where bytes were compared.
 - For batching: `batch`, the size kept (1 for none), and `sizes_ms`, per candidate, by size tried.
+- `predicted_s` and `bound_s`, for a probe cut short or skipped for cost.
+  - `predicted_s` is what the two probes had used plus the predicted cost of the step that did not fit.
+  - `bound_s` is the cost bound; the step did not run because `predicted_s` is above it.
 - The double compile's record holds no `probe`.
 
 #### A block record
