@@ -3309,7 +3309,9 @@ def sampled_search(base, template, files=None, config=None, **constants):
     log = Path(base) / "order.log"
     p = search_project(base, config=config or {},
                        files=dict({"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))}, **(files or {})))
-    tune(p, workers=1, **constants)  # one worker builds in the order the candidates come
+    # One worker builds in the order the candidates come. No reference compile and a ceiling far above any run:
+    # the budget alone ends the block, and the order log holds candidates only, however slow the machine is.
+    tune(p, **dict({"workers": 1, "reference_s": 0, "ceiling_s": 3600}, **constants))
     r, out = search(p, template)
     expect(out is not None, "search should print a summary", r)
     return r, out, log.read_text().splitlines()[-out["counts"]["compiled"]:]
@@ -4877,7 +4879,7 @@ def test_search_repeat_starts_no_background_search(base):
 
 # A fake compiler that takes 0.3 s and logs when each build starts and ends, with the TAG_ word its
 # source holds. On a candidate holding HANG it first starts a grandchild that keeps adding to a
-# heartbeat file for up to 30 seconds, then hangs.
+# heartbeat file for up to 12 minutes, then hangs for 15.
 BG_BUILD_PY = """import os, re, subprocess, sys, time
 src, obj, folder = sys.argv[1:4]
 text = open(src).read()
@@ -4887,9 +4889,9 @@ def note(what):
     open(os.path.join(folder, "builds.log"), "a").write("%s %s %.3f%s" % (tag, what, time.time(), chr(10)))
 note("start")
 if "HANG" in text:
-    code = "import sys, time" + chr(10) + "for i in range(300):" + chr(10) + "    open(sys.argv[1], 'a').write('x')" + chr(10) + "    time.sleep(0.1)"
+    code = "import sys, time" + chr(10) + "for i in range(7200):" + chr(10) + "    open(sys.argv[1], 'a').write('x')" + chr(10) + "    time.sleep(0.1)"
     subprocess.Popen([sys.executable, "-c", code, os.path.join(folder, "beat")])
-    time.sleep(60)
+    time.sleep(900)
 time.sleep(0.3)
 open(obj, "w").write(text)
 note("end")
@@ -4897,6 +4899,11 @@ note("end")
 # The sweep builds the baseline, then each alternative in turn: the one that hangs is the fourth build.
 HANGING = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, "
                   "int WRONG_d; int WRONG_e; int WRONG_f;, int HANG;) return 1; }\n")
+
+
+# The search's hang limit, floor and start, above the fake hang's 15 minutes: a search left in the hang stays
+# there until a case stops it, however late that comes.
+HANG_LIMIT = {"hang_floor_s": 3600, "hang_start_s": 3600}
 
 
 def background_project(base, folder=None, **search):
@@ -5043,7 +5050,7 @@ def test_a_natural_match_found_in_the_background_is_returned_and_the_new_templat
 
 def hung_background(base):
     """A project whose background search is stuck in a compile that hangs. Returns (project, the grandchild's heartbeat)."""
-    p = background_project(base)
+    p = background_project(base, **HANG_LIMIT)
     beat = Path(base) / "bg" / "beat"
     r, out = search(p, HANGING)
     expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
@@ -5073,7 +5080,7 @@ def test_search_stop_ends_the_background_search_and_its_children(base):
 
 
 def test_release_ends_the_background_search_and_its_children(base):
-    p = background_project(base)
+    p = background_project(base, **HANG_LIMIT)
     r = p.run("claim", TID, "--by", "w1")
     expect(r.returncode == 0, "claim should pass", r)
     beat = Path(base) / "bg" / "beat"
