@@ -280,6 +280,7 @@ Commands with detail link to their section below the table.
   - `result`.
   - `differ_bytes`.
   - `kinds`: the kinds of the choice points where that candidate leaves the baseline.
+  - A match by the baseline records no kind, so `kinds` is empty.
   - `category`: the trail's category the round worked on.
   - `unix`.
 - The fields of `attempts.jsonl` are unchanged.
@@ -395,6 +396,7 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 
 - The first argument may be `@label kind` (for `PERM_LINESWAP`, a first line).
 - The label names the choice point and must be unique.
+- A label holds letters and underscores only, with no digits; a label with a digit is refused.
 - The label defaults to `A`, `B`, and on, in file order.
 - The kind is one of `decl-order`, `stmt-order`, `loop-form`, `temp-type`, `signedness`, `width`, `operator`, `expression-shape`, `branch-order`, `inlining`, `other`.
 - The kind defaults to `other`, and to `stmt-order` for `PERM_LINESWAP`.
@@ -574,7 +576,7 @@ A block ends on the first of these that holds:
   - The last pass: when the deadline comes with no more candidates left in the space than the block runs workers, the block does not end here.
   - It hands them out, waits for them, and ends `exhausted`, so it leaves no background search.
   - Plateau and repeats do not end a last pass.
-  - A match and a hung compile's kill still apply, so the overrun is one compile, or the hang limit at most.
+  - A match and a hung compile's kill still apply, so the overrun is the compile in hand plus the last pass, or the hang limit at most.
 
 ### Background search
 
@@ -734,6 +736,7 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - A round brings a new best score when it is lower in `differ_bytes` than every earlier attempt on the ticket, checks included.
   - A repeat is no round here.
 - `history`: one line of project history for the ticket's latest category, such as `decl-order fixed register-allocation 7 of 9 times on this compiler` (only when the ledger holds a template round for it).
+  - A match by the baseline records no kind, so the history counts nothing for it.
 - `counts`: the numbers of the round, listed below.
 - `winner`: on a match, the path of the matching candidate as plain C with no macros: `.decomp/search/<ticket id>/winner/<source file name>`.
   - The next round of the ticket that matches replaces it.
@@ -754,7 +757,9 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `guardrail`.
 - `src_dedupe_hits`: candidates whose source was already seen this round, never built twice.
 - `cache_hits`: candidates served from the result cache without building.
-- `object_hits`: built, but the diff skipped because the object or function bytes were already scored.
+- `object_hits`: built, but the object or function bytes were already scored.
+  - Under `object` hashing a hit skips the diff.
+  - Under `function` hashing the diff adapter still runs on a hit, since the function's bytes are known only from its output; a hit then means only that those bytes were already scored.
 - `unique_objects`: distinct objects scored.
 - `hashing`: `object`, or `function` when the compiler's objects differ between two compiles of one source.
 - `workers`: the count the block started with.
