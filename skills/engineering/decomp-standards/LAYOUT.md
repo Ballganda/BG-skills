@@ -556,6 +556,8 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - Every 30 seconds the block recompiles its reference candidate, the baseline, in a folder of its own, holding a compile slot like any build.
 - Its base is the median of the block's first 2 × workers compile times.
 - When the block built nothing before it, the base is the first reference compile.
+- Under batching a compile time is a call's time shared among its candidates, so the base is the first reference compile instead.
+  - It is made as the block begins, and a failed one gives no base: the next that passes becomes it.
 - A reference compile more than 30 percent over the base halves the worker count, down to the floor.
 - It also raises `contention-or-throttle` in the [performance log](#performance-log).
 
@@ -577,6 +579,8 @@ A block ends on the first of these that holds:
   - It hands them out, waits for them, and ends `exhausted`, so it leaves no background search.
   - Plateau and repeats do not end a last pass.
   - A match and a hung compile's kill still apply, so the overrun is the compile in hand plus the last pass, or the hang limit at most.
+  - Under batching a worker starts no batch once the deadline has come, unless it is in the last pass.
+  - So the overrun is one batch: its compiler call and the diffs of its candidates.
 
 ### Background search
 
@@ -588,7 +592,8 @@ A block ends on the first of these that holds:
 - It yields to foreground blocks.
   - No foreground search counts it as a writer.
   - It starts no build while any foreground search on this machine has a fresh heartbeat in the pool.
-  - A block has its slots back within one compile.
+  - A block has its slots back within one compile, or within one batch under batching.
+- Under batching it starts no batch once its time has come or it was stopped.
 - The call that started it is the one exception: that call left the pool before it started the search.
 - So a heartbeat still under its name is one it failed to remove, and the search does not wait on it.
 - A call that cannot remove its own heartbeat as it leaves the pool does not fail.
@@ -864,6 +869,7 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `wall_s`: the seconds of the block alone, or of the calibration alone.
 - `t_ref_ms`: the median of the block's reference compiles.
   - Without one, it is the first passing compile of the block, or of the calibration.
+  - Under batching it is always a single build's time, so `null` without a reference compile.
 
 #### A probe's calibration record
 

@@ -3363,6 +3363,17 @@ class Block:
             else:
                 self.unserved.append((since, now))
 
+    def late(self):
+        """Whether a batch a worker holds seeds for is not to be built: the block has ended, or its deadline has come
+        and no last pass is under way. A deadline that has come ends the block here, as take does."""
+        with self.lock:
+            if self.end:
+                return True
+            if not self.last and self.due() and not self.last_pass():
+                self.end = "deadline"
+                return True
+        return False
+
     def starved_s(self):
         """The seconds the workers waited for a candidate, up to the moment the last one was handed out. A wait
         that ended with no candidate counts up to that moment only: after it, there was nothing to wait for."""
@@ -3554,7 +3565,9 @@ class Block:
                 if not seeds:
                     return
                 texts = dict.fromkeys(self.template.render(self.template.vector(seed)) for seed in seeds)
-                worker.prebuild([x for x in texts if not memo.known(x) and not worker.refuse(x)])
+                worker.late = self.late  # asked once the worker holds its compile slot, before the compiler call
+                if not worker.prebuild([x for x in texts if not memo.known(x) and not worker.refuse(x)]):
+                    return  # no time for the batch: its candidates are not tried
                 for seed in seeds:
                     self.attempt(seed, memo, worker)
         except BaseException as err:  # raised again by run_block, on the main thread
@@ -3676,8 +3689,10 @@ class Tuner:
 
     With a reference (a spare Worker and the baseline's source) it recompiles the baseline every
     `reference_s`. The base is the median of the block's first 2 x start compile times, or the
-    first reference compile when the block has built nothing. A reference compile more than
-    REF_SLOW over the base halves the worker count, down to the floor.
+    first reference compile when the block has built nothing. A block that builds in batches
+    (`batched`) has no such times, only a call's time shared out, so its base is the first
+    reference compile, made as the block begins. A reference compile more than REF_SLOW over
+    the base halves the worker count, down to the floor.
 
     At each tick it also notes whether the pool could give the block its floor: a block that spent
     over half its time below it was starved by the other writers.
@@ -3685,8 +3700,8 @@ class Tuner:
     fixed (a worker count set in local.json) and a `tune_s` of 0 keep the count as it started.
     """
 
-    def __init__(self, pool, launcher, settings, start, most, fixed=False, reference=None):
-        self.pool, self.launcher, self.settings = pool, launcher, settings
+    def __init__(self, pool, launcher, settings, start, most, fixed=False, reference=None, batched=False):
+        self.pool, self.launcher, self.settings, self.batched = pool, launcher, settings, batched
         self.start = self.target = self.low = self.high = start
         self.most, self.floor = most, max(1, start // 2)
         self.adjusts = not fixed and settings["tune_s"] > 0
@@ -3792,7 +3807,9 @@ class Tuner:
 
     def watch(self):
         worker, text = self.reference
-        while not self.stop.wait(self.settings["reference_s"]):
+        wait = 0 if self.batched else self.settings["reference_s"]  # a batched block takes its base as it begins
+        while not self.stop.wait(wait):
+            wait = self.settings["reference_s"]
             took = reference_compile(worker, text)
             if took is None:
                 continue
@@ -3800,7 +3817,7 @@ class Tuner:
                 first = self.launcher.samples[:2 * self.start]
             with self.lock:
                 if self.base is None:
-                    self.base = statistics.median(first) if first else took
+                    self.base = took if self.batched else statistics.median(first) if first else took
                 self.refs.append(took)
                 if took > (1 + REF_SLOW) * self.base and self.adjusts and self.target > self.floor:
                     self.gave_up, self.gave_up_at, self.moved = self.target, self.ticks, -1
@@ -4557,7 +4574,8 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
         "build_fail": counts["build_fail"], "killed": launcher.killed, "src_dedupe_hits": memo_counts["src_dedupe_hits"],
         "t_compile_p50_ms": statistics.median(ms) if ms else None,
         "t_compile_p95_ms": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
-        "t_ref_ms": tuning.get("t_ref_ms") or (round(launcher.samples[0] * 1000, 2) if launcher.samples else None),
+        "t_ref_ms": tuning.get("t_ref_ms") or (round(launcher.samples[0] * 1000, 2)
+                                               if launcher.samples and counts.get("batch", 1) < 2 else None),
         "stage_ms": stage, "idle_frac": round(min(1.0, perf["starved"] / worker_s), 3) if worker_s > 0 else 0.0,
         "best_score_start": start_best, "best_score_end": final,
         "t_to_best_s": None if perf["best_at"] is None else round(perf["best_at"], 3),
@@ -4719,6 +4737,8 @@ class BatchWorker(Worker):
     single build. A candidate the last batch did not build is built singly.
     """
 
+    late = None  # asked with the compile slot held: true when the batch is not to be built (see Block.late)
+
     def __init__(self, worker, size):
         vars(self).update(vars(worker))
         self.size, self.ready = size, {}
@@ -4742,7 +4762,8 @@ class BatchWorker(Worker):
         """Build every text in one call of the adapter. Returns one (obj, failure log or '') per text.
 
         A text whose object is missing after the call failed to build. When the call fails and no
-        object is missing, every text failed: nothing says which.
+        object is missing, every text failed: nothing says which. None when the call was not made
+        because the block's time came while the worker waited for its slot (see late).
         """
         wait, began = self.environment.settings["lock_retry_s"], time.perf_counter()
         src = self.source
@@ -4755,6 +4776,8 @@ class BatchWorker(Worker):
         command = expand(fill(CFG["build_batch"], self.t, self.compiler, "", "", self.tree, str(src)),
                          sources=" ".join(f'"{name}"' for name in names), objdir=self.batchdir)
         with compile_slot(self):  # one compiler process, so one slot
+            if self.late and self.late():
+                return None  # the time came while this worker waited for the slot
             start = time.perf_counter()
             b = self.environment.run(command, self.tree, scale=len(texts))
             took = time.perf_counter() - start
@@ -4768,11 +4791,16 @@ class BatchWorker(Worker):
         return [(str(obj), "" if ok else log) for obj, ok in zip(objs, made)]
 
     def prebuild(self, texts):
-        """Build these distinct candidates in one call, for build to hand out. One candidate alone is left to a single build."""
+        """Build these distinct candidates in one call, for build to hand out. One candidate alone is left to a single build.
+        Returns False when the call was not made because its time had come."""
         self.ready = {}
         if len(texts) > 1:
             with contextlib.suppress(OSError):  # a file stayed locked: each is built singly instead
-                self.ready = dict(zip(texts, self.build_batch(texts)))
+                built = self.build_batch(texts)
+                if built is None:
+                    return False
+                self.ready = dict(zip(texts, built))
+        return True
 
     def build(self, text):
         if text not in self.ready:
@@ -5152,7 +5180,7 @@ def search_call(a):
         trailed = trail(t["id"])
         timing = {}
         reference = (Worker(Path(scratch) / "ref", launcher, t, compiler, tree, text), baseline) if settings["reference_s"] else None
-        tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
+        tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference, mode["batch"] > 1)
         with persistent_wineserver(launcher):
             kind = background and background.block_type()
             options = BlockOptions(workers, settings, ceiling, boost, timing, parents, tuner, kind)
@@ -5163,7 +5191,7 @@ def search_call(a):
                 # (a background search's resumed results came from the cut source too: none is carried over)
                 memo, timing = Memo(cache, mode_context(ctx, mode), hashing), {}
                 options.perf = timing
-                options.tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
+                options.tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference, mode["batch"] > 1)
                 end, best, counts, results = run_block(template, memo, options)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell,
                       single_function=mode["single"], batch=mode["batch"])
@@ -5582,6 +5610,17 @@ class BackgroundBlock(Block):
             with self.lock:
                 self.end = self.end or "stopped"
         return super().take()
+
+    def late(self):
+        """As for Block, and also once the search was stopped or its own time is up (a last pass is still built whole)."""
+        if self.run.stopped.is_set():
+            with self.lock:
+                self.end = self.end or "stopped"
+        elif self.run.over():
+            with self.lock:
+                if not self.end and not self.last and not self.last_pass():
+                    self.end = "deadline"
+        return super().late()
 
     def record(self, seed, e, *more):
         super().record(seed, e, *more)

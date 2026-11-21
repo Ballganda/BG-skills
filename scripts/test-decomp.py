@@ -4048,6 +4048,112 @@ def test_search_drops_batching_that_is_slower(base):
     expect([x for x in calls() if x.startswith("batch")] == ["batch 4"], f"no block build is batched: {calls()}", r)
 
 
+# Fake compilers that log when each batch call starts and ends, and each single build. A single build
+# sleeps `normal` seconds, or `slow` once `after` batch calls have started (the probe's included).
+TIMED_BATCH_PY = """import os, sys, time
+objdir, log, per_call, per_source = sys.argv[1:5]
+sources = sys.argv[5:]
+open(log, "a").write("batch start %.3f %d" % (time.time(), len(sources)) + chr(10))
+time.sleep(float(per_call) + float(per_source) * len(sources))
+for s in sources:
+    open(os.path.join(objdir, os.path.splitext(os.path.basename(s))[0] + ".obj"), "w").write(open(s).read())
+open(log, "a").write("batch end %.3f" % time.time() + chr(10))
+"""
+TIMED_SINGLE_PY = """import os, sys, time
+src, obj, log, normal, after, slow = sys.argv[1:7]
+started = sum(x.startswith("batch start") for x in open(log).read().splitlines()) if os.path.exists(log) else 0
+open(log, "a").write("single" + chr(10))
+time.sleep(float(slow) if started >= int(after) else float(normal))
+open(obj, "w").write(open(src).read())
+"""
+
+
+def timed_batch_project(base, per_call, per_source, single, after=10 ** 6, slow=0, **search):
+    """A batching project whose calls log their times. Returns (project, batch starts, batch ends), the lists read on call."""
+    log = Path(base) / "calls.log"
+    batch = PY + f' "{{tools}}/timed_batch.py" "{{objdir}}" "{log.as_posix()}" {per_call} {per_source} {{sources}}'
+    build = PY + f' "{{tools}}/timed_single.py" "{{source}}" "{{obj}}" "{log.as_posix()}" {single} {after} {slow}'
+    p = search_project(base, config={"build": build, "build_batch": batch},
+                       files={"tools/timed_batch.py": TIMED_BATCH_PY, "tools/timed_single.py": TIMED_SINGLE_PY})
+    tune(p, **search)
+
+    def times(what):
+        lines = [x.split() for x in log.read_text().splitlines()] if log.exists() else []
+        return [float(x[2]) for x in lines if x[:2] == ["batch", what]]
+    return p, lambda: times("start"), lambda: times("end")
+
+
+# A batch call and a single build take 0.8 s, and 4 workers share a pool of slots: the reference compile
+# (every half second) is compared with a single build, which takes as long as one batch call.
+def batched_block(base, after=10 ** 6, slow=0, **search):
+    p, starts, ends = timed_batch_project(base, 0.8, 0, 0.8, after, slow,
+                                          **dict({"cores": 4, "slots": 8, "tune_s": 60, "reference_s": 0.5, "deadline_s": 5}, **search))
+    r, out = search_template(p)
+    return p, r, out
+
+
+def search_template(p):
+    return search(p, wide(12))
+
+
+def test_search_keeps_the_workers_of_a_batched_block_on_a_quiet_machine(base):
+    p, r, out = batched_block(base)
+    expect(out is not None and out["end"] == "deadline" and out["counts"]["batch"] == 16, f"the block batches: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["t_ref_max_ms"] is not None, f"the block lasts past a reference compile: {rec}", r)
+    expect(rec["t_ref_base_ms"] >= 800, f"the base is a single build's time, not a candidate's share of a call: {rec}", r)
+    expect("contention-or-throttle" not in rec["flags"], f"a reference compile as long as the base is no contention: {rec}", r)
+    expect(rec["workers_end"] == rec["workers_max"], f"the workers are kept: {rec}", r)
+
+
+def test_search_flags_contention_in_a_batched_block_when_single_builds_slow(base):
+    p, r, out = batched_block(base, after=6, slow=3)  # a single build takes 3 s once the block has made a few batch calls
+    rec = perf_log(p)[-1]
+    expect(out is not None and rec["t_ref_base_ms"] >= 800, f"the base is a single build's time: {rec}", r)
+    expect("contention-or-throttle" in rec["flags"], f"a single build several times longer than the base is flagged: {rec}", r)
+    expect(rec["workers_end"] < rec["workers_max"], f"the workers are shed: {rec}", r)
+
+
+def test_search_records_a_single_builds_time_as_a_batched_blocks_reference(base):
+    p, r, out = batched_block(base, reference_s=30, deadline_s=2)  # the reference interval is never reached
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["counts"]["batch"] == 16 and rec["t_ref_ms"] >= 800,
+           f"a short block records one single build's time, not a candidate's share: {rec}", r)
+    p, r, out = batched_block(sub(base, "off"), reference_s=0, deadline_s=2)
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["counts"]["batch"] == 16 and rec["t_ref_ms"] is None,
+           f"with the reference off there is no reference time: {rec}", r)
+
+
+def test_search_starts_no_batch_after_its_deadline(base):
+    # Two workers and one slot: the second worker holds a batch of its own while the first one's call outlasts the deadline.
+    p, starts, ends = timed_batch_project(base, 0, 0.5, 1.0, workers=2, slots=1, reference_s=0, deadline_s=1)
+    r, out = search(p, wide(12))
+    expect(out is not None, "a summary", r)
+    probed = len(probes(p)["batching"]["sizes_ms"])
+    expect(out is not None and out["end"] == "deadline", f"the block ends on its deadline: {out}", r)
+    expect(len(starts()) - probed == 1, f"one batch call is made in the block: {starts()} after {probed} in the probe", r)
+    expect(out["counts"]["compiled"] <= 4, f"no more than one batch is built: {out['counts']}", r)
+
+
+def test_a_background_search_starts_no_batch_after_its_time(base):
+    # A call takes 3 s. The foreground block ends after one; the background search has 1.5 s or so, which end
+    # during its first call while its second worker waits for the slot.
+    p, starts, ends = timed_batch_project(base, 0, 0.75, 1.5, workers=2, slots=1, reference_s=0, deadline_s=0.5,
+                                          ceiling_s=4.8, background=1)
+    try:
+        r, out = search(p, wide(12))
+        returned = time.time()
+        expect(out is not None and out.get("continues_s"), f"a search goes on in the background: {out}", r)
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search ends by itself")
+        later = [t for t in starts() if t > returned]
+        first_end = min(t for t in ends() if t > returned)
+        expect(later and all(t < first_end for t in later),
+               f"no batch call starts after the one in hand ended: {later} {first_end}", r)
+    finally:
+        stop_background(p)
+
+
 def test_search_records_each_probe_and_skips_those_the_adapters_do_not_support(base):
     p = search_project(base)
     r, out = search(p, MATCHING)
