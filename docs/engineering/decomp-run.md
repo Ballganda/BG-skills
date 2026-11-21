@@ -71,6 +71,10 @@ Not necessarily, and the link never changes a ticket's status. Per-function matc
 
 All run state lives in the ledger and the ticket files. A coordinator that carries the last run's window pays for it on every decision, and a fresh one loses nothing.
 
+**Which kind of model does its subagent run on?**
+
+The default: the repair subagent runs on the Standard model (Sonnet by default), one tier higher after a failed `revalidate`, because `revalidate` checks its result. It follows the Reference repair row of the models doc [bg-setup](./bg-setup.md) writes. Writers keep the contract's size tiers. Change the row, and every dispatch of that kind follows.
+
 ## It's working if
 
 - The coordinator's trace holds tool commands and subagent dispatches, and no source edits of its own.
