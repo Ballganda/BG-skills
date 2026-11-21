@@ -4,6 +4,15 @@
 Copied into a decomp project's tools/ by decomp-setup and frozen at the
 decomp-setup tag. It is the only writer of ticket statuses and ledger records.
 Standard library only. Run from the project root: python tools/decomp.py <cmd>.
+
+Sections are marked by a banner line `# ---------- name ----------`; search for it.
+Sections, in file order: environment; tickets; ledger; ticket lifecycle; build and
+compare; commands; check trail and the template-search gate; template search;
+template search: the priors, and which candidates a block tries when it cannot try
+them all; template search: the compile-slot pool; template search: the compiler
+launcher; template search: the block scheduler; template search: tuning and the
+performance log; template search: learning across rounds, mutation, crossover, and
+stop advice; calibration probes; background search.
 """
 import argparse
 import atexit
@@ -68,6 +77,7 @@ FIELDS = ["id", "unit", "address", "size", "tier", "source", "expected", "status
 
 
 def die(msg, code=1):
+    die.last = msg  # a background search that stops here quotes it in its report (see Background.died)
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -1106,6 +1116,8 @@ def cmd_release(a):
         accepted = "claimed" if a.to == "blocked-reference" else "claimed or blocked-reference"
         die(f"{a.id} is {t['status']}; release needs {accepted}")
     discard_background(a.id)
+    with contextlib.suppress(OSError):
+        (search_dir(a.id) / NOTICES_FILE).unlink()  # the ticket's next round states each adapter notice in full
     print(f"{a.id} -> {move(a.id, event)}")
 
 
@@ -1450,14 +1462,7 @@ def grams(data):
 
 def cmd_similar(a):
     t, _ = read_ticket(a.id)
-    mine = grams((ROOT / t["expected"]).read_bytes())
-    scored = []
-    for o in all_tickets():
-        if o["status"] in MATCHED and o["id"] != a.id:
-            g = grams((ROOT / o["expected"]).read_bytes())
-            if mine and g:
-                scored.append((len(mine & g) / len(mine | g), o))
-    for s, o in sorted(scored, key=lambda x: -x[0])[: a.n]:
+    for s, o, _ in closest_solved(t, a.n):
         print(f"{s:.2f} {o['id']} {o['size']}B {o['source']}")
 
 
@@ -1808,8 +1813,9 @@ WINDOW_LINES = 7  # diff report lines the summary shows for the best candidate
 WINDOW_WIDTH = 120  # characters kept of each of those lines
 CUT_MARK = " ..."  # ends a window line that was cut, inside the width
 # What the summary says when the best candidate's report holds fewer than 2 lines: a header at most.
-EMPTY_REPORT = ("the diff report holds no instruction diff, so the window shows nothing to plan the next template on: "
-                "the fix is a diff adapter whose report holds one line per instruction")
+EMPTY_NAME = "no-instruction-diff"  # the name that starts its sentence, and stands alone once the ticket has read it
+EMPTY_REPORT = (f"{EMPTY_NAME}: the diff report holds no instruction diff, so the window shows nothing to plan the next "
+                "template on: the fix is a diff adapter whose report holds one line per instruction")
 FAILURE_CHARS = 400  # what the summary keeps of a failure log when no candidate was scored
 PERM_MACRO = re.compile(r"\bPERM_[A-Z_]+\b")
 CHOICE_CODE = re.compile(r"([A-Za-z_]+)(\d+)")
@@ -2220,11 +2226,13 @@ def shape(text):
                     for w in SHAPE_TOKEN.findall(lexed(text)[0]))
 
 
-def closest_solved(t, n=SIMILAR_N):
-    """The matched functions `similar` ranks closest to the ticket, as (closeness, the function's source) pairs.
+def closest_solved(t, n=SIMILAR_N, with_source=False):
+    """The matched functions closest to the ticket, as (closeness, ticket, the function's source) triples, closest first.
 
-    A function's source is its unit's text from its marker to the next marker. One that cannot be
-    read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
+    This is the one answer `similar` prints and the bonus of `search` reads. A function's source is
+    its unit's text from its marker to the next marker, read only with_source: the bonus leaves out
+    one whose source cannot be read, `similar` does not need it. A function whose ticket or expected
+    bytes cannot be read is left out, as is every one when the ticket's own expected bytes are missing. The candidates
     are the tickets the matches ledger names, so no other ticket file is read: a project's open
     tickets can outnumber its matched ones by thousands.
     """
@@ -2249,25 +2257,29 @@ def closest_solved(t, n=SIMILAR_N):
             continue
         try:
             g = grams((ROOT / o["expected"]).read_bytes())
-            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace")
+            text = (ROOT / o["source"]).read_text(encoding="utf-8", errors="replace") if with_source else ""
         except OSError:
             continue
-        marks = list(MARKER.finditer(text))
-        at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
-        if mine and g and at is not None:
-            end = marks[at + 1].start() if at + 1 < len(marks) else len(text)
-            scored.append((len(mine & g) / len(mine | g), o["id"], text[marks[at].end():end]))
-    return [(s, text) for s, _, text in sorted(scored, key=lambda x: (-x[0], x[1]))[:n]]
+        body = ""
+        if with_source:
+            marks = list(MARKER.finditer(text))
+            at = next((k for k, m in enumerate(marks) if m.group(1) == o["id"]), None)
+            if at is None:
+                continue
+            body = text[marks[at].end():marks[at + 1].start() if at + 1 < len(marks) else len(text)]
+        if mine and g:
+            scored.append((len(mine & g) / len(mine | g), o, body))
+    return sorted(scored, key=lambda x: (-x[0], x[1]["id"]))[:n]
 
 
 def with_similar(template, near):
     """The template with each likelihood raised where the alternative is written as the closest solved functions are.
 
-    near is closest_solved's. An alternative gets the bonus when its shape, two tokens or more, stands
+    near is closest_solved's, with its sources. An alternative gets the bonus when its shape, two tokens or more, stands
     in such a function, by that function's closeness. A choice point whose alternatives all get the
     same bonus is left alone: the functions say nothing about it.
     """
-    near = [(s, f" {shape(text)} ") for s, text in near if s > 0]
+    near = [(s, f" {shape(text)} ") for s, _, text in near if s > 0]
     parts = []
     for p in template.parts:
         if near and isinstance(p, Choice):
@@ -2692,6 +2704,9 @@ SEARCH_DEFAULTS = {  # a block's constants; "search" in this machine's local.jso
 }
 
 
+# ---------- template search: the compile-slot pool ----------
+
+
 def search_settings():
     """The block constants for this machine: the defaults with local.json's "search" entries over them."""
     path = local_dir() / "local.json"
@@ -2832,6 +2847,7 @@ class SlotPool:
         self.closed = threading.Event()
         self.held, self.busy, self.reclaimed = set(), 0, 0  # slots held; workers holding or waiting for one
         self.writers = self.writers_at_start = 1
+        self.left = None  # the line for a heartbeat this search could not remove as it left (see close)
 
     def open(self):
         """Join the pool: start the heartbeat and count the active writers, this one included."""
@@ -2843,7 +2859,12 @@ class SlotPool:
         return self
 
     def close(self):
-        """Leave the pool: give back every slot and remove the heartbeat. Safe to call twice."""
+        """Leave the pool: give back every slot and remove the heartbeat. Safe to call twice.
+
+        A heartbeat that cannot be removed stays fresh for the stale time, and reads as a running
+        foreground block. That is not fatal: the failure is kept in `left`, and the background
+        search this call then starts copies it into its log.
+        """
         if self.closed.is_set():
             return
         self.closed.set()
@@ -2852,8 +2873,12 @@ class SlotPool:
                 with contextlib.suppress(OSError):
                     self.drop(i)
             self.held.clear()
-            with contextlib.suppress(OSError):
+            try:
                 self.beat.unlink()
+            except FileNotFoundError:  # cleared as stale by another search: it is gone all the same
+                pass
+            except OSError as err:
+                self.left = f"could not remove the heartbeat {self.beat.name}: {type(err).__name__}: {err}"
 
     def stale(self, path):
         """Whether a file was last written longer ago than the stale time, or is gone. By the wall clock: it spans processes."""
@@ -3016,6 +3041,9 @@ class SlotPool:
         return freed
 
 
+# ---------- template search: the compiler launcher ----------
+
+
 @contextlib.contextmanager
 def compile_slot(worker):
     """Hold one of the machine's compile slots for the length of a worker's build. A launcher with no pool builds freely."""
@@ -3164,6 +3192,9 @@ def persistent_wineserver(launcher):
                 proc.wait()
 
 
+# ---------- template search: the block scheduler ----------
+
+
 class Block:
     """One block's running state, shared by its workers under one lock: what was tried, and when to end.
 
@@ -3176,7 +3207,8 @@ class Block:
     The baseline goes first, then every one-choice-changed candidate, then the rest of the space, each
     group most likely first. The rest waits for the sweep's last result: a choice point whose
     alternatives all gave the baseline's object is inert, and stays at its first alternative from
-    then on. A match that needs steering does not end the block: it is kept while the rest is tried
+    then on. It does not wait once the round has no object identity (see Memo.blind), as nothing
+    can then be frozen. A match that needs steering does not end the block: it is kept while the rest is tried
     for a natural one (see run_block). boost is the history's (see candidates).
     """
 
@@ -3202,6 +3234,7 @@ class Block:
         self.waited, self.handed, self.unserved = 0.0, None, []  # see asked: the waits for a candidate
         self.running = lambda: self.workers  # how many workers run now: run_block asks its Tuner
         self.last = False  # whether the deadline came with one pass of the workers left (see last_pass)
+        self.blind = lambda: False  # whether nothing can be frozen as inert: run_block sets the Memo's (see Memo.blind)
 
     def elapsed(self):
         return time.perf_counter() - self.start
@@ -3243,7 +3276,7 @@ class Block:
                     return None
                 if self.sweep:
                     return self.sweep.popleft()
-                if not self.pending:
+                if not self.held():
                     break
                 self.lock.wait(0.05)  # the sweep's last builds are still out: what is inert is not known yet
             if self.seeds is None:
@@ -3253,6 +3286,10 @@ class Block:
                 self.end = "exhausted"
             return seed
 
+    def held(self):
+        """Whether the rest waits for the sweep's results. It does not once no choice point can be frozen. Call with the lock held."""
+        return bool(self.pending) and not self.blind()
+
     def last_pass(self):
         """Whether no more candidates are left than workers run now. Call with the lock held, at the deadline.
 
@@ -3261,7 +3298,7 @@ class Block:
         Before the sweep's results are in, what is left is counted as if no choice point were inert.
         """
         n = self.running()
-        if self.sweep or self.pending:
+        if self.sweep or self.held():
             self.last = len(self.sweep) + self.counts["space"] - len(self.swept) <= n
             return self.last
         if self.seeds is None:
@@ -3290,7 +3327,7 @@ class Block:
                 if self.sweep:
                     seeds.append(self.sweep.popleft())
                     continue
-                seed = None if self.pending or self.seeds is None else next(self.seeds, None)
+                seed = None if self.held() or self.seeds is None else next(self.seeds, None)
                 if seed is None:
                     break
                 seeds.append(seed)
@@ -3419,7 +3456,24 @@ class Block:
                 self.error, self.end = self.error or err, self.end or "stopped"
 
 
-def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
+class BlockOptions:
+    """What run_block needs beside the template and the memo: plain data, built once per round.
+
+    A new option is one field here, one line where a caller sets it and one where run_block reads it.
+    workers are the Worker objects, settings the search settings, ceiling the block's time ceiling in
+    seconds, boost the history's (see candidates). A dict given as perf is filled with the block's
+    timings for the performance log. parents are an earlier block's best candidates, which open
+    mutation and crossover (see Arms). A Tuner given as tuner sets how many of the workers run at
+    once, from its starting count on; without one they all run. block_type is the kind of Block to
+    run, for a background search.
+    """
+
+    def __init__(self, workers, settings, ceiling, boost=None, perf=None, parents=None, tuner=None, block_type=None):
+        self.workers, self.settings, self.ceiling, self.boost = workers, settings, ceiling, boost
+        self.perf, self.parents, self.tuner, self.block_type = perf, parents, tuner, block_type
+
+
+def run_block(template, memo, options):
     """Try candidates on every worker until the block ends. Returns (end reason, best, counts, results).
 
     Each worker is a thread that drives one adapter process at a time, in its own folder, and takes
@@ -3429,12 +3483,10 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     per candidate tried, by seed.
     A block that ends with no natural match but with one that needs steering ends as a match: the
     steered match, reduced to the steering it needs.
-    A dict given as perf is filled with the block's timings for the performance log. parents are an
-    earlier block's best candidates, which open mutation and crossover (see Arms).
-    A Tuner given as tuner sets how many of the workers run at once, from its starting count on;
-    without one they all run.
-    block_type is the kind of Block to run, for a background search.
+    options is a BlockOptions.
     """
+    workers, settings, ceiling, boost = options.workers, options.settings, options.ceiling, options.boost
+    perf, parents, tuner, block_type = options.perf, options.parents, options.tuner, options.block_type
     block = (block_type or Block)(template, settings, tuner.start if tuner else len(workers), ceiling, boost, parents)
     admits = [(lambda i=i: tuner.admit(i),) if tuner else () for i in range(len(workers))]
     threads = [threading.Thread(target=block.work_batch if hasattr(w, "prebuild") else block.work,
@@ -3442,6 +3494,7 @@ def run_block(template, memo, workers, settings, ceiling, boost=None, perf=None,
     if tuner:
         block.running = lambda: tuner.target
         tuner.begin(block)
+    block.blind = memo.blind
     for th in threads:
         th.start()
     for th in threads:
@@ -3482,6 +3535,9 @@ def pool_capacity(pool):
         except (OSError, ValueError):
             pass  # free, or being written
     return min(share, pool.size - others)
+
+
+# ---------- template search: tuning and the performance log ----------
 
 
 def reference_compile(worker, text):
@@ -3951,8 +4007,16 @@ def insights(template, results, best):
     return out
 
 
-def summary(template, end, best, counts, winner, results=(), history_line="", notices=(), stop=""):
-    """The round as the writer reads it: one JSON object, held under the token cap. It never holds source."""
+def empty_report(best, winner):
+    """Whether the round's summary carries the empty-report notice: the best candidate's report holds under 2 lines."""
+    return not winner and "score" in best and len(best["window"]) < 2  # it holds 2 lines or more whenever the report does
+
+
+def summary(template, end, best, counts, winner, results=(), history_line="", notices=(), stop="", stated=()):
+    """The round as the writer reads it: one JSON object, held under the token cap. It never holds source.
+
+    stated names the adapter notices the ticket has already read in full: the empty-report notice is then its name alone.
+    """
     out = {"end": end, "best": None, "counts": counts}
     if history_line:
         out["history"] = history_line
@@ -3964,8 +4028,8 @@ def summary(template, end, best, counts, winner, results=(), history_line="", no
         out["winner"] = str(winner)
     elif "score" in best:
         out["window"] = list(best["window"])
-        if len(out["window"]) < 2:  # the window holds 2 lines or more whenever the report does
-            out["notice"] = out.get("notice", []) + [EMPTY_REPORT]
+        if empty_report(best, winner):
+            out["notice"] = out.get("notice", []) + [EMPTY_NAME if EMPTY_NAME in stated else EMPTY_REPORT]
     else:
         out["failure"] = best["failure"][-FAILURE_CHARS:]
     if results:
@@ -4185,9 +4249,24 @@ class Memo:
                 "unique_objects": None if blind else len(self.objects), "hashing": self.hashing}
 
 
-NO_IDENTITY = ("no-object-identity: object dedupe and the inert freeze are off, because the compiler's objects differ "
+IDENTITY_NAME = "no-object-identity"  # the name that starts its sentence, and stands alone once the ticket has read it
+NO_IDENTITY = (f"{IDENTITY_NAME}: object dedupe and the inert freeze are off, because the compiler's objects differ "
                "between two compiles and the diff adapter prints no function_sha256. The fix is a diff adapter that "
                "prints it: a contract change, made through /decomp-setup's upgrade.")
+NOTICES_FILE = "notices.json"  # in the ticket's round state: the adapter notices it has stated in full, while they hold
+
+
+def stated_notices(tid):
+    """The adapter notices the ticket's rounds have stated in full and that have held in every round since."""
+    names = read_json(search_dir(tid) / NOTICES_FILE).get("stated")
+    return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+
+
+def keep_notices(tid, held):
+    """Record that these notices held this round and are stated: a notice not held loses its record, so it is stated in full when it returns."""
+    state = search_dir(tid)
+    state.mkdir(parents=True, exist_ok=True)
+    (state / NOTICES_FILE).write_text(json.dumps({"stated": sorted(held)}), encoding="utf-8")
 
 
 PERF = "perf.jsonl"  # the performance log: this machine only, never committed, shared by every worktree
@@ -4314,28 +4393,46 @@ def perf_flags(rec, past):
     return flags
 
 
-def perf_notices(flags, past):
+TUNER_FLAGS = ("contention-or-throttle", "starved-by-writers")  # raised with no minimum of compiles
+
+
+def could_measure(r):
+    """Whether a block record built enough compiles per worker to raise the four measured flags."""
+    return r.get("compiled", 0) >= PERF_COMPILES * r.get("workers_end", 1)
+
+
+def perf_notices(flags, past, unit):
     """What to tell the user now: the sentence for each flag raised in PERF_STREAK blocks in a row, once per streak.
 
     past is the log's earlier records of the same compiler, oldest first; each block record holds the
-    flags it raised and those it showed. Returns {flag: sentence}.
+    flags it raised and those it showed. A streak counts the blocks of this unit that could have raised
+    the flag: another unit's block is passed over, and so is a block that built fewer than PERF_COMPILES
+    per worker when the flag is one of the four measured ones (the tuner's flags have no such minimum).
+    A block that could have raised it and did not ends the streak. Returns {flag: sentence}.
     """
     out = {}
+    mine = [r for r in past if r.get("kind") == "block" and unit and r.get("unit") == unit]
     for flag, cost in flags.items():
         streak, shown = 1, False
-        for r in reversed([r for r in past if r.get("kind") == "block"]):
+        for r in reversed(mine):
+            if flag not in TUNER_FLAGS and not could_measure(r):
+                continue
             if flag not in (r.get("flags") or []):
                 break
             streak += 1
             shown = shown or flag in (r.get("shown") or [])
         if streak >= PERF_STREAK and not shown:
             fix = FLAG_FIXES.get(flag)
-            out[flag] = f"{flag} in {streak} blocks in a row: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
+            out[flag] = f"{flag} in {streak} blocks in a row of this unit: {cost}." + (f" Only you can fix it: {fix}." if fix else "")
     return out
 
 
-def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no):
-    """The performance log's record of one finished block."""
+def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, latency, start_best, round_no, block_no,
+                 repeat=False):
+    """The performance log's record of one finished block.
+
+    A repeat's record carries `repeat: true` and the number of the last counted round it repeated.
+    """
     ms = sorted(round(x * 1000, 2) for x in launcher.samples)
     workers, wall = counts["workers"], perf["wall"]
     stage = {k: round(v * 1000, 1) for k, v in {**launcher.stage, **perf["stage"]}.items()}
@@ -4344,7 +4441,8 @@ def block_record(t, compiler, perf, counts, memo_counts, launcher, end, best, la
     worker_s = tuning.get("worker_s") or workers * wall
     return {
         "kind": "block", "unix": now(), "ticket": t["id"], "unit": t["unit"], "compiler": compiler,
-        "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
+        **({"repeat": True} if repeat else {}), "round": round_no, "block": block_no, "wall_s": round(wall, 3), "call_s": counts["call_s"],
+        "collect_s": counts.get("collect_s", 0.0),
         "workers_min": tuning.get("workers_min", workers), "workers_max": tuning.get("workers_max", workers),
         "workers_end": tuning.get("workers_end", workers), "workers_floor": tuning.get("workers_floor", workers),
         "starved_frac": tuning.get("starved_frac", 0.0),
@@ -4366,7 +4464,7 @@ def log_block(compiler, rec):
     """Flag the block record against the log, append it, and return the sentences to tell the user."""
     past = perf_records(compiler)
     flags = perf_flags(rec, past)
-    notices = perf_notices(flags, past)
+    notices = perf_notices(flags, past, rec.get("unit"))
     rec.update(flags=sorted(flags), shown=sorted(notices))
     append_perf(rec)
     return list(notices.values())
@@ -4860,6 +4958,16 @@ def call_seconds(called, counts):
 
 
 def cmd_search(a):
+    """`search`. An error that ends a background search is told to it first, so that its report names it."""
+    try:
+        return search_call(a)
+    except BaseException as err:
+        if Background.current:
+            Background.current.died(err)
+        raise
+
+
+def search_call(a):
     called = time.perf_counter()  # call_s counts from here: calibration, probes and the block
     t, _ = read_ticket(a.id)
     if a.detail is not None:
@@ -4874,7 +4982,9 @@ def cmd_search(a):
     if not contract_rules()[0]:
         die("the contract does not allow template search (`template_search` is false in decomp.json); "
             "nothing was built.")
+    collecting = time.perf_counter()
     found = None if background else collect_background(t)  # before the gate: a match in hand outweighs the new template
+    collect_s = round(time.perf_counter() - collecting, 2)  # collect_s: stopping the background search and taking in its results
     if found and found["natural"]:
         return print(json.dumps(found["summary"]))
     is_open, reason = gate(t)
@@ -4894,7 +5004,7 @@ def cmd_search(a):
     template = with_learned(written, read_learned(state))  # a kept choice point starts from what the last round learned
     parents = carried_parents(state, template)
     searched = template  # what the round learned is judged against its own priors, without the similar-function bonus
-    template = with_similar(template, closest_solved(t))
+    template = with_similar(template, closest_solved(t, with_source=True))
     if contract_rules()[1] == "forbidden" and any(c.steers and any(w is not None for w in c.steers) for c in template.choices):
         die("the contract's fakematch rule is forbidden, and this template holds a steering alternative "
             "(`/* steer: <why> */`); remove it or search natural alternatives only. Nothing was built.")
@@ -4939,52 +5049,60 @@ def cmd_search(a):
         tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
         with persistent_wineserver(launcher):
             kind = background and background.block_type()
-            end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner, kind)
+            options = BlockOptions(workers, settings, ceiling, boost, timing, parents, tuner, kind)
+            end, best, counts, results = run_block(template, memo, options)
             if end == "match" and mode["single"] and not match_holds(t, compiler, template, best, workers[0], cache, mode):
                 launcher.single = False  # the match came from the cut source alone: run the block again on the full unit
                 launcher.restart_timing()
                 # (a background search's resumed results came from the cut source too: none is carried over)
                 memo, timing = Memo(cache, mode_context(ctx, mode), hashing), {}
-                tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
-                end, best, counts, results = run_block(template, memo, workers, settings, ceiling, boost, timing, parents, tuner, kind)
+                options.perf = timing
+                options.tuner = Tuner(pool, launcher, settings, start, count, bool(fixed), reference)
+                end, best, counts, results = run_block(template, memo, options)
         counts.update(memo.counts(), killed=launcher.killed, shell=launcher.shell,
                       single_function=mode["single"], batch=mode["batch"])
         counts.update(writers_active=pool.writers_at_start, slots=pool.size, slots_reclaimed=pool.reclaimed)
         save_cache(cache)
         if background:  # it is no round: nothing is printed, counted or logged, and the next call collects it
-            return background.ended(end, best)
+            return background.ended(end, best, memo.blind())
         mine = [r for r in perf_records(compiler) if r.get("ticket") == t["id"] and r.get("kind") == "block"]
-        counts.update(call_s=call_seconds(called, counts))
+        counts.update(call_s=max(call_seconds(called, counts), collect_s), collect_s=collect_s)
+        repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
+        rounds = sum(r["by"] == "search" for r in trailed)  # a repeat adds none: it keeps the last counted round's number
         notices = log_block(compiler, block_record(
             t, compiler, timing, counts, memo.counts(), launcher, end, best, latency,
-            trailed[-1]["differ_bytes"] if trailed else None, sum(r["by"] == "search" for r in trailed) + 1, len(mine) + 1))
+            trailed[-1]["differ_bytes"] if trailed else None, rounds if repeat else rounds + 1, len(mine) + 1, repeat))
     finally:
         pool.close()
         shutil.rmtree(scratch, ignore_errors=True)
     state.mkdir(parents=True, exist_ok=True)
     (state / "template").write_bytes(data)
     (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
-    repeat = memo.repeat()  # nothing built and nothing newly scored: no attempt, no trail record, no background search
     record_round(t, template, best, results, count=not repeat)
     save_learned(state, learned_weights(searched, results, written))
     winner = None
     if end == "match":
         winner = Path(tempfile.mkdtemp(prefix="decomp-winner-")) / Path(t["source"]).name
         winner.write_bytes(source_bytes(template.render(template.vector(best["seed"]))))
-    if memo.blind():
-        notices = [NO_IDENTITY] + notices
+    held = ([IDENTITY_NAME] if memo.blind() else []) + ([EMPTY_NAME] if empty_report(best, winner) else [])
+    stated = stated_notices(t["id"])  # a notice is in full the first round of the ticket that holds it
+    if IDENTITY_NAME in held:
+        notices = [IDENTITY_NAME if IDENTITY_NAME in stated else NO_IDENTITY] + notices
+    if not repeat:  # a repeat states by the same rule and changes no record
+        keep_notices(t["id"], held)
     out = summary(template, end, best, counts, winner, results, history_line(past, category), notices,
-                  stop_advice(trail(t["id"])))
+                  stop_advice(trail(t["id"])), stated)
     if found:
         out["background"] = found["report"]
     if repeat:
         out["repeat"] = True
-    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings, pool.id)
+    budget = 0 if repeat else start_background(t, end, counts, results, ceiling, settings, pool.id, pool.left)
     if budget:
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
     print(json.dumps(out))
-    (state / "ended").write_text(str(time.time()), encoding="utf-8")
+    if not repeat:  # a repeat is no round: the next block's ceiling is measured from the last counted round
+        (state / "ended").write_text(str(time.time()), encoding="utf-8")
 
 
 def search_detail(t, code):
@@ -5006,12 +5124,12 @@ def search_detail(t, code):
 #
 # A round whose block ends on a plateau or at the floor leaves a detached process searching the same
 # template on, up to the ceiling. Its files are in the ticket's `background/` folder:
-#   spawn.json     written by the search that started it: its token and its time budget
+#   spawn.json     written by the search that started it: its token, its time budget and when it started
 #   pid            the process the search started
 #   run.json       written by the background search: its own process id and its scratch folder
 #   heartbeat      touched every few seconds while it lives
 #   results.jsonl  one line per candidate it tried, written as each comes, so a kill loses none
-#   done.json      written as it ends on its own: the end reason and the seed of a match
+#   done.json      written as it ends on its own: the end reason, the seed of a match, the error it died of
 #   log            its standard output and error, and a line for each step of its life
 # The next `search` call for the ticket, `search --stop`, and `release` end it. A search collected
 # with nothing tried leaves its log beside the round's files, as `background.log`.
@@ -5175,7 +5293,7 @@ def kill_background(token, pids, until, by_job=True):
             os.kill(pid, signal.SIGKILL)
 
 
-def start_background(t, end, counts, results, ceiling, settings, caller):
+def start_background(t, end, counts, results, ceiling, settings, caller, left=None):
     """Leave a detached process searching the round's template on. Returns the seconds it may run, or 0 when none was started.
 
     One is started when the block ended on a plateau or at its deadline with time left under the
@@ -5183,6 +5301,7 @@ def start_background(t, end, counts, results, ceiling, settings, caller):
     no console of this one's and in its own process group (elsewhere in its own session): otherwise
     this call, and the shell that ran it, would wait until it ended. `caller` is this call's name in
     the slot pool: the search does not take a heartbeat this call left behind for a foreground block.
+    `left` is the line for such a heartbeat, when this call could not remove its own (see SlotPool.close).
     """
     budget = round(ceiling - counts["wall_s"], 1)
     if (not settings["background"] or end not in ("plateau", "deadline") or budget < BACKGROUND_MIN_S
@@ -5196,8 +5315,10 @@ def start_background(t, end, counts, results, ceiling, settings, caller):
     try:
         d.mkdir(parents=True)
         (d / "heartbeat").write_text(token, encoding="utf-8")
-        (d / "spawn.json").write_text(json.dumps({"token": token, "budget_s": budget, "unix": now(), "writer": caller}),
-                                       encoding="utf-8")
+        spawn = {"token": token, "budget_s": budget, "unix": now(), "at": round(time.time(), 2), "writer": caller}
+        if left:
+            spawn["left"] = left
+        (d / "spawn.json").write_text(json.dumps(spawn), encoding="utf-8")
         with (d / "log").open("ab") as log:
             how = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
             if os.name == "nt":
@@ -5223,6 +5344,8 @@ class Background:
     ends the process. It stops by itself when the ticket's spawn.json no longer names it.
     """
 
+    current = None  # the one this process is, once it has started: cmd_search tells it the error it died of
+
     def __init__(self, t, token):
         self.tid, self.dir, self.token = t["id"], background_dir(t["id"]), token
         spawn = read_json(self.dir / "spawn.json")
@@ -5232,14 +5355,19 @@ class Background:
         self.caller = spawn.get("writer") if isinstance(spawn.get("writer"), str) else None
         self.began, self.waited, self.waiting_on = time.perf_counter(), 0.0, None
         self.lock, self.stopped = threading.Lock(), threading.Event()
-        self.known, self.end, self.seed, self.until = set(), "stopped", None, None
+        self.known, self.seed, self.until = set(), None, None
+        self.end, self.error = "error", "it ended before its block did"  # until `ended` or `died` says how
+        self.blind = False  # whether its block had no object identity (see Memo.blind)
         self.job = own_job(token)
         # Every scratch folder of this process goes under one folder, which the call that kills it removes.
         self.scratch = tempfile.tempdir = tempfile.mkdtemp(prefix="decomp-background-")
         (self.dir / "run.json").write_text(json.dumps({"pid": os.getpid(), "scratch": self.scratch}), encoding="utf-8")
         self.results = (self.dir / "results.jsonl").open("a", encoding="utf-8", newline="\n")
         atexit.register(self.close)
+        Background.current = self
         self.say(f"started: process {os.getpid()}, budget {self.budget} s, started by {self.caller}")
+        if isinstance(spawn.get("left"), str):
+            self.say(f"the call that started this search {spawn['left']}")
         threading.Thread(target=self.heartbeat, args=(search_settings()["slot_heartbeat_s"],), daemon=True).start()
 
     def say(self, text):
@@ -5306,9 +5434,24 @@ class Background:
                                            "object": e.get("o")}) + "\n")
             self.results.flush()
 
-    def ended(self, end, best):
-        self.end, self.seed = end, best.get("seed")
+    def ended(self, end, best, blind=False):
+        self.end, self.error, self.seed, self.blind = end, None, best.get("seed"), blind
         self.say(f"ended: {end}, {round(self.waited, 1)} worker-seconds spent waiting on the foreground")
+
+    def died(self, err):
+        """Take the error the process is leaving by: the end reason is `error`, and the report holds its text.
+
+        The log gets the line here. The traceback of an error nothing caught follows it, written by
+        the interpreter before the process exits (the log is its standard error).
+        """
+        if isinstance(err, SystemExit):
+            if not err.code:
+                return
+            text = str(getattr(die, "last", None) or f"exit {err.code}")
+        else:
+            text = f"{type(err).__name__}: {err}"
+        self.end, self.error = "error", text
+        self.say(f"died of an error: {text}")
 
     def close(self):
         """Say how the search ended. Runs as the process ends, by any road but a kill."""
@@ -5316,7 +5459,10 @@ class Background:
             self.results.close()
         if read_json(self.dir / "spawn.json").get("token") == self.token:
             with contextlib.suppress(OSError):
-                (self.dir / "done.json").write_text(json.dumps({"end": self.end, "seed": self.seed}), encoding="utf-8")
+                done = {"end": self.end, "seed": self.seed, "blind": self.blind}
+                if self.error:
+                    done["error"] = self.error
+                (self.dir / "done.json").write_text(json.dumps(done), encoding="utf-8")
         shutil.rmtree(self.scratch, ignore_errors=True)
 
 
@@ -5380,7 +5526,9 @@ def stop_background(tid):
     It waits no longer than BACKGROUND_STOP_S from its start: a process still there then is killed
     once more, by its process tree, and the stop goes on with what the search had written. Its
     slots, its heartbeat in the pool and its scratch folder are cleared away, since a killed search
-    cannot do that.
+    cannot do that. A search with no done.json whose process is gone before any kill, or whose
+    heartbeat is stale, died: nothing is killed, and what the stop saw says so. What it saw also
+    holds the seconds from the search's start to this stop, beside its budget.
     """
     d, began = background_dir(tid), time.perf_counter()
     until = began + BACKGROUND_STOP_S
@@ -5391,7 +5539,10 @@ def stop_background(tid):
             remove_tree(d)
         return None, {}
     run, done = read_json(d / "run.json"), read_json(d / "done.json")
-    saw = {"spawn": spawn, "run": run, "done": done, "unix": now(), "heartbeat_age_s": None, "killed": False}
+    saw = {"spawn": spawn, "run": run, "done": done, "unix": now(), "heartbeat_age_s": None, "killed": False, "died": False,
+           "ran_s": None, "budget_s": spawn.get("budget_s")}
+    with contextlib.suppress(TypeError, ValueError):  # by the wall clock: it spans processes
+        saw["ran_s"] = round(max(0.0, time.time() - float(spawn.get("at", spawn.get("unix")))), 1)
     with contextlib.suppress(OSError):
         saw["heartbeat_age_s"] = round(time.time() - (d / "heartbeat").stat().st_mtime, 1)  # by the wall clock: it spans processes
     if not (d / "done.json").exists():
@@ -5401,16 +5552,20 @@ def stop_background(tid):
             with contextlib.suppress(OSError, ValueError):
                 pids.append(int((d / "pid").read_text(encoding="utf-8")))
             pids = sorted({p for p in pids if isinstance(p, int) and not isinstance(p, bool) and p > 0})
-            kill_background(token, pids, until)
-            gone = False
-            while not gone:
-                gone = all(process_gone(p, until) for p in pids)
-                if gone or time.perf_counter() >= until:
-                    break
-                time.sleep(0.05)
-            if not gone:
-                kill_background(token, pids, time.perf_counter() + 2.0, by_job=False)
-            saw.update(killed=True, gone=gone, stop_s=round(time.perf_counter() - began, 2))
+            saw["died"] = all(process_gone(p, until) for p in pids)  # before any kill: it left by itself
+            if not saw["died"]:
+                kill_background(token, pids, until)
+                gone = False
+                while not gone:
+                    gone = all(process_gone(p, until) for p in pids)
+                    if gone or time.perf_counter() >= until:
+                        break
+                    time.sleep(0.05)
+                if not gone:
+                    kill_background(token, pids, time.perf_counter() + 2.0, by_job=False)
+                saw.update(killed=True, gone=gone, stop_s=round(time.perf_counter() - began, 2))
+        else:
+            saw["died"] = True
     scratch = run.get("scratch")
     if isinstance(scratch, str) and Path(scratch).name.startswith("decomp-background-"):
         remove_tree(scratch)
@@ -5457,6 +5612,26 @@ def keep_log(state, log, saw):
     return path
 
 
+def background_end(done, saw):
+    """The start of a collected search's report: its end reason, with `error` or `overrun` (see collect_background)."""
+    if done.get("end"):
+        report = {"end": str(done["end"])}
+        if done.get("error"):
+            report["error"] = str(done["error"])
+        return report
+    if not saw.get("killed"):
+        age = saw.get("heartbeat_age_s")
+        beat = "it has no heartbeat" if age is None else f"its heartbeat was {age} s old"
+        return {"end": "error", "error": f"the process was gone and left no report: {beat}"}
+    try:
+        overrun = saw["ran_s"] > float(saw["budget_s"]) + BACKGROUND_STOP_S
+    except (TypeError, ValueError):
+        overrun = False
+    if overrun:
+        return {"end": "killed", "overrun": True}
+    return {"end": "stopped" if saw.get("gone") else "killed"}
+
+
 def collect_background(t):
     """Stop the ticket's background search and take in what it found. Returns None when the ticket had none.
 
@@ -5468,6 +5643,13 @@ def collect_background(t):
     steered one the search reduced. With a natural match, `summary` is the whole summary to print in
     place of a new round. A search that tried nothing leaves its log (see keep_log), named in the
     report under `log`.
+
+    The end reason of a search that did not end by itself says which of three things happened.
+    `stopped`: this call cut it short while it was working. `killed`: it would not go within the
+    stop's bound, or it was alive past its budget plus that bound (the report then holds `overrun`).
+    `error`: it died, of an error it wrote down (the report's `error` is its text) or with no report
+    at all. The report holds `ran_s` and `budget_s`, the seconds from its start to this call and
+    the seconds it was given.
     """
     d, saw = stop_background(t["id"])
     if d is None:
@@ -5490,7 +5672,11 @@ def collect_background(t):
     results = [merged[seed] for seed in sorted(merged)]
     if new:
         (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
-    report = {"end": str(done.get("end") or "stopped"), "tried": len(new)}
+    report = background_end(done, saw)
+    report["tried"] = len(new)
+    for key in ("ran_s", "budget_s"):
+        if isinstance(saw.get(key), (int, float)) and not isinstance(saw[key], bool):
+            report[key] = saw[key]
     if not new:
         kept = keep_log(state, log, saw)
         if kept:
@@ -5512,8 +5698,12 @@ def collect_background(t):
         report.update(end="match", natural=bool(natural), winner=str(winner))
         if natural:
             report["discarded"] = "the new template was not searched: the last one already matches with no steering"
+            notices = []  # the notice the search's own block held, by the rule of a foreground round (a match holds no empty report)
+            if done.get("blind") is True:
+                notices = [IDENTITY_NAME if IDENTITY_NAME in stated_notices(t["id"]) else NO_IDENTITY]
+            keep_notices(t["id"], [IDENTITY_NAME] if notices else [])
             found["summary"] = summary(template, "match", best, {"space": template.space(), "tried": len(results)},
-                                       winner, results)
+                                       winner, results, notices=notices)
             found["summary"]["background"] = report
     return found
 

@@ -6,18 +6,30 @@ a decomp.json whose adapters are small `python -c` commands, a fake target, and
 fake tools that only print a banner), runs decomp.py commands in it, and asserts
 on exit codes and output. No real compiler, no network. Standard library only.
 
-Run: python scripts/test-decomp.py [name-filter]
+Run: python scripts/test-decomp.py [--list] [filter ...]
 
 A full run takes minutes, longer than the default 120-second tool timeout, so run
-it in the background. While iterating, pass a name filter (a substring of the test
-function names) to run only the matching cases, for example:
-python scripts/test-decomp.py verify
+it in the background. While iterating, pass filters to run only the cases they
+select: a filter that is a full case name selects that case alone, and any other
+filter selects the cases whose names hold it as a run of whole words (split at
+underscores), for example: python scripts/test-decomp.py verify search_picks.
+A filter that selects nothing exits 2, a module-level name bound twice exits 3,
+and --list prints the selected names without running them.
 
 Each case receives its scratch folder in resolved (long) form. A Windows temp folder
 can be given in short form (8.3 names), and the tool prints the long form, so a path
 a case builds from a short-form folder would not equal the path the tool prints for
 the same file.
+
+Template search is bounded by wall-clock time, so a case must hold on a machine many
+times slower than yours: it never asserts an outcome that a deadline, a ceiling or a
+timeout can change (a match found, an exhausted space reached) unless its subject is
+that deadline, and then its name says so. Assert an exhaustive result only on a space
+small enough to finish many times over: wide(n) has 2**n candidates. Set the time a
+round is given, never inherit it from the seconds since the last round: call
+forget_latency(p) before the next round.
 """
+import ast
 import hashlib
 import itertools
 import json
@@ -1960,7 +1972,8 @@ def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgx\n",
              "expected/00403000.bin": "zzzzzzzz\n", "src/u0002.c": "x\n", "src/u0003.c": "x\n",
              f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "integrated"),
-             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated")}
+             f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated"),
+             "ledger/matches.jsonl": matches_ledger(other, third)}
     p = Project(base, files=files)
     r = p.run("similar", TID, "--n", "2")
     rows = r.stdout.splitlines()
@@ -1972,7 +1985,8 @@ def test_similar_ranks_matched_tickets_by_their_expected_bytes(base):
 def test_similar_ignores_tickets_that_are_not_matched(base):
     other = "u0002-00402000"
     files = {"expected/00401000.bin": "abcdefgh\n", "expected/00402000.bin": "abcdefgh\n", "src/u0002.c": "x\n",
-             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open")}
+             f"tickets/u0002/{other}.md": ticket_text(other, "0x00402000", "src/u0002.c", "open"),
+             "ledger/matches.jsonl": matches_ledger(other)}
     r = Project(base, files=files).run("similar", TID)
     expect(r.returncode == 0 and r.stdout.strip() == "", "an open ticket is never a model", r)
 
@@ -2418,14 +2432,14 @@ def test_search_reads_a_steering_tag_beside_a_label_and_a_likelihood(base):
 
 
 # A fake compiler that takes longer over a source holding a SLOW_ tag, so that candidate's result comes in last.
-SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
+STEER_SLOW_BUILD_PY = SEARCH_BUILD_PY.replace('open(obj, "w")', '''if "SLOW_" in text:
     import time
     time.sleep(1)
 open(obj, "w")''')
 
 
 def test_search_picks_the_likelier_steering_match_whichever_build_ends_first(base):
-    p = search_project(base, files={"tools/search_build.py": SLOW_BUILD_PY}, **ALLOWED)
+    p = search_project(base, files={"tools/search_build.py": STEER_SLOW_BUILD_PY}, **ALLOWED)
     tune(p, workers=3)  # the three candidates build at once, the likelier match the slowest
     r, out = search(p, in_function(
         "PERM_GENERAL(@r decl-order, int WRONG_a;, %0.6 /* steer: likely */ int SLOW_a;, %0.2 /* steer: other */ int right_b;)"))
@@ -2577,7 +2591,7 @@ def test_search_reads_object_identity_as_unknown_without_function_sha256(base):
     expect(c["compiled"] == 2 and out["inert"] == [] and "stop" not in out,
            f"equal scores and reports freeze no choice as inert: {out}", r)
     r, again = search(p, COMMENTED)
-    expect(again["counts"]["unique_objects"] is None and any("function_sha256" in n for n in again.get("notice", [])),
+    expect(again["counts"]["unique_objects"] is None and any(n.startswith("no-object-identity") for n in again.get("notice", [])),
            f"a round served from the cache knows no more: {again}", r)
 
 
@@ -2588,6 +2602,117 @@ def test_search_counts_objects_and_gives_no_identity_notice_when_objects_are_sta
     expect(c.get("hashing") == "object" and isinstance(c["unique_objects"], int) and isinstance(c["object_hits"], int),
            f"stable objects are hashed whole: {out}", r)
     expect(not any("function_sha256" in n for n in out.get("notice", [])), f"no notice is due: {out.get('notice')}", r)
+
+
+# The adapter notices: a fake compiler that stamps its objects, and a diff that prints no function_sha256 while
+# the file `nosha` exists beside the tools, with a one-line report. Both notices hold in every such round.
+NOTICE_DIFF_PY = COUNT_DIFF_PY.replace("import hashlib", "import os, hashlib").replace(
+    'if "NOSHA" in sys.argv[3:]:', "if os.path.exists(sys.argv[3]):")
+IDENTITY_FULL, INSTRUCTION_FULL = "no-object-identity: ", "no-instruction-diff: "
+NOTICE_NAMES = ["no-object-identity", "no-instruction-diff"]
+
+
+def notice_project(base):
+    log, flag = Path(base) / "builds.log", Path(base) / "nosha"
+    flag.write_text("", encoding="utf-8")
+    build = PY + f' "{{tools}}/count_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}" STAMP'
+    diff = PY + f' "{{tools}}/count_diff.py" "{{obj}}" "{{report}}" "{flag.as_posix()}"'
+    p = search_project(base, config={"build": build, "diff": diff}, files={
+        "tools/count_build.py": COUNT_BUILD_PY, "tools/count_diff.py": NOTICE_DIFF_PY, **second_ticket("open", STUCK2)})
+    return p, flag
+
+
+STUCK2 = f"// @decomp {TID2}\nint g(void) {{ int WRONG_now; return 2; }}\n"
+
+
+def notice_template(tid, n):
+    """A template that never matches; n makes its sources new, so that no round is served from the cache."""
+    return f"// @decomp {tid}\nint f(void) {{ PERM_GENERAL(int WRONG_a;, int WRONG_a; /* {n} */) return 1; }}\n"
+
+
+def notice_round(p, n, tid=TID):
+    path = p.base / f"template-{tid}.c"
+    path.write_text(notice_template(tid, n), encoding="utf-8")
+    r = p.run("search", tid, str(path))
+    try:
+        return r, json.loads(r.stdout.splitlines()[0])
+    except (ValueError, IndexError):
+        return r, None
+
+
+def adapter_notices(out):
+    return [n for n in out.get("notice", []) if n.startswith(tuple(NOTICE_NAMES))]
+
+
+def test_search_states_the_adapter_notices_in_full_once_per_ticket_then_by_name(base):
+    p, flag = notice_project(base)
+    r, first = notice_round(p, 1)
+    expect(first is not None and [n.split(":")[0] for n in adapter_notices(first)] == NOTICE_NAMES
+           and all(len(n) > 100 for n in adapter_notices(first)),
+           f"round 1 states both notices in full, each starting with its name: {first and first.get('notice')}", r)
+    forget_latency(p)
+    r, second = notice_round(p, 2)
+    expect(second is not None and second["counts"]["compiled"] > 0 and not second.get("repeat"),
+           f"round 2 is no repeat: {second and second['counts']}", r)
+    expect(second.get("notice") == NOTICE_NAMES, f"round 2 names the two conditions: {second.get('notice')}", r)
+    fuller = len(json.dumps(dict(second, notice=first["notice"])))  # round 2 with round 1's sentences
+    expect(len(json.dumps(second)) + 350 <= fuller, f"round 2 is far shorter: {len(json.dumps(second))} against {fuller}", r)
+
+
+def test_search_states_the_adapter_notices_in_full_for_each_ticket(base):
+    p, flag = notice_project(base)
+    r, out = notice_round(p, 1)
+    expect(out is not None and len(adapter_notices(out)[0]) > 100, "the first ticket reads them in full", r)
+    r = p.run("claim", TID2, "--by", "w2")
+    expect(r.returncode == 0, "the second ticket can be claimed", r)
+    r = p.run("check", TID2, "--category", "register-allocation")
+    r, other = notice_round(p, 1, TID2)
+    expect(other is not None and [n.split(":")[0] for n in adapter_notices(other)] == NOTICE_NAMES
+           and all(len(n) > 100 for n in adapter_notices(other)),
+           f"the second ticket reads them in full too: {other and other.get('notice')}", r)
+
+
+def test_search_states_a_notice_in_full_again_when_it_returns_after_a_round_without_it(base):
+    p, flag = notice_project(base)
+    notice_round(p, 1)
+    flag.unlink()  # the diff adapter now prints function_sha256: the identity notice does not hold
+    forget_latency(p)
+    r, mid = notice_round(p, 2)
+    expect(mid is not None and NOTICE_NAMES[0] not in str(mid.get("notice")),
+           f"no identity notice while the hash is printed: {mid and mid.get('notice')}", r)
+    flag.write_text("", encoding="utf-8")
+    forget_latency(p)
+    r, back = notice_round(p, 3)
+    notices = adapter_notices(back) if back else []
+    expect(len(notices) == 2 and notices[0].startswith(IDENTITY_FULL) and len(notices[0]) > 100 and notices[1] == NOTICE_NAMES[1],
+           f"the identity notice is in full again, the unbroken one by name: {back and back.get('notice')}", r)
+
+
+def test_release_clears_what_the_ticket_has_stated_of_the_adapter_notices(base):
+    p, flag = notice_project(base)
+    p.run("claim", TID, "--by", "w1")
+    notice_round(p, 1)
+    r = p.run("release", TID)
+    expect(r.returncode == 0, "release passes", r)
+    r = p.run("claim", TID, "--by", "w1")
+    expect(r.returncode == 0, "the ticket can be claimed again", r)
+    forget_latency(p)
+    r, out = notice_round(p, 2)
+    expect(out is not None and [n.split(":")[0] for n in adapter_notices(out)] == NOTICE_NAMES
+           and all(len(n) > 100 for n in adapter_notices(out)),
+           f"the next round states both in full: {out and out.get('notice')}", r)
+
+
+def test_a_repeat_round_changes_no_record_of_the_adapter_notices(base):
+    p, flag = notice_project(base)
+    notice_round(p, 1)
+    r, again = notice_round(p, 1)
+    expect(again is not None and again.get("repeat") is True and again.get("notice") == NOTICE_NAMES,
+           f"a repeat of a round that stated them names them: {again and again.get('notice')}", r)
+    forget_latency(p)
+    r, next_round = notice_round(p, 2)
+    expect(next_round is not None and next_round.get("notice") == NOTICE_NAMES,
+           f"the round after names them too: {next_round and next_round.get('notice')}", r)
 
 
 # ---------- check trail and the template-search gate ----------
@@ -2859,7 +2984,7 @@ def tune(p, **search):
 
 
 def wide(n, alternatives=("int WRONG_{c}0;", "int WRONG_{c}1; int WRONG_{c}2;")):
-    """A template of n choice points that never matches."""
+    """A template of n choice points that never matches: with two alternatives each, 2**n candidates."""
     return MARK + "int f(void) { int WRONG_now; " + " ".join(
         "PERM_GENERAL(" + ", ".join(a.format(c=chr(97 + i)) for a in alternatives) + ")" for i in range(n)) + " return 1; }\n"
 
@@ -3184,6 +3309,80 @@ def test_search_reads_no_other_ticket_in_a_project_without_a_match(base):
     expect(set(reads) == {TID}, f"only the ticket searched is read: {sorted(set(reads))}", r)
 
 
+def similar_reads(base, files, *args):
+    """Run `similar` on the project's own ticket in a project of `files`. Returns (process, the ticket files read)."""
+    base = Path(base)
+    hook, reads = base / "hook", base / "reads.log"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(TICKET_READS_PY, encoding="utf-8")
+    p = Project(base, files=dict({"expected/00401000.bin": "abcdefgh\n"}, **files))
+    r = p.run("similar", TID, *args, env={"PYTHONPATH": str(hook), "TICKET_READS": str(reads)})
+    return r, (reads.read_text().split() if reads.exists() else [])
+
+
+def test_similar_reads_no_more_ticket_files_however_many_tickets_are_open(base):
+    counts = {}
+    for extra in (0, 40):
+        files, solved = {}, []
+        for n in (2, 3):
+            tid, more = solved_ticket(n)
+            solved.append(tid)
+            files.update(more)
+        for n in range(4, 4 + extra):
+            files.update(solved_ticket(n, status="open")[1])
+        files["ledger/matches.jsonl"] = matches_ledger(*solved)
+        r, reads = similar_reads(sub(base, f"open{extra}"), files)
+        got = [l.split()[1] for l in r.stdout.splitlines()]
+        expect(r.returncode == 0 and sorted(got) == sorted(solved), f"the matched tickets are listed: {got}", r)
+        expect(set(reads) == {TID, *solved}, f"only the ticket and the matched ones are read: {sorted(set(reads))}", r)
+        counts[extra] = len(reads)
+    expect(counts[0] == counts[40], f"the ticket files read should not grow with the open tickets: {counts}")
+
+
+def test_similar_leaves_out_a_matched_ticket_it_cannot_read(base):
+    gone, files = solved_ticket(2)
+    del files[f"tickets/u0002/{gone}.md"]
+    bare, more = solved_ticket(3, expected=None)
+    files.update(more)
+    regressed, more = solved_ticket(4, status="regressed")
+    files.update(more)
+    good, more = solved_ticket(5)
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(gone, bare, regressed, good)
+    r, reads = similar_reads(base, files)
+    got = [l.split()[1] for l in r.stdout.splitlines()]
+    expect(r.returncode == 0 and got == [good], f"only the readable matched ticket is listed: {got}", r)
+
+
+def test_similar_reads_no_other_ticket_in_a_project_without_a_match(base):
+    files = {}
+    for n, status in ((2, "open"), (3, "claimed"), (4, "integrated")):  # the last was never recorded as a match
+        files.update(solved_ticket(n, status=status)[1])
+    r, reads = similar_reads(base, files)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "no match prints nothing and passes", r)
+    expect(set(reads) == {TID}, f"only the ticket asked about is read: {sorted(set(reads))}", r)
+
+
+def test_similar_prints_nothing_for_a_ticket_without_expected_bytes(base):
+    tid, files = solved_ticket(2)
+    files["ledger/matches.jsonl"] = matches_ledger(tid)
+    p = Project(base, files=files)
+    r = p.run("similar", TID)
+    expect(r.returncode == 0 and r.stdout.strip() == "", "no expected bytes prints nothing and passes", r)
+
+
+def test_similar_and_search_favour_the_same_function(base):
+    near, files = solved_ticket(2)
+    far, more = solved_ticket(3, source="int h(int n) { return n; }\n", expected="zzzzzzzz\n")
+    files.update(more)
+    files["ledger/matches.jsonl"] = matches_ledger(near, far)
+    r, order, _ = ticket_reads(sub(base, "search"), files)
+    expect(order == ["tag_base", "tag_while", "tag_for"], f"search favours the near function's spelling: {order}", r)
+    r, _ = similar_reads(sub(base, "similar"), files, "--n", "1")
+    got = [l.split()[1] for l in r.stdout.splitlines()]
+    expect(got == [near], f"similar names the same function: {got}", r)
+
+
 # ---------- template search: the machine-wide slot pool ----------
 
 def peak_project(base, folder, **search):
@@ -3321,7 +3520,7 @@ def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails
     expect(tool.cores() == logical, f"a call that counts nothing should give the logical count: {tool.cores()}")
 
 
-PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "call_s", "workers_min", "workers_max", "workers_end", "expanded",
+PERF_FIELDS = {"unix", "ticket", "round", "block", "wall_s", "call_s", "collect_s", "workers_min", "workers_max", "workers_end", "expanded",
                "compiled", "unique_objects", "build_fail", "killed", "src_dedupe_hits", "t_compile_p50_ms",
                "t_compile_p95_ms", "t_ref_ms", "stage_ms", "idle_frac", "best_score_start", "best_score_end",
                "t_to_best_s", "end_reason", "model_latency_s", "writers_active"}
@@ -3376,8 +3575,8 @@ def test_search_writes_one_record_per_block_and_one_per_calibration(base):
     r, out = search(p, NEVER)
     expect(out["counts"]["call_s"] >= out["counts"]["wall_s"], f"call_s is no smaller than wall_s: {out['counts']}", r)
     got = perf_log(p)
-    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 2 and got[5]["block"] == 2,
-           f"a warm cache adds one block record and no calibration: {got}", r)
+    expect([x["kind"] for x in got[4:]] == ["block", "block"] and got[5]["round"] == 1 and got[5]["repeat"] is True
+           and got[5]["block"] == 2, f"a warm cache adds one block record (a repeat) and no calibration: {got}", r)
 
 
 def test_search_perf_log_is_never_committed(base):
@@ -3415,7 +3614,7 @@ def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
     log = [x for x in log if x["kind"] == "block"]
     expect(all("slow-compile" in x["flags"] for x in log[-5:]), f"every block is slow: {[x.get('flags') for x in log]}", r)
     expect(notices[0] is None and notices[1] is None, f"a flag raised once or twice is logged, not shown: {notices}", r)
-    expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row")
+    expect(notices[2] is not None and len(notices[2]) == 1 and notices[2][0].startswith("slow-compile in 3 blocks in a row of this unit")
            and "percent fewer than the median" in notices[2][0] and "blocks of this unit" in notices[2][0]
            and "antivirus" in notices[2][0],
            f"the third in a row is shown with its cost against the unit's history and the user's fix: {notices}", r)
@@ -3483,6 +3682,52 @@ def test_search_raises_scorer_bound_for_a_slow_diff_adapter(base):
            f"the time is the adapter's, not the in-process scoring's: {stage}", r)
 
 
+def scorer_streak_project(base):
+    """A project whose diff adapter is slow, after one block of the unit that raised scorer-bound."""
+    p = search_project(base, files={"tools/search_diff.py": "import time\ntime.sleep(0.3)\n" + SEARCH_DIFF_PY})
+    tune(p, workers=1)
+    search(p, NEVER)
+    expect("scorer-bound" in perf_log(p)[-1]["flags"], "the first block should raise scorer-bound", perf_log(p))
+    return p
+
+
+def scorer_notices(p):
+    r, out = fresh(p, NEVER)
+    return [n for n in out.get("notice", []) if n.startswith("scorer-bound")], perf_log(p)[-1], r
+
+
+SCORER = {"flags": ["scorer-bound"]}
+
+
+def test_search_passes_over_a_block_that_measured_nothing_in_a_streak(base):
+    p = scorer_streak_project(base)
+    seed_perf(p, 1, **SCORER)
+    seed_perf(p, 1, compiled=0)  # a repeat served from the cache
+    got, rec, r = scorer_notices(p)
+    expect(len(got) == 1 and "scorer-bound in 3 blocks in a row of this unit" in got[0] and "scorer-bound" in rec["shown"],
+           f"a block that measured nothing neither adds nor ends: {got} {rec}", r)
+    seed_perf(p, 1, **SCORER)
+    got, rec, r = scorer_notices(p)
+    expect(got == [] and "scorer-bound" in rec["flags"] and "scorer-bound" not in rec["shown"],
+           f"a fourth flagged block after the notice is not told again: {got} {rec}", r)
+
+
+def test_search_passes_over_another_units_block_in_a_streak(base):
+    p = scorer_streak_project(base)
+    seed_perf(p, 1, **SCORER)
+    seed_perf(p, 1, unit=OTHER_UNIT)
+    got, rec, r = scorer_notices(p)
+    expect(len(got) == 1 and "scorer-bound" in rec["shown"], f"another unit's block is passed over: {got} {rec}", r)
+
+
+def test_search_ends_a_streak_at_a_measuring_block_that_raised_nothing(base):
+    p = scorer_streak_project(base)
+    seed_perf(p, 1, **SCORER)
+    seed_perf(p, 1)  # built enough compiles and raised no flag
+    got, rec, r = scorer_notices(p)
+    expect(got == [] and "scorer-bound" in rec["flags"], f"a block that could measure and did not flag ends it: {got}", r)
+
+
 def paired(n, tag):
     """A template of n choice points of 2 alternatives: the first's second alternative holds SLOW_, the others' hold tag."""
     return MARK + "int f(void) { PERM_GENERAL(int WRONG_a0;, int SLOW_a1; int WRONG_a2;) " + " ".join(
@@ -3510,6 +3755,67 @@ def test_search_raises_no_expander_starved_for_a_small_space_that_ends_exhausted
     expect(out is not None and out["end"] == "exhausted" and rec["compiled"] >= 16, f"the block should try the space: {out}", r)
     expect(rec["wall_s"] >= 2 and "expander-starved" not in rec["flags"],
            f"idle time after the last candidate was handed out is not starvation: {rec}", r)
+
+
+# A sleeping fake compiler that stamps its objects and logs "start" and "end" lines, each with the time in ns. A
+# source with FAST_ twice or three times (the baseline of the templates below) takes 0.3 s, any other 1.5 s.
+SLEEP_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src).read()
+open(log, "a").write("start " + str(time.time_ns()) + chr(10))
+time.sleep(0.3 if text.count("FAST_") >= 2 else 1.5)
+open(obj, "w").write(text + chr(10) + "STAMP " + str(time.time_ns()))
+open(log, "a").write("end " + str(time.time_ns()) + chr(10))
+"""
+
+
+def blind_project(base):
+    """A project whose objects differ between compiles and whose diff adapter prints no function_sha256."""
+    log = Path(base) / "sleeps.log"
+    p = search_project(base, config={"build": PY + f' "{{tools}}/sleep_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+                                     "diff": PY + ' "{tools}/count_diff.py" "{obj}" "{report}" NOSHA'},
+                       files={"tools/sleep_build.py": SLEEP_BUILD_PY, "tools/count_diff.py": COUNT_DIFF_PY})
+    tune(p, workers=12, reference_s=0)
+    search(p, MARK + "int f(void) { int WRONG_now; return 1; }\n")  # the stability check is cached from here on
+    log.unlink(missing_ok=True)
+    return p, log
+
+
+def faster(*sizes):
+    """A template that never matches: one choice point per size, of that many alternatives, each choice's first one fast."""
+    return MARK + "int f(void) { int WRONG_now; " + " ".join(
+        "PERM_GENERAL(" + ", ".join(f"int {'FAST' if j == 0 else 'WRONG'}_{chr(97 + i)}{j};" for j in range(n)) + ")"
+        for i, n in enumerate(sizes)) + " return 1; }\n"
+
+
+def test_search_hands_out_the_rest_without_waiting_for_the_sweep_when_nothing_can_be_frozen(base):
+    p, log = blind_project(base)
+    r, out = fresh(p, faster(3, 4))  # 12 candidates, a sweep of 6, 12 workers
+    rec = perf_log(p)[-1]
+    lines = [x.split() for x in log.read_text().splitlines()][4:]  # less the two compiles of the stability check
+    ended = [i for i, x in enumerate(lines) if x[0] == "end"]
+    started = sum(x[0] == "start" for x in lines[:ended[1]])
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 12, f"the whole space is built: {out}", r)
+    expect(started > 6, f"{started} builds started before the second finished: the rest did not wait for the sweep", r)
+    expect(rec["wall_s"] < 2.9, f"the block takes under two slow compiles: {rec}", r)
+    expect(rec["idle_frac"] < 0.2 and "expander-starved" not in rec["flags"], f"the wait for the sweep is gone: {rec}", r)
+
+
+def test_search_still_waits_for_the_sweep_when_object_identity_exists_and_freezes_the_inert_choice(base):
+    p, builds = counting_project(base, stamp=True)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;) "
+                       "PERM_GENERAL(int WRONG_d;, int WRONG_d; /* the same bytes */) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["inert"] == ["B"] and out["counts"]["compiled"] == 3,
+           f"the choice whose alternatives give the baseline's hash is frozen, and only the sweep (3 of the 4) is built: {out}", r)
+
+
+def test_search_raises_no_expander_starved_for_a_block_of_24_candidates_with_no_object_identity(base):
+    p, log = blind_project(base)
+    r, out = fresh(p, faster(2, 3, 4))
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 24, f"the whole space is built: {out}", r)
+    expect("expander-starved" not in rec["flags"], f"the block did not wait for the sweep: {rec}", r)
 
 
 # ---------- calibration probes ----------
@@ -4082,6 +4388,38 @@ def test_search_round_that_builds_one_new_candidate_is_no_repeat(base):
     expect("no new best" in out.get("stop", ""), f"and towards stop advice, as before: {out}", r)
 
 
+def test_search_logs_a_repeat_marked_with_the_round_it_repeated(base):
+    p, builds = counting_project(base)
+    for template in (TWINS, TWINS, NEVER):
+        r, out = search(p, template)
+        expect(out is not None, "the round should run", r)
+    mine = [x for x in perf_log(p) if x["kind"] == "block"]
+    expect([(x["round"], x.get("repeat")) for x in mine] == [(1, None), (1, True), (2, None)],
+           f"round 1, its repeat (numbered 1, marked), then round 2: {[(x['round'], x.get('repeat')) for x in mine]}", r)
+    expect([x["block"] for x in mine] == [1, 2, 3], f"every record takes a block number: {mine}", r)
+    expect(len({x["round"] for x in mine if not x.get("repeat")}) == 2, "no two counted rounds share a number", r)
+    expect([e["by"] for e in trail(p)].count("search") == 2, f"the trail holds 2 search records: {trail(p)}", r)
+
+
+def test_search_repeat_leaves_the_round_end_time_so_the_next_block_is_not_shortened(base):
+    build = PY + ' "{tools}/slow_build.py" "{source}" "{obj}"'
+    p = search_project(base, config={"build": build}, files={"tools/slow_build.py": SLOW_BUILD_PY})
+    tune(p, workers=1, floor_s=1, floor_compiles=3, ceiling_s=60)
+    r, out = search(p, TWINS)
+    expect(out is not None and "repeat" not in out, f"round 1 builds: {out}", r)
+    ended = p.root / ".decomp" / "search" / TID / "ended"
+    ended.write_text(str(time.time() - 40), encoding="utf-8")  # round 1 ended 40 s ago
+    r, out = search(p, TWINS)
+    expect(out is not None and out.get("repeat") is True, f"the same template is a repeat: {out}", r)
+    expect(time.time() - float(ended.read_text(encoding="utf-8")) >= 40, "a repeat does not write the round-end time", r)
+    r, out = search(p, wide(4))
+    expect(out is not None, "round 2 runs", r)
+    rec = [x for x in perf_log(p) if x["kind"] == "block"][-1]
+    expect(rec["model_latency_s"] >= 40, f"the latency is measured from round 1's end: {rec}", r)
+    expect(rec["wall_s"] > 1 and out["counts"]["compiled"] >= 3,
+           f"the block runs past the floor's seconds, for the floor's compiles: {rec}", r)
+
+
 def test_search_repeat_starts_no_background_search(base):
     p = search_project(base, config={"build": PY + ' "{tools}/bare_build.py" "{source}" "{obj}"'},
                        files={"tools/bare_build.py": BARE_BUILD_PY})
@@ -4090,7 +4428,7 @@ def test_search_repeat_starts_no_background_search(base):
     r, out = search(p, template)
     expect(out is not None and out["end"] == "plateau" and out["counts"]["compiled"] == 9,
            f"the first round ends on a plateau after its sweep: {out}", r)
-    time.sleep(2)  # the time the model took: what a background search would have to run in
+    forget_latency(p)  # the round's ceiling is the setting, not the seconds since the first round
     tune(p, workers=1, plateau_compiles=8, background=1)
     try:
         r, out = search(p, template)
@@ -4392,11 +4730,200 @@ def test_collecting_a_background_search_stuck_in_a_compile_is_bounded(base):
     expect(r.returncode == 0 and found is not None and found["end"] == "stopped",
            f"the stop form returns what the background search had: {r.stdout}", r)
     expect(took < 15, f"collecting should wait no longer than its 10 s bound, it took {took:.1f} s", r)
+    expect("overrun" not in found and "error" not in found and found.get("ran_s") is not None and found.get("budget_s"),
+           f"a search stopped within its time is no overrun and no error, and the report holds its seconds: {found}", r)
     expect_background_dead(p, beat, r)
+
+
+def once_a_search_is_in_the_pool(p, act):
+    """Start a thread that calls act(the heartbeat) once, as soon as a foreground search has joined the slot pool.
+
+    By then the search has read its settings, and its block is still to run. An act that raises
+    OSError is tried again. Returns (the names of the heartbeats acted on, a function that ends the thread).
+    """
+    import threading
+    slots, seen, done = slot_folder(p), [], threading.Event()
+
+    def watch():
+        while not (seen or done.is_set()):
+            for beat in slots.glob("*.writer"):
+                if beat.name.startswith("bg-") or seen:
+                    continue
+                try:
+                    act(beat)
+                    seen.append(beat.name)
+                except OSError:
+                    pass
+            time.sleep(0.005)
+
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+
+    def end():
+        done.set()
+        thread.join()
+    return seen, end
+
+
+def test_a_background_search_that_dies_of_an_error_reports_it_and_its_log_holds_the_traceback(base):
+    p = background_project(base)
+    local = p.root / ".decomp" / "local.json"
+    settings = local.read_text()
+    # The settings file stops being JSON once the call has read it: the background search it leaves raises on reading it.
+    seen, end = once_a_search_is_in_the_pool(p, lambda beat: local.write_text("{ not JSON"))
+    try:
+        r, out = search(p, wide(8))
+        end()
+        expect(seen, "the test should have changed the settings file while the call's block ran", r)
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search should die of the error")
+        local.write_text(settings)
+        r, found = stop_background(p)
+        expect(found is not None and found["end"] == "error" and "JSONDecodeError" in found.get("error", "")
+               and found["tried"] == 0, f"a search that died of an error says so, with the error's text: {r.stdout}", r)
+        log = kept_log(p).read_text(encoding="utf-8", errors="replace")
+        expect(found.get("log") and "Traceback (most recent call last)" in log and "died of an error: " + found["error"] in log,
+               f"the kept log holds the error and its traceback: {log}", r)
+        expect(not background_folder(p).exists(), "the background search's other files are cleared away", r)
+    finally:
+        end()
+        local.write_text(settings)
+        stop_background(p)
+
+
+def end_outright(pid):
+    """Kill a process from outside, with no chance to write anything, and return once the host no longer runs it."""
+    if os.name == "nt":
+        def gone():  # the host knows no such process: taskkill fails
+            return subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True).returncode != 0
+    else:
+        import signal
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+        def gone():  # no such process, or a zombie that only waits to be reaped
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+            return not state or state.startswith("Z")
+    expect(wait_for(gone, seconds=30), f"process {pid} should be gone once killed")
+
+
+def test_a_background_search_killed_from_outside_is_collected_as_an_error_with_no_report(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        d = background_folder(p)
+        expect(wait_for(lambda: (d / "run.json").exists() and "pid" in (d / "run.json").read_text()),
+               "the background search should say which process it is")
+        for pid in sorted({json.loads((d / "run.json").read_text())["pid"], int((d / "pid").read_text())}):
+            end_outright(pid)
+        expect(not (d / "done.json").exists(), "a killed process writes no report")
+        r, found = stop_background(p)
+        expect(r.returncode == 0 and found is not None and found["end"] == "error"
+               and "left no report" in found.get("error", ""),
+               f"a search whose process was gone with no report is an error that says so: {r.stdout}", r)
+        expect(not background_folder(p).exists(), "the background search's files are cleared away", r)
+    finally:
+        stop_background(p)
+
+
+def backdate_background(p, seconds):
+    """Make a running background search read as started `seconds` earlier than it was. Returns its budget."""
+    path = background_folder(p) / "spawn.json"
+    spawn = json.loads(path.read_text())
+    spawn["at"] -= seconds
+    fresh = path.with_name("spawn.new")
+    fresh.write_text(json.dumps(spawn))
+
+    def swap():  # in one step, so the search never reads a half-written file; a reader can hold the old one a moment
+        try:
+            os.replace(fresh, path)
+        except OSError:
+            return False
+        return True
+    expect(wait_for(swap, seconds=20), "spawn.json should take the new start time")
+    return spawn["budget_s"]
+
+
+def test_a_background_search_alive_long_past_its_budget_is_collected_as_killed_and_marked_overrun(base):
+    p, beat = hung_background(base)  # stuck in a compile, so its time's end does not end it
+    budget = backdate_background(p, 600)
+    r, found = stop_background(p)
+    expect(r.returncode == 0 and found is not None and found["end"] == "killed" and found.get("overrun") is True,
+           f"a search still alive long after its budget is killed, and the report marks the overrun: {r.stdout}", r)
+    expect(found["budget_s"] == budget and found["ran_s"] > budget + 10,
+           f"the report holds the seconds it ran against its budget: {found}", r)
+    expect_background_dead(p, beat, r)
+
+
+def test_a_heartbeat_the_call_could_not_remove_is_named_in_the_next_background_log(base):
+    p = background_project(base)
+
+    def hold(beat):
+        """Turn the call's heartbeat into a folder that is not empty: no search can remove that, on any host."""
+        if beat.is_file():
+            beat.unlink()
+        beat.mkdir(exist_ok=True)  # fails when the call wrote its heartbeat again in between: the next pass tries again
+        (beat / "held").write_text("x")
+
+    seen, end = once_a_search_is_in_the_pool(p, hold)
+    try:
+        r, out = search(p, wide(8))
+        end()
+        expect(seen, "the test should have held the call's heartbeat while its block ran", r)
+        expect(r.returncode == 0 and out is not None and out.get("continues_s"),
+               f"a heartbeat that cannot be removed fails nothing, and the search goes on in the background: {out}", r)
+        line = f"could not remove the heartbeat {seen[0]}"
+
+        def log():
+            f = background_folder(p) / "log"
+            return f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        expect(wait_for(lambda: line in log() and "ready: " in log()),
+               f"the background search's log should hold the line: {line}\n{log()}", r)
+        text = log()
+        expect(text.index("started: process") < text.index(line) < text.index("ready: "),
+               f"the line is copied at the search's start: {text}", r)
+    finally:
+        end()
+        stop_background(p)
+
+
+def test_search_counts_the_seconds_it_spent_collecting_a_background_search(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        first = out["counts"]
+        expect(isinstance(first.get("collect_s"), float) and 0 <= first["collect_s"] <= first["call_s"],
+               f"a call with nothing to collect still states the seconds: {first}", r)
+        expect(wait_for(lambda: background_tried(p) >= 1), "the background search should build candidates")
+        tune(p, workers=1)
+        r, out = search(p, NEVER)
+        expect(out is not None and out.get("background"), f"the call collects the background search: {out}", r)
+        c, rec = out["counts"], perf_log(p)[-1]
+        expect(isinstance(c.get("collect_s"), float) and 0 <= c["collect_s"] <= c["call_s"],
+               f"the summary's collecting seconds are no larger than the whole call's: {c}", r)
+        expect(rec["collect_s"] == c["collect_s"] and rec["collect_s"] <= rec["call_s"],
+               f"the performance record holds the same collecting seconds, within its own call seconds: {rec}", r)
+    finally:
+        stop_background(p)
 
 
 def test_a_case_receives_its_scratch_folder_in_resolved_form(base):
     expect(base == str(Path(base).resolve()), f"the scratch folder {base} differs from its resolved form {Path(base).resolve()}")
+
+
+def test_the_tool_index_names_its_section_banners_in_order(base):
+    import re
+    source = TOOL.read_text(encoding="utf-8")
+    banners = re.findall(r"^# -{10} (.+?) -{10}$", source, re.M)
+    doc = ast.get_docstring(ast.parse(source), clean=True)
+    start = doc.index("Sections, in file order: ") + len("Sections, in file order: ")
+    index = " ".join(doc[start:].split()).rstrip(".").split("; ")
+    expect(banners, "the tool should have section banners")
+    expect(index == banners, f"the index names {index} but the banners are {banners}")
 
 
 def rmtree(path):
@@ -4406,24 +4933,94 @@ def rmtree(path):
     shutil.rmtree(path, onerror=retry)
 
 
-def main():
-    want = sys.argv[1] if len(sys.argv) > 1 else ""
-    tests = [(n, f) for n, f in globals().items() if n.startswith("test_") and want in n]
+NO_MATCH_EXIT, COLLISION_EXIT = 2, 3
+
+
+def module_level_collisions(source):
+    """One message per module-level name that a def, a class or a plain assignment binds more than once."""
+    seen, found = {}, []
+
+    def bind(name, line):
+        if name in seen:
+            found.append(f"{name} is bound at line {seen[name]} and again at line {line}")
+        else:
+            seen[name] = line
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for e in node.elts:
+                yield from targets(e)
+
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name, node.lineno)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                for name in targets(t):
+                    bind(name, node.lineno)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            for name in targets(node.target):
+                bind(name, node.lineno)
+    return found
+
+
+def select_cases(names, filters):
+    """The case names the filters select, in order, and the filters that select none."""
+    chosen, unmatched = set(), []
+    for flt in filters:
+        if flt in names:
+            hit = {flt}
+        else:
+            words = flt.split("_")
+            hit = {n for n in names if any(n.split("_")[i:i + len(words)] == words for i in range(len(n.split("_"))))}
+        chosen |= hit
+        if not hit:
+            unmatched.append(flt)
+    return [n for n in names if n in chosen] if filters else list(names), unmatched
+
+
+def say(text):
+    print(text, flush=True)
+
+
+def main(argv=None, namespace=None, source=None):
+    """Run a module's test_ cases. The module is this one unless a caller passes its globals and its file."""
+    argv = sys.argv[1:] if argv is None else argv
+    namespace = globals() if namespace is None else namespace
+    source = Path(source or __file__)
+    list_only = "--list" in argv
+    filters = [a for a in argv if a != "--list"]
+    clashes = module_level_collisions(source.read_text(encoding="utf-8"))
+    if clashes:
+        for c in clashes:
+            say(f"COLLISION {source.name}: {c}")
+        sys.exit(COLLISION_EXIT)
+    names, unmatched = select_cases([n for n in namespace if n.startswith("test_")], filters)
+    if unmatched:
+        for f in unmatched:
+            say(f"NO CASE matches the filter {f!r}")
+        sys.exit(NO_MATCH_EXIT)
+    if list_only:
+        for n in names:
+            say(n)
+        sys.exit(0)
     failed = 0
-    for name, f in tests:
+    for name in names:
         base = str(Path(tempfile.mkdtemp(prefix="decomp-test-")).resolve())
         try:
-            f(base)
-            print(f"PASS {name}")
+            namespace[name](base)
+            say(f"PASS {name}")
         except Exception as e:  # a crash in one case must not hide the others
             failed += 1
-            print(f"FAIL {name}: {e if isinstance(e, AssertionError) else traceback.format_exc()}")
+            say(f"FAIL {name}: {e if isinstance(e, AssertionError) else traceback.format_exc()}")
         finally:
             try:
                 rmtree(base)
             except OSError:
                 pass
-    print(f"{len(tests) - failed} passed, {failed} failed")
+    say(f"{len(names) - failed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
 
 

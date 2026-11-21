@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { decompRequiredLines } from "./check-skills.mjs";
+import { decompRequiredLines, layoutMaxLineLength } from "./check-skills.mjs";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(repo, "scripts", "check-skills.mjs");
@@ -94,6 +94,25 @@ for (const [file, line] of decompRequiredLines) {
     assert.ok(r.stderr.includes(`${file}: missing required line: ${line}`), r.stderr);
   });
 }
+
+// The layout reference keeps every line within the limit: the failure names the file and the line.
+const layoutFile = "engineering/decomp-standards/LAYOUT.md";
+const lineOf = (length) => "x".repeat(length);
+
+test("fails naming LAYOUT.md and the line when a line is over the length limit", () => {
+  const r = mutated(layoutFile, (t) => `${t}${lineOf(layoutMaxLineLength + 1)}\n`);
+  assert.notEqual(r.status, 0);
+  const line = readFileSync(join(repo, "skills", layoutFile), "utf8").split("\n").length;
+  assert.ok(
+    r.stderr.includes(`${layoutFile}:${line}: line is ${layoutMaxLineLength + 1} characters`),
+    r.stderr,
+  );
+});
+
+test("passes when a LAYOUT.md line is exactly at the length limit", () => {
+  const r = mutated(layoutFile, (t) => `${t}${lineOf(layoutMaxLineLength)}\n`);
+  assert.equal(r.status, 0, r.stderr);
+});
 
 // Each contract heading carries exactly one tag: the failure names the file and the heading's line.
 test("fails naming CONTRACT.md and the line when a heading loses its tag", () => {
