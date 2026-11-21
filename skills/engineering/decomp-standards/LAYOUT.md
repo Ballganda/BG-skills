@@ -587,7 +587,7 @@ A block ends on the first of these that holds:
 
 - `match`: a candidate matches exactly with natural alternatives only.
   - A block that ends another way while it holds a match that needs steering also reports `match`, with that match reduced.
-- `abort-buildfail`: more than half of the first 2 × workers builds failed. Fix the template.
+- `abort-buildfail`: more than half of the first 2 × workers builds failed. Fix the template: the summary's `failure` and `build_failed` say what failed.
 - `exhausted`: every candidate was tried, or more than 90 percent of the last 100 candidates repeated a source already tried.
   - A block that finished its last pass (see `deadline`) ends here.
   - It is reported only when no retry of a frozen choice point is owed (see [A round](#a-round)).
@@ -760,7 +760,13 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - When the report holds fewer than 2 lines, `notice` gains one line.
   - In full, that line starts with `no-instruction-diff:`, says the diff report holds no instruction diff, and says the fix is the `diff` adapter (see its contract under [Adapters](#adapters)).
   - Once the ticket has read it in full, the line is the name `no-instruction-diff` alone (see [Adapter notices](#adapter-notices)).
-- `failure`: the end of the first failure log (only when none was scored).
+- `failure`: the end of the first failure log.
+  - It is given when no candidate was scored, and on every `abort-buildfail` end, scored baseline or not.
+- `build_failed`: only on an `abort-buildfail` end, one row per choice point with a one-change candidate that failed to build.
+  - A row is `"<label>: <n> of <m> alternatives failed to build"`: `n` of the choice point's one-change candidates failed, `m` were tried.
+  - Rows go most failures first, then by label, at most 8.
+  - The key is absent when no one-change candidate failed.
+  - The cap drops its rows after those of `window`, `next` and `effects`, and shortens `failure` last.
 - `effects`: the choice points that change the score, at most 8, largest first, each with its alternatives' change in differing bytes against the baseline (`{"B": {"B1": -2}}`).
 - `inert`: the choice points still frozen when the round ended, each as `"<label>: <n> of <m> objects"`.
   - `m` is the round's distinct objects, and `n` is how many of them the freeze was tried against and held, the baseline's included.
@@ -775,8 +781,12 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - It appears only when a pair shows one.
 - `stop`: advice to stop.
   - It is given when every choice point is inert (no alternative changes the object) and every `inert` entry holds all of the round's objects.
-  - It is given after 2 template rounds in a row that brought no new best score.
+  - It is given after 2 template rounds that brought no new best score, counted over the ticket's check trail from the round just ended back.
   - A round brings a new best score when it is lower in `differ_bytes` than every earlier attempt on the ticket, checks included.
+  - Only the records after the ticket's last `bytes-match` record are read.
+  - A round with no new best score adds one, and a round with one ends the count.
+  - A `check` with no new best score is passed over, and a `check` with one ends the count.
+  - A round that ends `match` carries no `stop`.
   - A repeat is no round here.
 - `history`: one line of project history for the ticket's latest category, such as `decl-order fixed register-allocation 7 of 9 times on this compiler` (only when the ledger holds a template round for it).
   - A match by the baseline records no kind, so the history counts nothing for it.
