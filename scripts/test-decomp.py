@@ -5081,6 +5081,64 @@ def test_a_background_search_that_built_nothing_leaves_its_log(base):
         stop_background(p)
 
 
+def run_waiting_background_search(base, workers):
+    """A background search with a short time, left waiting on another search's foreground heartbeat that stays fresh.
+
+    Returns (project, the builds folder, when the starting call returned, the collected report, the call's result)."""
+    folder = Path(base) / "bg"
+    p = background_project(base, folder, workers=workers, slots=workers, ceiling_s=4)
+    writer(p, "4242-feed", -600)
+    path = p.base / "template.c"
+    path.write_text(wide(8).replace("int f(void) {", "int f(void) { /* TAG_one */"), encoding="utf-8")
+    r = p.run("search", TID, str(path))
+    returned = time.time()
+    out = json.loads(r.stdout.splitlines()[0]) if r.stdout.startswith("{") else None
+    expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+    expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search ends by itself", r)
+    r, found = stop_background(p)
+    return p, folder, returned, found, r
+
+
+def a_background_search_that_waited_its_whole_budget(base, workers):
+    p, folder, returned, found, r = run_waiting_background_search(base, workers)
+    try:
+        expect(found is not None and found["end"] == "deadline" and found["tried"] == 0
+               and found.get("waited_on_foreground") is True, f"it reports that it waited its whole budget: {found}", r)
+        expect(found.get("log") and Path(found["log"]).exists(), f"the report names a log that exists: {found}", r)
+        log = Path(found["log"]).read_text(encoding="utf-8", errors="replace")
+        waiting = log.find("waiting on the foreground: 4242-feed")
+        ended = log.find("ended: deadline, waited its whole budget on the foreground: 4242-feed, no build started")
+        expect(0 <= waiting < ended, f"the log holds the waiting line, then the ended line: {log}", r)
+        later = [t for t in build_starts(folder, "one") if t > returned]
+        expect(not later, f"no build of the background search started: {later}", r)
+    finally:
+        stop_background(p)
+
+
+def test_a_background_search_starts_no_build_after_its_time_and_says_it_waited_on_the_foreground(base):
+    a_background_search_that_waited_its_whole_budget(base, 1)
+
+
+def test_a_background_search_with_several_workers_starts_no_build_after_its_time(base):
+    a_background_search_that_waited_its_whole_budget(base, 3)
+
+
+def test_a_background_search_whose_foreground_clears_before_its_time_builds_and_reports_no_wait(base):
+    p = background_project(base, ceiling_s=30)
+    try:
+        beat = writer(p, "4242-feed", -600)
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: waits_on(p, "4242-feed")), "the background search should wait on the foreground block")
+        beat.unlink()
+        expect(wait_for(lambda: background_tried(p) >= 2), "once the foreground is clear the background search builds")
+        r, found = stop_background(p)
+        expect(found is not None and found["tried"] >= 2 and "waited_on_foreground" not in found and "log" not in found,
+               f"it reports what it tried and no wait: {found}", r)
+    finally:
+        stop_background(p)
+
+
 def test_a_background_search_does_not_yield_to_the_call_that_started_it(base):
     p = background_project(base)
     try:

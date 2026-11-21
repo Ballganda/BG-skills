@@ -619,6 +619,10 @@ A block ends on the first of these that holds:
   - No foreground search counts it as a writer.
   - It starts no build while any foreground search on this machine has a fresh heartbeat in the pool.
   - A block has its slots back within one compile, or within one batch under batching.
+  - It starts no build once its time has come or it was stopped, whether it waits on the foreground or holds a slot: a build in hand runs to its end.
+  - A search whose time ended while foreground searches were beating starts no build and ends with the line `ended: deadline, waited its whole budget on the foreground: <their names>, no build started`.
+  - Its report then holds `waited_on_foreground: true`, and no other report holds that field.
+  - Its `tried` is 0, so its log is kept (see below).
 - Under batching it starts no batch once its time has come or it was stopped.
 - The call that started it is the one exception: that call left the pool before it started the search.
 - So a heartbeat still under its name is one it failed to remove, and the search does not wait on it.
@@ -641,6 +645,7 @@ A block ends on the first of these that holds:
   - `ran_s`: the seconds from its start to its collection.
   - `budget_s`: the seconds it was given.
   - `tried`.
+  - `waited_on_foreground`: `true`, only when the search started no build because foreground searches were beating until its time ended.
   - `best`: the fewest differing bytes, then the lowest seed, among the candidates it tried, named in the old template's choice codes.
 - When `tried` is 0, the report also holds `log`.
   - The search's log is kept as `.decomp/search/<ticket id>/background.log`, in place of the last kept one.
