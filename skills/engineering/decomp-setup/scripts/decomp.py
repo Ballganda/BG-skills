@@ -3181,6 +3181,11 @@ class SlotPool:
 # ---------- template search: the compiler launcher ----------
 
 
+class NoBuild(Exception):
+    """Raised by a pool that refuses a build: the search's time is over or it was stopped (see BackgroundPool.look).
+    The block's worker that meets it ends its loop; the block's end was set by whoever refused."""
+
+
 @contextlib.contextmanager
 def compile_slot(worker):
     """Hold one of the machine's compile slots for the length of a worker's build. A launcher with no pool builds freely."""
@@ -3652,6 +3657,8 @@ class Block:
                 if seed is None:
                     return
                 self.attempt(seed, memo, worker)
+        except NoBuild:  # the pool refused the build: the candidate stays untried and the block has ended
+            return
         except BaseException as err:  # raised again by run_block, on the main thread
             with self.lock:
                 self.error, self.end = self.error or err, self.end or "stopped"
@@ -3674,6 +3681,8 @@ class Block:
                     return  # no time for the batch: its candidates are not tried
                 for seed in seeds:
                     self.attempt(seed, memo, worker)
+        except NoBuild:  # as for work
+            return
         except BaseException as err:  # raised again by run_block, on the main thread
             with self.lock:
                 self.error, self.end = self.error or err, self.end or "stopped"
@@ -3773,10 +3782,13 @@ def reference_compile(worker, text):
         retrying(lambda: worker.source.write_bytes(source_bytes(text)), wait)
     except OSError:
         return None
-    with compile_slot(worker):
-        start = time.perf_counter()
-        _, failure = build_unit(*worker.args(), worker.objdir, str(worker.report))
-        return None if failure else time.perf_counter() - start
+    try:
+        with compile_slot(worker):
+            start = time.perf_counter()
+            _, failure = build_unit(*worker.args(), worker.objdir, str(worker.report))
+            return None if failure else time.perf_counter() - start
+    except NoBuild:
+        return None
 
 
 class Tuner:
@@ -5625,8 +5637,10 @@ class Background:
         self.began, self.waited, self.waiting_on = time.perf_counter(), 0.0, None
         self.lock, self.stopped = threading.Lock(), threading.Event()
         self.known, self.seed, self.until = set(), None, None
+        self.block, self.before, self.denied = None, 0, []  # its block; the results it began with; the foreground it waited on when refused a build
         self.end, self.error = "error", "it ended before its block did"  # until `ended` or `died` says how
         self.blind = False  # whether its block had no object identity (see Memo.blind)
+        self.whole = False  # whether it waited its whole budget on the foreground and started no build (see ended)
         self.job = own_job(token)
         # Every scratch folder of this process goes under one folder, which the call that kills it removes.
         self.scratch = _TEMP["under"] = temp_dir("background")
@@ -5686,7 +5700,7 @@ class Background:
                 memo.objects.add(r["object"])
             memo.seen[memo.key("src", source_bytes(template.render(template.vector(r["seed"]))))] = e
             self.known.add(r["seed"])
-        self.until = time.perf_counter() + self.budget
+        self.until, self.before = time.perf_counter() + self.budget, len(self.known)
         self.say(f"ready: {len(self.known)} candidates already tried, {self.budget} s from now")
 
     def over(self):
@@ -5705,7 +5719,13 @@ class Background:
 
     def ended(self, end, best, blind=False):
         self.end, self.error, self.seed, self.blind = end, None, best.get("seed"), blind
-        self.say(f"ended: {end}, {round(self.waited, 1)} worker-seconds spent waiting on the foreground")
+        with self.lock:
+            names, tried = list(self.denied), len(self.known) - self.before
+        self.whole = bool(end == "deadline" and names and not tried)  # it never had the machine
+        if self.whole:
+            self.say(f"ended: {end}, waited its whole budget on the foreground: {' '.join(names)}, no build started")
+        else:
+            self.say(f"ended: {end}, {round(self.waited, 1)} worker-seconds spent waiting on the foreground")
 
     def died(self, err):
         """Take the error the process is leaving by: the end reason is `error`, and the report holds its text.
@@ -5729,6 +5749,8 @@ class Background:
         if read_json(self.dir / "spawn.json").get("token") == self.token:
             with contextlib.suppress(OSError):
                 done = {"end": self.end, "seed": self.seed, "blind": self.blind}
+                if self.whole:
+                    done["waited_on_foreground"] = True
                 if self.error:
                     done["error"] = self.error
                 (self.dir / "done.json").write_text(json.dumps(done), encoding="utf-8")
@@ -5740,6 +5762,10 @@ class BackgroundBlock(Block):
     once another search has taken its place."""
 
     run = None  # the Background it reports to: one per process, set before the block is made
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.run.block = self  # the pool asks it (see late) before a build starts
 
     def take(self):
         if self.run.stopped.is_set():
@@ -5793,7 +5819,27 @@ class BackgroundPool(SlotPool):
                 break
             self.run.yielding(names, BACKGROUND_YIELD_S)
             time.sleep(BACKGROUND_YIELD_S)
-        return super().acquire(prefer)
+        self.look()
+        slot = super().acquire(prefer)
+        try:
+            self.look()
+        except NoBuild:
+            self.release(slot)
+            raise
+        return slot
+
+    def look(self):
+        """Refuse a build once the search's time is over or it was stopped: it takes no slot, and its candidate stays untried.
+
+        The block decides (see BackgroundBlock.late), so a last pass is still built whole. A refusal made while
+        foreground searches were beating is noted, for the `ended` line (see Background.ended).
+        """
+        block = self.run.block
+        if block is not None and block.late():
+            with self.run.lock:
+                if self.run.waiting_on:
+                    self.run.denied = list(self.run.waiting_on)
+            raise NoBuild()
 
 
 def stop_background(tid):
@@ -5961,6 +6007,8 @@ def collect_background(t):
         (state / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results), encoding="utf-8")
     report = background_end(done, saw)
     report["tried"] = len(new)
+    if done.get("waited_on_foreground") is True and not new:  # the search never had the machine: its log is kept below
+        report["waited_on_foreground"] = True
     for key in ("ran_s", "budget_s"):
         if isinstance(saw.get(key), (int, float)) and not isinstance(saw[key], bool):
             report[key] = saw[key]
