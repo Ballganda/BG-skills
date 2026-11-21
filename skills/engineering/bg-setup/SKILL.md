@@ -50,7 +50,9 @@ Defaults: each label string equals its role, `needs-triage`, `needs-info`, `read
 **Section D: Models.** Ticket tiers (Mechanical, Standard, Hard, set by `ticket-gen`) and subagent tasks each name a model. Ask once, leading with the defaults:
 
 - Tiers: Mechanical on Haiku, Standard on Sonnet, Hard on the top model.
-- Tasks: exploration on the Mechanical model, merging on the Standard model, Standards review on the Standard model, Spec review on the Hard model.
+- Tasks: exploration, locating on the Mechanical model; research, interpreting exploration, reference repair, merging, Standards review on the Standard model; design, toolchain identification, Spec review on the Hard model.
+
+The seed `models.md` also states the rule that picks a model by the kind of work. On a re-run in a repo whose `docs/agents/models.md` exists, add the rule section and each task row it lacks, matched by task name, and leave every row the user edited as it is.
 
 On a harness without those names (not Claude Code), offer its smallest model for Mechanical, its middle one for Standard, and its largest for Hard, and let the user name them.
 

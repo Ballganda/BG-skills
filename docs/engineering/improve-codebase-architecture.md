@@ -93,6 +93,10 @@ Partly. The exploration step names Claude Code's `Agent` tool with `subagent_typ
 
 The skill does not ship a good answer. People often ask for a `TYPESCRIPT.md` with concrete file and module layouts for the principles, and it does not exist. The skill tells you where a deepening belongs and what goes behind the seam. You must turn that into a package or directory structure yourself.
 
+**Which kind of model does its subagent run on?**
+
+The default: the exploration subagent runs on the Standard model (Sonnet by default), because it judges shallow modules and leaky seams with no mechanical check. It follows the Interpreting exploration row of the models doc [bg-setup](./bg-setup.md) writes. Change the row, and every dispatch of that kind follows.
+
 ## It's working if
 
 - The candidates name your domain's concepts, not invented class names: "the Order intake module," not "the FooBarHandler."

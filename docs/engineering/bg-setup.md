@@ -37,7 +37,7 @@ It starts each section with the recommended answer, and skips any question its e
 | **Issue tracker** | the one matching your `git remote` | always, because this is the one real choice |
 | **Triage labels** | keep the five canonical names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) | only if the `triage` skill is installed |
 | **Domain docs** | single-context: one `GLOSSARY.md` plus `docs/adr/` at the root | only if it spots monorepo signals, and then it offers a multi-context `GLOSSARY-MAP.md` |
-| **Models** | Haiku for Mechanical tickets, Sonnet for Standard, the top model for Hard; exploration on the Mechanical model, merging and Standards review on the Standard model, Spec review on the Hard model | always; on a harness without those names it offers its smallest, middle and largest models instead |
+| **Models** | Haiku for Mechanical tickets, Sonnet for Standard, the top model for Hard; exploration and locating on the Mechanical model; research, interpreting exploration, reference repair, merging and Standards review on the Standard model; design, toolchain identification and Spec review on the Hard model. The doc also states the rule that picks a model by the kind of work, and a re-run adds any missing rule or row without changing rows you edited | always; on a harness without those names it offers its smallest, middle and largest models instead |
 
 The tracker options:
 

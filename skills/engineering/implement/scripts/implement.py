@@ -8,6 +8,7 @@ Commands:
   start TICKET [--slug TEXT]          claim a ticket, create or reuse its worktree and branch
   status                              one line per batch ticket, then whether the run stores attribution lines
   test TICKET COMMAND                 run COMMAND in the ticket's worktree, log the output
+  test --integration COMMAND          the same at the integration branch tip (its worktree, else a temporary one)
   merge TICKET                        merge the ticket's branch into the integration branch
   fail TICKET                         record a failed attempt and free the ticket
   clean                               remove worktrees and branches of merged and failed tickets
@@ -18,6 +19,7 @@ errors go to stderr as `error: <text>`, and the exit code is one of the
 constants below. Standard library only.
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -367,37 +369,83 @@ def batch_entry(ledger, ticket):
     return entry
 
 
-def cmd_test(store, args):
-    with store:
-        ledger = store.load()
-        entry = batch_entry(ledger, args.ticket)
-        if entry["state"] != "claimed":
-            raise Stop(USAGE, f"ticket {args.ticket} is {entry['state']}")
-        if not Path(entry["worktree"]).is_dir():
-            raise Stop(ENV, f"worktree of ticket {args.ticket} is missing: run start first")
-        logs = store.dir / "logs"
-        logs.mkdir(parents=True, exist_ok=True)
-        log = logs / f"{args.ticket}-{entry['attempts']}.log"
-    r = subprocess.run(args.shell_command, shell=True, cwd=entry["worktree"], stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT)
+def run_logged(command, cwd, log):
+    r = subprocess.run(command, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     log.write_bytes(r.stdout)
     print(f"test: {'fail' if r.returncode else 'pass'} log={log.as_posix()}")
     return TEST_FAILED if r.returncode else OK
 
 
-def merge_into(store, integration, branch, ticket, attribution=""):
-    """Merge branch into the integration branch; return the conflicting files, or [] on success."""
+def next_integration_log(logs):
+    """Reserve the next integration log name. An @ cannot appear in a ticket id, so it never collides."""
+    n = 1
+    while True:
+        log = logs / f"integration@{n}.log"
+        try:
+            os.close(os.open(log, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return log
+        except FileExistsError:
+            n += 1
+
+
+def cmd_test(store, args):
+    if args.integration:
+        if len(args.words) != 1:
+            raise Stop(USAGE, "test --integration takes only COMMAND, in place of the ticket id")
+        command = args.words[0]
+    else:
+        if len(args.words) != 2:
+            raise Stop(USAGE, "test takes TICKET COMMAND, or --integration COMMAND")
+        ticket, command = args.words
+    with store:  # released before the command runs, so a long run does not block the ledger
+        ledger = store.load()
+        logs = store.dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        if args.integration:
+            integration = ledger["integration"]
+            if not branch_exists(integration):
+                raise Stop(ENV, f"integration branch {integration} is missing")
+            require_clean_integration(integration)
+            log = next_integration_log(logs)
+        else:
+            entry = batch_entry(ledger, ticket)
+            if entry["state"] != "claimed":
+                hint = "; to test the combined state use test --integration COMMAND" if entry["state"] == "merged" else ""
+                raise Stop(USAGE, f"ticket {ticket} is {entry['state']}{hint}")
+            if not Path(entry["worktree"]).is_dir():
+                raise Stop(ENV, f"worktree of ticket {ticket} is missing: run start first")
+            log = logs / f"{ticket}-{entry['attempts']}.log"
+    if not args.integration:
+        return run_logged(command, entry["worktree"], log)
+    with integration_checkout(store, integration) as path:
+        return run_logged(command, path, log)
+
+
+@contextlib.contextmanager
+def integration_checkout(store, integration):
+    """The path of a checkout of the integration branch tip: its own worktree, else a temporary one."""
     path = worktrees().get(integration)
     temp = None
     if path is None:
         temp = store.dir / "merge-worktree"
-        if temp.exists():  # left by a crashed merge
+        if temp.exists():  # left by a crashed run
             git("worktree", "remove", "--force", str(temp), check=False)
             shutil.rmtree(temp, ignore_errors=True)
         git("worktree", "prune")
         git("worktree", "add", "-q", str(temp), integration)
         path = str(temp)
     try:
+        yield path
+    finally:
+        if temp is not None:
+            git("worktree", "remove", "--force", str(temp), check=False)
+            shutil.rmtree(temp, ignore_errors=True)
+            git("worktree", "prune", check=False)
+
+
+def merge_into(store, integration, branch, ticket, attribution=""):
+    """Merge branch into the integration branch; return the conflicting files, or [] on success."""
+    with integration_checkout(store, integration) as path:
         message = f"Merge ticket {ticket}" + (f"\n\n{attribution}" if attribution else "")
         r = git("merge", "--no-ff", "-q", "-m", message, branch, cwd=path, check=False)
         if r.returncode == 0:
@@ -407,11 +455,6 @@ def merge_into(store, integration, branch, ticket, attribution=""):
         if not files:
             raise Stop(ENV, f"git merge {branch}: {r.stderr.strip() or r.stdout.strip()}")
         return files
-    finally:
-        if temp is not None:
-            git("worktree", "remove", "--force", str(temp), check=False)
-            shutil.rmtree(temp, ignore_errors=True)
-            git("worktree", "prune", check=False)
 
 
 def cmd_merge(store, args):
@@ -498,9 +541,11 @@ def parser():
     s.add_argument("ticket", help="a batch ticket id")
     s.add_argument("--slug", help="suffix for a new branch name: ticket-ID-SLUG")
     sub.add_parser("status", help="one line per batch ticket, flagging a missing worktree or branch")
-    t = sub.add_parser("test", help="run a command in a ticket's worktree and log its output")
-    t.add_argument("ticket", help="a claimed ticket id")
-    t.add_argument("shell_command", metavar="COMMAND", help="shell command to run")
+    t = sub.add_parser("test", help="run a command in a ticket's worktree, or at the integration tip, and log its output")
+    t.add_argument("--integration", action="store_true",
+                   help="in place of TICKET: run COMMAND in a checkout of the integration branch tip")
+    t.add_argument("words", nargs="+", metavar="TICKET COMMAND | COMMAND",
+                   help="a claimed ticket id and the shell command to run; with --integration, only the command")
     m = sub.add_parser("merge", help="merge a ticket's branch into the integration branch")
     m.add_argument("ticket", help="a claimed ticket id")
     f = sub.add_parser("fail", help="record a failed attempt and free the ticket")

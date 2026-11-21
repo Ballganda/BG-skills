@@ -22,7 +22,7 @@ The line between `research` and `grill` is the **shelf life of what comes back**
 
 ## Delegated legwork
 
-The reading runs as a **background agent**. You keep working while it follows each claim to its primary source, writes one Markdown file, and reports back. Research is legwork you delegate, not thinking you outsource. You get a document to grill, plan, or design against, and you still make the decision.
+The reading runs as a **background agent**. You keep working while it follows each claim to its primary source, writes one Markdown file, and reports back. The agent runs on the Research model from your project's models doc (the Standard model when the project has none), whatever model your session runs on. Research is legwork you delegate, not thinking you outsource. You get a document to grill, plan, or design against, and you still make the decision.
 
 Nothing stops the background agent from spawning another background agent of its own. This is the skill's best-documented problem.
 

@@ -28,6 +28,10 @@ that deadline, and then its name says so. Assert an exhaustive result only on a 
 small enough to finish many times over: wide(n) has 2**n candidates. Set the time a
 round is given, never inherit it from the seconds since the last round: call
 forget_latency(p) before the next round.
+
+A case's scratch project is built once, when the case creates it. Many cases assert on the exact
+shape of a log or summary line, so a change to a field of one needs a search of the suite for the
+old shape first.
 """
 import ast
 import hashlib
@@ -1271,6 +1275,13 @@ def test_tool_output_in_another_encoding_does_not_lose_the_result(base):
     expect_match(Project(base, config={"diff": diff}))
 
 
+def test_a_project_module_named_dis_does_not_stop_the_tool_from_starting(base):
+    p = Project(base, files={"tools/dis.py": "raise ImportError('the project dis module was imported')\n"})
+    p.write("DECOMP.md", "# contract\n- Fakematch rule: `forbidden`\n- Template search: allowed\n")
+    r = p.run("contract-keys")
+    expect(r.returncode == 0, "the tool should start beside a project module named dis", r)
+
+
 # ---- inventory and disasm through the project tool ----
 
 # The fake adapters record what they received: the inventory in the file it writes,
@@ -1278,9 +1289,9 @@ def test_tool_output_in_another_encoding_does_not_lose_the_result(base):
 RECEIVED = ("import json, os, sys\n"
             "got = {'argv': sys.argv[1:], 'env': {k: v for k, v in os.environ.items() if k.startswith('DECOMP_T')}}\n")
 ADAPTERS = {"tools/inv.py": RECEIVED + "json.dump(got, open('inventory.json', 'w'))\n",
-            "tools/dis.py": RECEIVED + "print(json.dumps(got))\n"}
+            "tools/disasm.py": RECEIVED + "print(json.dumps(got))\n"}
 ADAPTER_CMDS = {"inventory": '"{python}" "{tools}/inv.py"',
-                "disasm": '"{python}" "{tools}/dis.py" "{expected}" "{address}"'}
+                "disasm": '"{python}" "{tools}/disasm.py" "{expected}" "{address}"'}
 
 
 def adapter_project(base, config=None, **kw):

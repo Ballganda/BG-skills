@@ -21,6 +21,6 @@ Work in **rounds**. A round asks the whole **frontier**: every open decision who
 
 Answers push the frontier outward: recompute it and ask the next round.
 
-Facts are yours to find; decisions are the user's. When a question needs a fact from the environment, dispatch a sub-agent with a fresh context window to look it up instead of asking. Only the questions downstream of a running lookup wait; ask the rest now.
+Facts are yours to find; decisions are the user's. When a question needs a fact from the environment, dispatch a sub-agent with a fresh context window, on the models doc's Locating task (default the Mechanical model), to look it up instead of asking. Only the questions downstream of a running lookup wait; ask the rest now.
 
 Answering a round ("yes", "agree all") settles that round only. The session is done when the frontier is empty: every branch visited, nothing silently assumed. Then ask one closing question on its own, outside any round: have we reached a shared understanding? Take no action until the user answers it.
