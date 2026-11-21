@@ -2359,6 +2359,73 @@ def test_search_window_is_centred_on_the_first_difference_with_three_lines_of_co
     expect(first > 20, "the centre is the offset of the first difference, not the report's start", r)
 
 
+# A fake diff whose report is the "lines" of its third argument, a JSON object, and whose first_differ is its "first" (if any).
+SEARCH_AT_DIFF_PY = """import json, sys
+n = open(sys.argv[1]).read().count("WRONG")
+spec = json.load(open(sys.argv[3]))
+open(sys.argv[2], "w").write("".join(line + chr(10) for line in spec["lines"]))
+out = dict(match=n == 0, differ_bytes=2 * n)
+if "first" in spec:
+    out["first_differ"] = spec["first"]
+print(json.dumps(out))
+"""
+
+
+def window_of(base, lines, first=None):
+    """The summary's window for a report of these lines and a first_differ (none when first is None)."""
+    spec = {"lines": lines} if first is None else {"lines": lines, "first": first}
+    p = search_project(base, files={"tools/search_diff.py": SEARCH_AT_DIFF_PY, "tools/report.json": json.dumps(spec)},
+                       config={"diff": PY + ' "{tools}/search_diff.py" "{obj}" "{report}" "{tools}/report.json"'})
+    r, out = search(p, NEVER)
+    expect(out is not None, "search should run", r)
+    return r, out["window"]
+
+
+STEPS = [0, 3, 4, 7, 12, 14, 19, 21, 26, 30, 33, 38, 44, 47, 52, 55, 60, 64]  # uneven instruction offsets
+UNEVEN = [f"  +0x{o:x}: mov rdx,qword ptr [rcx+58h]" for o in STEPS]
+
+
+def test_search_window_is_centred_on_the_instruction_holding_the_first_differing_byte(base):
+    r, window = window_of(base, ["header: f", *UNEVEN], 0x2e)  # the instruction at +0x2c, 2 bytes in
+    expect(len(window) == 7 and window[3] == "  +0x2c: mov rdx,qword ptr [rcx+58h]", f"the 4th line is the instruction's: {window}", r)
+
+
+def test_search_window_ignores_a_jump_target_that_equals_first_differ(base):
+    lines = [UNEVEN[0], "  +0x3: je 000000000000002e", *UNEVEN[2:]]
+    r, window = window_of(base, lines, 0x2e)
+    expect(window[3] == "  +0x2c: mov rdx,qword ptr [rcx+58h]", f"the 4th line is the instruction's: {window}", r)
+
+
+def test_search_window_is_not_centred_on_a_header_count(base):
+    lines = ["differ_bytes 29", *[f"{o:04d} mov eax, 1" for o in range(0, 40, 4)]]
+    r, window = window_of(base, lines, 29)
+    expect(window[3] == "0028 mov eax, 1", f"the 4th line is the instruction at 28: {window}", r)
+
+
+def test_search_window_is_centred_on_the_first_of_two_lines_of_one_offset(base):
+    lines = [f"  +0x{o:x}: nop" for o in range(0, 10)] + ["- +0x14: mov eax, 1", "+ +0x14: mov ecx, 1"] + \
+           [f"  +0x{o:x}: nop" for o in range(0x16, 0x20)]
+    r, window = window_of(base, lines, 0x15)
+    expect(window[3] == "- +0x14: mov eax, 1" and window[4] == "+ +0x14: mov ecx, 1", f"the 4th line is the first of the two: {window}", r)
+
+
+def test_search_window_is_centred_on_the_last_line_when_first_differ_is_past_it(base):
+    r, window = window_of(base, UNEVEN, 500)
+    expect(window == UNEVEN[-4:], f"the window is centred on the last instruction line: {window}", r)
+
+
+def test_search_window_is_the_first_lines_when_every_offset_is_above_first_differ(base):
+    lines = [f"  +0x{o:x}: nop" for o in range(0x10, 0x30)]
+    r, window = window_of(base, lines, 4)
+    expect(window == lines[:7], f"the report's first lines: {window}", r)
+
+
+def test_search_window_is_the_first_lines_when_the_report_has_no_offsets(base):
+    lines = [f"mov eax, {n}" for n in range(20)]
+    r, window = window_of(base, lines, 4)
+    expect(window == lines[:7], f"the report's first lines: {window}", r)
+
+
 def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(base):
     r, out = search(search_project(base), SAME_BYTES)
     expect(out is not None and out["best"] == {"code": "A0", "differ_bytes": 2},
