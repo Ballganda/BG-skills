@@ -4295,7 +4295,7 @@ def test_a_background_search_starts_no_batch_after_its_time(base):
     # A call takes 3 s. The foreground block ends after one; the background search has 1.5 s or so, which end
     # during its first call while its second worker waits for the slot.
     p, starts, ends = timed_batch_project(base, 0, 0.75, 1.5, workers=2, slots=1, reference_s=0, deadline_s=0.5,
-                                          ceiling_s=4.8, background=1)
+                                          ceiling_s=4.8, background=1, probe_cost_frac=100)  # the probes are not under test
     try:
         r, out = search(p, wide(12))
         returned = time.time()
@@ -4348,6 +4348,106 @@ def test_search_drops_a_resolved_compiler_that_changes_the_bytes(base):
     got = probes(p).get("resolved-compiler", {})
     expect(got.get("outcome") == "dropped" and got.get("identical") is False, f"other bytes drop the mode: {got}", r)
     expect(out is not None and out["end"] == "match", f"the round runs: {out}", r)
+
+
+# The cost bound of the batching and resolved-compiler probes. One project holds both adapters and one log of
+# every adapter call, in order: the compiler stamps its objects, so objects differ and the function is hashed.
+STAMPED_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1:4]
+text = open(src).read()
+open(log, "a").write("single" + chr(10))
+time.sleep(0.3)
+open(obj, "w").write(text + chr(10) + "STAMP " + str(time.time_ns()))
+"""
+LOGGED_DIFF_PY = """import hashlib, json, re, sys
+body = "".join(re.sub(r"/[*].*?[*]/|STAMP .*", "", open(sys.argv[1]).read(), flags=re.S).split())
+open(sys.argv[3], "a").write("diff" + chr(10))
+open(sys.argv[2], "w").write("report" + chr(10))
+n = body.count("WRONG")
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+"""
+
+
+def bounded_project(base, per_call=0.3, **limits):
+    """A project with both optional adapters and the probes' block constants `limits`. Returns (project, the adapter log)."""
+    log = Path(base) / "adapters.log"
+    batch = PY + f' "{{tools}}/batch_build.py" "{{objdir}}" "{log.as_posix()}" {per_call} 0 {{sources}}'
+    p = search_project(base, config={"build": PY + f' "{{tools}}/stamped_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+                                     "diff": PY + f' "{{tools}}/logged_diff.py" "{{obj}}" "{{report}}" "{log.as_posix()}"',
+                                     "build_batch": batch,
+                                     "build_resolve": PY + ' "{tools}/resolve.py" "' + log.as_posix() + '"'},
+                       files={"tools/batch_build.py": BATCH_BUILD_PY, "tools/stamped_build.py": STAMPED_BUILD_PY,
+                              "tools/logged_diff.py": LOGGED_DIFF_PY, "tools/resolve.py": RESOLVE_PY,
+                              "tools/direct_build.py": DIRECT_BUILD_PY})
+    tune(p, workers=1, **limits)
+    log.unlink(missing_ok=True)  # less the gate's check
+    return p, lambda: log.read_text().splitlines() if log.exists() else []
+
+
+def test_search_skips_both_probes_for_cost_when_the_bound_is_under_four_builds(base):
+    p, calls = bounded_project(base, ceiling_s=0.4)  # a bound of 0.2 s, a single build takes 0.3 s
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    for name in ("batching", "resolved-compiler"):
+        rec = got.get(name, {})
+        expect(rec.get("outcome") == "skipped" and "cost" in rec.get("reason", "") and rec.get("predicted_s", 0) > rec.get("bound_s", 1),
+               f"the {name} probe is skipped for cost, with the two numbers: {rec}", r)
+    expect(not any(x.startswith(("batch", "resolved")) for x in calls()), f"neither adapter was called: {calls()}", r)
+    expect(out is not None and out["end"] == "match" and out["counts"]["batch"] == 1, f"the block runs unbatched: {out}", r)
+
+
+def test_search_switches_both_probes_off_with_a_cost_share_of_zero(base):
+    p, calls = bounded_project(base, probe_cost_frac=0)
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    expect(got["batching"]["outcome"] == "skipped" and got["resolved-compiler"]["outcome"] == "skipped",
+           f"both probes are skipped: {got}", r)
+    expect(not any(x.startswith(("batch", "resolved")) for x in calls()), f"neither adapter was called: {calls()}", r)
+    expect(out is not None and out["end"] == "match", f"the block runs: {out}", r)
+
+
+def test_search_diffs_one_object_per_batching_size_under_function_hashing(base):
+    p, calls = bounded_project(base)
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    expect(got["batching"]["outcome"] == "kept" and got["batching"]["batch"] == 16 and got["resolved-compiler"]["outcome"] == "eligible",
+           f"a generous bound runs every size and the resolved compiler: {got}", r)
+    lines = calls()
+    last = max(i for i, x in enumerate(lines) if x.startswith("resolved"))
+    probing = lines[:last + 2]  # the resolved compiler's object is diffed right after its last run
+    expect(probing[-1] == "diff" and probing.count("diff") <= 3 + 1 + 1,
+           f"one diff per size (3), one for the single build, one for the resolved compiler's object: {probing}", r)
+    expect(sum(x.startswith("batch") for x in probing) == 3, f"three batch calls: {probing}", r)
+
+
+def test_search_keeps_the_batch_size_it_proved_when_the_next_one_does_not_fit(base):
+    p, calls = bounded_project(base, per_call=1.0, ceiling_s=5)  # a bound of 2.5 s: a batch of 4 fits, then 8 does not
+    r, out = search(p, MATCHING)
+    got = probes(p)["batching"]
+    expect(got["outcome"] == "kept" and got["batch"] == 4 and set(got["sizes_ms"]) == {"4"} and "batch of 8" in got["reason"]
+           and got["predicted_s"] > got["bound_s"], f"the probe keeps 4 and says why it stopped: {got}", r)
+    expect(not any(x in ("batch 8", "batch 16") for x in calls()), f"no larger batch was built: {calls()}", r)
+    expect(probes(p)["resolved-compiler"]["outcome"] == "skipped", f"the resolved compiler no longer fits: {probes(p)}", r)
+
+
+def test_search_refuses_a_misspelt_probe_cost_share(base):
+    p = search_project(base)
+    tune(p, probe_cost_fraction=0.5)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "probe_cost_fraction" in r.stderr and "probe_cost_frac" in r.stderr,
+           "a misspelt override is named with the ones that exist", r)
+
+
+def test_search_does_not_probe_again_for_the_same_text_outside_the_function(base):
+    p, calls = bounded_project(base)
+    search(p, MATCHING)
+    before, records = len(calls()), len(perf_log(p))
+    r, out = search(p, MATCHING)
+    later = calls()[before:]
+    expect(out is not None and not any(x.startswith(("batch", "resolved")) for x in later),
+           f"no probe adapter ran for the second call: {later}", r)
+    expect(not [x for x in perf_log(p)[records:] if x.get("probe") in ("batching", "resolved-compiler")],
+           f"and no probe record was written: {perf_log(p)[records:]}", r)
 
 
 # ---------- template search: self-tuning workers and the reference compile ----------
