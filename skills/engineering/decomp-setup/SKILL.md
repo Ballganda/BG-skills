@@ -28,7 +28,7 @@ Then take one branch:
 
 Before you start the subagent, list the installed compilers, linkers, SDKs, and analysis tools on this machine, each with its version string, and put that list in the brief.
 
-Start a background subagent with a fresh context window. Tell it to call the Skill tool with `decomp-identify`, give it the target path, the project folder, and the list, and have it write `IDENTIFY.md` there. In the brief, say that Python packages and analysis tools are installed by the user, never downloaded by the subagent, and that an installed neighbour version may serve as a partial probe.
+Start a background subagent with a fresh context window, on the models doc's Toolchain identification task (default the Hard model, since it infers the toolchain from evidence). Tell it to call the Skill tool with `decomp-identify`, give it the target path, the project folder, and the list, and have it write `IDENTIFY.md` there. In the brief, say that Python packages and analysis tools are installed by the user, never downloaded by the subagent, and that an installed neighbour version may serve as a partial probe.
 
 While it runs, grill the decisions under the `[independent]` headings of CONTRACT.md. Each heading there is tagged `[needs IDENTIFY]` or `[independent]`: the first kind waits for `IDENTIFY.md`.
 

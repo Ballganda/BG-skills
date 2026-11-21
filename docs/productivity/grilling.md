@@ -72,6 +72,10 @@ No, and a cap is out of scope on purpose. Some plans need three questions and so
 **`grill` ran, but it never loaded `grilling`.**
 This is a real bug, still unfixed, and users report it across harnesses and models. A skill that names another skill does not reliably cause that skill to load, and `grill` names two. The sign is a session that asks everything at once with no recommendations. That means the model is improvising an interview rather than running this one. Asking the agent directly whether it loaded `grilling` and `domain-modeling` usually recovers it.
 
+**Which kind of model does its subagent run on?**
+
+The default: its fact lookups run on the Mechanical model (Haiku by default), because locating a fact is a result the agent can check. They follow the Locating row of the models doc [bg-setup](../engineering/bg-setup.md) writes. Change the row, and every dispatch of that kind follows.
+
 ## It's working if
 
 - A round arrives as a numbered list, each question short, with a one-line recommendation on a separate `➡️` line, and you can answer the whole round by number.

@@ -69,6 +69,10 @@ No. Where the format or linker cannot place raw blocks at fixed offsets or repro
 
 If its code is the same, the contract can accept it as another edition, recognised by hashes of chosen byte ranges. Any function it holds differently is listed, and those tickets can't be verified on that edition. An edition known to be wrong gets a message instead, telling whoever holds it what to do. Adding either one later is a contract change.
 
+**Which kind of model does its subagent run on?**
+
+The default: the identify subagent runs on the Hard model (the top model by default), because inferring a toolchain from evidence is a judgment the whole project depends on. It follows the Toolchain identification row of the models doc [bg-setup](./bg-setup.md) writes. Change the row, and every dispatch of that kind follows.
+
 ## It's working if
 
 - No source is written during setup, and the run ends by telling you to run `/decomp-start`.

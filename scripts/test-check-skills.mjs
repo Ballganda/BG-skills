@@ -355,3 +355,68 @@ test("fails when the README links upstream outside its credit line", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /README\.md:\d+: upstream pointer/);
 });
+
+// Dispatch check: a paragraph or list item holding "fresh context window" must name a models doc task.
+const dispatchFile = "engineering/research/SKILL.md";
+const withDispatch = (text, { linked = false } = {}) =>
+  withCopy((dir) => {
+    const skill = join(dir, "skills", dispatchFile);
+    const body = readFileSync(skill, "utf8").replace(/\r?\n$/, "");
+    if (!linked) return writeFileSync(skill, `${body}\n\n${text}\n`);
+    writeFileSync(skill, `${body}\n\nSee [the notes](./NOTES.md).\n`);
+    writeFileSync(join(dir, "skills", "engineering", "research", "NOTES.md"), `# Notes\n\nFirst line.\n\n${text}\n`);
+  });
+
+test("a dispatch naming a models doc task passes", () => {
+  const r = withDispatch("Start a subagent with a fresh context window, on the models doc's Research task (default the Standard model).");
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test("a dispatch naming no models doc task fails with its file and line", () => {
+  const r = withDispatch("Start a subagent with a fresh context window.");
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /engineering\/research\/SKILL\.md:\d+: dispatch names no models doc task/);
+  const line = Number(r.stderr.match(/SKILL\.md:(\d+): dispatch names/)[1]);
+  const text = readFileSync(join(repo, "skills", dispatchFile), "utf8").replace(/\r?\n$/, "");
+  assert.equal(line, text.split("\n").length + 2);
+});
+
+test("a list item naming no task fails even when the list's other item names one", () => {
+  const r = withDispatch(
+    "- Start A with a fresh context window, on the models doc's Design task.\n- Start B with a fresh context window.",
+  );
+  assert.notEqual(r.status, 0);
+  assert.equal((r.stderr.match(/dispatch names no models doc task/g) ?? []).length, 1, r.stderr);
+});
+
+test("a dispatch in a linked reference file is found", () => {
+  const r = withDispatch("Start a subagent with a fresh context window.", { linked: true });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /engineering\/research\/NOTES\.md:5: dispatch names no models doc task/);
+});
+
+test("a linked reference file's dispatch that names a task passes", () => {
+  const r = withDispatch("Start one with a fresh context window, on the models doc's Locating task.", { linked: true });
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test("the writing rule sentence passes", () => {
+  const r = withDispatch(
+    "A skill that dispatches a subagent says to start it with a fresh context window: some harnesses fork by default.",
+  );
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test("the implement role table intro passes and fails without the table after it", () => {
+  const intro = "Start every subagent by **role**, with a fresh context window, on the model this table picks:";
+  const ok = withDispatch(`${intro}\n\n| Role | Agent | Model |\n| --- | --- | --- |\n| Implementer | \`implementer\` | the Ticket's tier model |`);
+  assert.equal(ok.status, 0, ok.stderr);
+  const bad = withDispatch(intro);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /dispatch names no models doc task/);
+});
+
+test("an implementer dispatch on its ticket's tier model passes", () => {
+  const r = withDispatch("Start an implementer with a fresh context window, on the Ticket's tier model.");
+  assert.equal(r.status, 0, r.stderr);
+});

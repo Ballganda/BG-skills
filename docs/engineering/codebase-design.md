@@ -77,6 +77,10 @@ It does now, but for a long time it did not. v1.0 removed the inline deep-module
 
 None of them is in the shipped glossary. Parnas's module secrets and Page-Jones's connascence would name *what* is leaking across a seam; progressive disclosure would add structure inside a module that is already deep at its public interface. The skill tells the agent to use its own terms exactly, so adding one means editing the skill. The shipped glossary is small on purpose, and the skill itself gives the reason: consistent language is the whole point, and a term nobody uses consistently is worse than no term.
 
+**Which kind of model does its subagent run on?**
+
+The default: the Design It Twice subagents run on the Hard model (the top model by default), because the interface they produce is a judgment that decisions depend on. They follow the Design row of the models doc [bg-setup](./bg-setup.md) writes. Change the row, and every dispatch of that kind follows.
+
 ## It's working if
 
 - The design conversation stops producing the words "component", "service" and "boundary", and starts producing "module", "interface" and "seam".

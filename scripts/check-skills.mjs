@@ -5,7 +5,7 @@
 // `ctx.fail(message)` for each problem.
 
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Set by main(): importing this file runs nothing.
@@ -404,7 +404,99 @@ function checkUpstreamPointers({ fail }) {
   }
 }
 
+// The writing rule makes every subagent dispatch say it starts with a fresh context window, so that
+// phrase marks a dispatch. A paragraph or list item of a skill file, or of a file it links, that holds
+// the phrase must also name the models doc task it runs under ("the models doc's <Task> task"), so
+// no subagent silently inherits its caller's model. Task names are the rows of bg-setup/models.md.
+const dispatchPhrase = "fresh context window";
+const modelsDocTasks = [
+  "Exploration",
+  "Locating",
+  "Research",
+  "Interpreting exploration",
+  "Design",
+  "Toolchain identification",
+  "Reference repair",
+  "Merging",
+  "Standards review",
+  "Spec review",
+];
+const namesTask = new RegExp(`models doc's (?:${modelsDocTasks.join("|")})\\b`);
+
+// Recognised exceptions, each narrow:
+// - implementer dispatches run on the Ticket's tier model, which implement's role table states;
+// - the sentence that states the writing rule itself (CLAUDE.md's wording);
+// - "a single fresh context window", which sizes a slice and dispatches nothing;
+// - the paragraph that introduces implement's role table, which names each role's model.
+const tierModel = /\btier(?:'s)? model\b/;
+const writingRule = /^A skill that dispatches a subagent says to start it with a fresh context window/;
+const sizingPhrase = /\ba single fresh context window\b/;
+const roleTableHeader = /^\| Role \| Agent \| Model \|/;
+
+// Paragraphs and list items of a Markdown text, each with its 1-based first line.
+function dispatchBlocks(text) {
+  const blocks = [];
+  let current = null;
+  const flush = () => {
+    if (current) blocks.push(current);
+    current = null;
+  };
+  text.split(/\r?\n/).forEach((line, i) => {
+    if (!line.trim()) return flush();
+    if (/^\s*([-*]|\d+\.)\s/.test(line)) flush();
+    if (current) current.text += `\n${line}`;
+    else current = { line: i + 1, text: line };
+  });
+  flush();
+  return blocks;
+}
+
+const linkedMarkdown = /\]\(([^)#\s]+\.md)(?:#[^)]*)?\)/g;
+
+// SKILL.md files and every Markdown file they link inside skills/, followed transitively.
+function dispatchFiles(skills) {
+  const skillsDir = join(root, "skills");
+  const seen = new Set();
+  const queue = skills.map(({ dir }) => join(skillsDir, dir, "SKILL.md"));
+  const files = [];
+  while (queue.length) {
+    const path = queue.shift();
+    if (seen.has(path)) continue;
+    seen.add(path);
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    files.push({ path, text });
+    for (const [, target] of text.matchAll(linkedMarkdown)) {
+      if (/^[a-z]+:/i.test(target)) continue;
+      const linked = resolve(dirname(path), target);
+      if (relative(skillsDir, linked).startsWith("..")) continue;
+      queue.push(linked);
+    }
+  }
+  return files;
+}
+
+function checkDispatchNamesTask({ fail, skills }) {
+  for (const { path, text } of dispatchFiles(skills)) {
+    const rel = relative(root, path).replaceAll("\\", "/").replace(/^skills\//, "");
+    const blocks = dispatchBlocks(text);
+    blocks.forEach(({ line, text: block }, i) => {
+      if (!block.includes(dispatchPhrase)) return;
+      const bare = block.replace(/^\s*([-*]|\d+\.)\s+/, "");
+      if (namesTask.test(block) || tierModel.test(block)) return;
+      if (writingRule.test(bare) || sizingPhrase.test(block)) return;
+      if (roleTableHeader.test(blocks[i + 1]?.text ?? "")) return;
+      fail(`${rel}:${line}: dispatch names no models doc task; name the models doc's task and its default model`);
+    });
+  }
+}
+
 const checks = [
+  checkDispatchNamesTask,
   checkBoundaryLines,
   checkDecompRequiredLines,
   checkLayoutLineLength,

@@ -28,6 +28,10 @@ that deadline, and then its name says so. Assert an exhaustive result only on a 
 small enough to finish many times over: wide(n) has 2**n candidates. Set the time a
 round is given, never inherit it from the seconds since the last round: call
 forget_latency(p) before the next round.
+
+A case's scratch project is built once, when the case creates it. Many cases assert on the exact
+shape of a log or summary line, so a change to a field of one needs a search of the suite for the
+old shape first.
 """
 import ast
 import hashlib
@@ -121,12 +125,16 @@ def ticket_text(tid, address, source, status):
 class Project:
     """A scratch decomp project: committed, tagged decomp-setup, with one ticket."""
 
+    made = []  # the projects of the running case: the runner empties it before each case
+
     def __init__(self, base, manifest=None, config=None, source=CLEAN, headers=None,
                  status="open", target=RETAIL, installed=("compiler",), files=None):
         self.base = Path(base)
         self.root = self.base / "proj"
         self.tmp = self.base / "tmp"
         self.tmp.mkdir()
+        self.planted = []  # paths under tmp that the case made itself (see temp_left)
+        Project.made.append(self)
         self.target = self.base / "target.bin"
         self.target.write_bytes(target)
         cfg = {"integration_branch": "main", "build": BUILD, "diff": DIFF, "pragma_allow": [], "banned": [],
@@ -249,6 +257,12 @@ class Project:
 
     def lock_file(self, name):
         return self.root / ".decomp" / "locks" / f"{name}.lock"
+
+    def temp_left(self):
+        """What is left in the temp folder the tool was given: every path under it but those the case planted."""
+        own = [Path(x) for x in self.planted]
+        return sorted(e.relative_to(self.tmp).as_posix() for e in self.tmp.rglob("*")
+                      if not any(e == o or e in o.parents or o in e.parents for o in own))
 
     def check(self, **kw):
         """Run `check` and return (process, parsed result line or None)."""
@@ -1261,6 +1275,13 @@ def test_tool_output_in_another_encoding_does_not_lose_the_result(base):
     expect_match(Project(base, config={"diff": diff}))
 
 
+def test_a_project_module_named_dis_does_not_stop_the_tool_from_starting(base):
+    p = Project(base, files={"tools/dis.py": "raise ImportError('the project dis module was imported')\n"})
+    p.write("DECOMP.md", "# contract\n- Fakematch rule: `forbidden`\n- Template search: allowed\n")
+    r = p.run("contract-keys")
+    expect(r.returncode == 0, "the tool should start beside a project module named dis", r)
+
+
 # ---- inventory and disasm through the project tool ----
 
 # The fake adapters record what they received: the inventory in the file it writes,
@@ -1268,9 +1289,9 @@ def test_tool_output_in_another_encoding_does_not_lose_the_result(base):
 RECEIVED = ("import json, os, sys\n"
             "got = {'argv': sys.argv[1:], 'env': {k: v for k, v in os.environ.items() if k.startswith('DECOMP_T')}}\n")
 ADAPTERS = {"tools/inv.py": RECEIVED + "json.dump(got, open('inventory.json', 'w'))\n",
-            "tools/dis.py": RECEIVED + "print(json.dumps(got))\n"}
+            "tools/disasm.py": RECEIVED + "print(json.dumps(got))\n"}
 ADAPTER_CMDS = {"inventory": '"{python}" "{tools}/inv.py"',
-                "disasm": '"{python}" "{tools}/dis.py" "{expected}" "{address}"'}
+                "disasm": '"{python}" "{tools}/disasm.py" "{expected}" "{address}"'}
 
 
 def adapter_project(base, config=None, **kw):
@@ -2067,7 +2088,7 @@ def test_search_returns_the_matching_combination_and_a_plain_winner(base):
     expect(out["end"] == "match" and out["best"] == {"code": "A1 B2", "differ_bytes": 0},
            "the summary should name the matching choices", r)
     winner = Path(out["winner"])
-    expect(p.root.resolve() not in winner.resolve().parents, "the winner is written outside the tree", r)
+    expect(in_state_folder(p, winner), f"the winner is kept in the project's state folder: {winner}", r)
     expect(winner.read_text() == MARK + "int f(void) { int right_a; int right_b; return 1; }\n",
            f"the winner should be plain C: {winner.read_text()!r}", r)
 
@@ -4911,6 +4932,229 @@ def test_search_counts_the_seconds_it_spent_collecting_a_background_search(base)
         stop_background(p)
 
 
+# ---------- temp folders ----------
+
+# A fake compiler that also writes down where it ran and the object and report paths it was given.
+SEEN_BUILD_PY = """import json, os, sys
+src, obj, report, log = sys.argv[1:5]
+open(log, "a").write(json.dumps([os.getcwd(), obj, report]) + chr(10))
+open(obj, "w").write(open(src).read())
+"""
+# A fake diff that reports a match once another process holds the object open. That process lets go
+# when a file named `drop` appears in the folder it was given, or after a minute.
+HOLD_PY = """import os, sys, time
+obj, folder = sys.argv[1:3]
+held = open(obj)
+open(os.path.join(folder, "held"), "w").close()
+end = time.time() + 60
+while time.time() < end and not os.path.exists(os.path.join(folder, "drop")):
+    time.sleep(0.05)
+"""
+HOLD_DIFF_PY = """import json, os, subprocess, sys, time
+obj, folder, holder = sys.argv[1:4]
+none = subprocess.DEVNULL
+subprocess.Popen([sys.executable, holder, obj, folder], stdin=none, stdout=none, stderr=none)
+end = time.time() + 30
+while time.time() < end and not os.path.exists(os.path.join(folder, "held")):
+    time.sleep(0.05)
+print(json.dumps(dict(match=True, differ_bytes=0)))
+"""
+# A fake gh that is logged in, writes down each body file it is given, and answers a new issue with its address.
+GH_PY = """import os, sys
+args = sys.argv[2:]
+if "--body-file" in args:
+    body = args[args.index("--body-file") + 1]
+    open(sys.argv[1], "a").write("%s %s%s" % (int(os.path.isfile(body)), body, chr(10)))
+if args[:2] == ["issue", "create"]:
+    print("https://github.com/o/r/issues/7")
+"""
+
+
+def expect_no_temp_left():
+    """The shared assertion, made by the runner after every case: no project of the case holds, in the
+    temp folder its tool runs were given, anything but what the case planted there."""
+    for p in Project.made:
+        left = p.temp_left()
+        expect(not left, f"the tool left {len(left)} paths in the temp folder: {left[:6]}")
+
+
+def in_state_folder(p, path):
+    return Path(path).is_file() and (p.root / ".decomp").resolve() in Path(path).resolve().parents
+
+
+def seen_project(base, **kw):
+    """A project whose fake compiler writes down the paths it was given. Returns (project, a reader of them)."""
+    log = Path(base) / "seen.jsonl"
+    build = PY + f' "{{tools}}/seen_build.py" "{{source}}" "{{obj}}" "{{report}}" "{log.as_posix()}"'
+    p = Project(base, config={"build": build}, files={"tools/seen_build.py": SEEN_BUILD_PY}, **kw)
+    return p, lambda: [json.loads(x) for x in log.read_text().splitlines()]
+
+
+def temp_parent(p, seen):
+    """The one folder that holds the tool's temp folders, read from where a `check` put its object."""
+    expect(p.run("check", TID).returncode == 0, "check should run")
+    return Path(seen()[-1][1]).parent.parent
+
+
+def worktrees(p):
+    return [l for l in p.git("worktree", "list", "--porcelain").splitlines() if l.startswith("worktree ")]
+
+
+def test_check_leaves_no_temp_folder_and_keeps_its_report_in_the_state_folder(base):
+    ends = [("bytes-match", {}), ("differ", {"source": MARK + "int f(void) { return 2; }\n"}),
+            ("build-fail", {"config": {"build": PY + ' -c "import sys;sys.exit(1)"'}}),
+            ("guardrail", {"source": CLEAN + "void g(void) { __asm nop }\n"})]
+    for d, (result, kw) in each(base, ends):
+        p = Project(d, **kw)
+        r, out = p.check()
+        expect(out is not None and out["result"] == result, f"check should end as {result}", r)
+        expect(not p.temp_left(), f"{result}: the temp folder should hold nothing: {p.temp_left()}", r)
+        expect(in_state_folder(p, out["report"]), f"{result}: the report path should exist in the state folder", r)
+
+
+def test_a_second_check_leaves_one_report_and_release_removes_it_with_the_winner(base):
+    p = Project(sub(base, "plain"))
+    r, first = expect_match(p)
+    r, second = expect_match(p)
+    report = Path(second["report"])
+    expect(first["report"] == second["report"], "a ticket's report path is reused", r)
+    expect([x.name for x in report.parent.iterdir()] == [report.name], "one report is left, not two", r)
+    expect(report.read_text().count("symbols=") == 1, f"the second check replaces the report: {report.read_text()!r}", r)
+    p = search_project(sub(base, "search"), status="claimed")
+    r = p.run("check", TID, "--category", "register-allocation")
+    report = Path(json.loads(r.stdout.splitlines()[0])["report"])
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match", "the search should match", r)
+    winner = Path(out["winner"])
+    expect(in_state_folder(p, report) and in_state_folder(p, winner), "the report and the winner are kept", r)
+    r = p.run("release", TID)
+    expect(r.returncode == 0, "release should pass", r)
+    expect(not report.exists() and not winner.exists(), "release removes the ticket's report and winning source", r)
+
+
+def test_every_temp_folder_sits_under_one_parent_named_for_the_tool_and_the_project(base):
+    p, seen = seen_project(base, source=MARK + "int f(void) { return 2; }\n")
+    r = p.run("check", TID, "--category", "register-allocation")
+    expect(r.returncode == 0, "check should run", r)
+    r, out = search(p, MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int right_a; /* MATCH */) return 1; }\n")
+    expect(out is not None and out["end"] == "match", "the search should match", r)
+    p.advance("integrated")  # verify builds in a temp worktree
+    r = p.run("revalidate")  # so does revalidate, with its report in a temp folder
+    expect(r.returncode == 0, "revalidate should pass", r)
+    inside = [Path(x) for line in seen() for x in line if x and p.tmp in Path(x).parents]
+    parents = {x.relative_to(p.tmp).parts[0] for x in inside}
+    kinds = {x.relative_to(p.tmp).parts[1].split("-")[0] for x in inside}
+    expect(len(parents) == 1, f"every temp path should be under one parent: {sorted(parents)}")
+    expect(len(kinds) >= 4, f"the paths seen should cover objects, a search, worktrees and a report: {sorted(kinds)}")
+    name = parents.pop()
+    expect(name.startswith("decomp-") and p.root.name in name, f"the parent is named for the tool and the project: {name}")
+
+
+def test_revalidate_over_several_matched_tickets_leaves_no_temp_folder(base):
+    third = "u0003-00403000"
+    files = dict(second_ticket(), **{"src/u0003.c": f"// @decomp {third}\nint h(void) {{ return 3; }} /* MATCH */\n",
+                                     f"tickets/u0003/{third}.md": ticket_text(third, "0x00403000", "src/u0003.c", "integrated")})
+    p = Project(base, status="integrated", files=files)
+    r = p.run("revalidate")
+    expect(r.returncode == 0 and "revalidated 3 on main: 0 regressed" in r.stdout, "three tickets should be rebuilt", r)
+    expect(not p.temp_left(), f"the temp folder should hold nothing: {p.temp_left()}", r)
+
+
+def test_sync_removes_each_body_file_after_the_call_that_used_it(base):
+    bin_dir, log = Path(base) / "fake-bin", Path(base) / "gh.log"
+    bin_dir.mkdir()
+    (bin_dir / "gh.py").write_text(GH_PY)
+    if os.name == "nt":
+        (bin_dir / "gh.cmd").write_text(f'@echo off\r\n{PY} "{bin_dir / "gh.py"}" "{log}" %*\r\n')
+    else:
+        (bin_dir / "gh").write_text(f'#!/bin/sh\nexec {PY} "{bin_dir / "gh.py"}" "{log}" "$@"\n')
+        (bin_dir / "gh").chmod(0o755)
+    p = gh_project(base)
+    r = p.run("sync", env={"PATH": hermetic_path(base, bin_dir)})
+    expect(r.returncode == 0 and "synced 1 unit issues" in r.stdout, "sync should mirror the unit and the progress", r)
+    bodies = [line.split(" ", 1) for line in log.read_text().splitlines()]
+    expect(len(bodies) == 2 and all(there == "1" for there, _ in bodies), f"gh should be given two body files: {bodies}", r)
+    expect(all(p.tmp in Path(body).parents for _, body in bodies), f"each body is in the temp folder: {bodies}", r)
+    expect(not p.temp_left(), f"the temp folder should hold nothing: {p.temp_left()}", r)
+
+
+def test_a_temp_entry_two_days_old_is_swept_by_any_command_and_a_new_one_stays(base):
+    p, seen = seen_project(base)
+    parent = temp_parent(p, seen)
+    expect(not parent.exists(), "a command that leaves nothing removes the parent too")
+    old, new, tree = parent / "obj-old", parent / "obj-new", parent / "wt-old"
+    p.planted.append(new)
+    for folder in (old, new):
+        folder.mkdir(parents=True)
+        (folder / "u0001.obj").write_text("x")
+    (parent / "old-file").write_text("x")
+    p.git("worktree", "add", "-q", "--detach", str(tree), "main")  # as a killed command leaves one
+    then = time.time() - 2 * 86400
+    for entry in (old, tree, parent / "old-file"):
+        os.utime(entry, (then, then))
+    r = p.run("next")
+    expect(r.returncode == 0, "next should run", r)
+    expect(not old.exists() and not tree.exists() and not (parent / "old-file").exists(),
+           f"entries two days old should be gone: {p.temp_left()}", r)
+    expect((new / "u0001.obj").exists(), "an entry dated now may belong to a running command, and stays", r)
+    expect(len(worktrees(p)) == 1, f"a swept worktree leaves git's list too: {worktrees(p)}", r)
+
+
+def test_a_file_held_open_in_the_object_folder_does_not_fail_check(base):
+    folder = Path(base) / "hold"
+    folder.mkdir()
+    diff = PY + f' "{{tools}}/hold_diff.py" "{{obj}}" "{folder.as_posix()}" "{{tools}}/hold.py"'
+    p = Project(base, config={"diff": diff}, files={"tools/hold_diff.py": HOLD_DIFF_PY, "tools/hold.py": HOLD_PY})
+    try:
+        r, out = p.check()
+        expect((folder / "held").exists(), "the object should be held open while check ends", r)
+        expect(r.returncode == 0 and out is not None and out["result"] == "bytes-match" and "Traceback" not in r.all,
+               "check should end as it would with no file held", r)
+        if os.name == "nt":  # elsewhere an open file does not stop its removal
+            expect(any(x.endswith(".obj") for x in p.temp_left()),
+                   f"the held object stays, left to the sweep: {p.temp_left()}", r)
+    finally:
+        (folder / "drop").write_text("")
+
+    def cleared():  # the sweep would take the folder a day later: the case takes it away itself
+        for entry in p.tmp.iterdir():
+            shutil.rmtree(entry, ignore_errors=True)
+        return not p.temp_left()
+    expect(wait_for(cleared), f"the holder should let go: {p.temp_left()}")
+
+
+def test_a_temp_worktree_leaves_gits_list_also_when_the_command_ends_by_an_error(base):
+    p = started_project(base)
+    r = p.run("revalidate")
+    expect(r.returncode == 0 and len(worktrees(p)) == 1, f"revalidate leaves no worktree listed: {worktrees(p)}", r)
+    p.git("checkout", "-q", "-b", "c/bare", "main")
+    p.git("rm", "-q", "tools/decomp.py")
+    p.git("commit", "-q", "-m", "c/bare")
+    p.git("checkout", "-q", "main")
+    r = p.run("revalidate", "--candidate", "c/bare")
+    expect(r.returncode == 2 and "holds no tools/decomp.py" in r.stderr, "the candidate should be refused in its worktree", r)
+    expect(len(worktrees(p)) == 1 and not p.temp_left(),
+           f"an error exit leaves no worktree listed or on disk: {worktrees(p)} {p.temp_left()}", r)
+    p.branch("c/diff", {"decomp.json": config_with(p, build=PY + ' -c "import sys;sys.exit(1)"')})
+    r = p.run("revalidate", "--candidate", "c/diff")
+    expect(r.returncode == 5 and len(worktrees(p)) == 1, f"nor does a run that regressed: {worktrees(p)}", r)
+
+
+def test_a_background_search_keeps_its_scratch_under_the_temp_parent_until_it_is_stopped(base):
+    p = background_project(base)
+    r, out = search(p, wide(8))
+    try:
+        expect(wait_for(lambda: background_tried(p) >= 1), "the background search should build candidates", r)
+        scratch = Path(json.loads((background_folder(p) / "run.json").read_text())["scratch"])
+        expect(scratch.is_dir() and scratch.parent.parent == p.tmp and scratch.parent.name.startswith("decomp-"),
+               f"its scratch folder is under the temp parent: {scratch}")
+        expect(all(x.startswith(scratch.relative_to(p.tmp).as_posix()) or x == scratch.parent.name for x in p.temp_left()),
+               f"everything it makes is under its scratch folder: {p.temp_left()}")
+    finally:
+        stop_background(p)
+    expect(not p.temp_left(), f"stopping it removes its scratch folder: {p.temp_left()}")
+
+
 def test_a_case_receives_its_scratch_folder_in_resolved_form(base):
     expect(base == str(Path(base).resolve()), f"the scratch folder {base} differs from its resolved form {Path(base).resolve()}")
 
@@ -5010,7 +5254,9 @@ def main(argv=None, namespace=None, source=None):
     for name in names:
         base = str(Path(tempfile.mkdtemp(prefix="decomp-test-")).resolve())
         try:
+            Project.made.clear()
             namespace[name](base)
+            expect_no_temp_left()
             say(f"PASS {name}")
         except Exception as e:  # a crash in one case must not hide the others
             failed += 1
