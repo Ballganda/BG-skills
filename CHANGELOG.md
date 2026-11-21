@@ -1,5 +1,342 @@
 # bg-skills
 
+## 2.0.0
+
+### Major Changes
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`9b21514`](https://github.com/Ballganda/BG-skills/commit/9b21514a400700513ffb4a4d15051205c07cace9) Thanks [@Ballganda](https://github.com/Ballganda)! - The plugin is now `bg-skills`, a fork of mattpocock/skills, and four skills are renamed to nouns: `to-spec` is `spec-gen`, `to-tickets` is `ticket-gen`, `setup-matt-pocock-skills` is `bg-setup`, and `ask-matt` is `skill-map`. Claude Code installs from this repo's own marketplace instead of `claude-plugins-official`: see [Installation](https://github.com/Ballganda/BG-skills#installation-30-second-setup) in the README. Docs live in the repo with relative links; nothing is published to a website.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`a47a8e7`](https://github.com/Ballganda/BG-skills/commit/a47a8e72263ba4d1d819736627f6a9629ba6120f) Thanks [@Ballganda](https://github.com/Ballganda)! - `grill-with-docs` is renamed to `grill`, the standard entry point of the build chain: `grill → spec-gen → ticket-gen → implement → code-review`. Behaviour is unchanged. Type `/grill` where you used to type `/grill-with-docs`.
+
+### Minor Changes
+
+- [`2ac956c`](https://github.com/Ballganda/BG-skills/commit/2ac956c190d9da845a1b5107a299dd3133cf6520) Thanks [@Ballganda](https://github.com/Ballganda)! - `retro` is now model-invoked, in its frontmatter and its Codex metadata, with a model-facing description. `implement` calls it at the end of a run when at least one implementer reported a lesson, passing the lesson lines; retro works from those lines and the files they point to, without reading session logs, and a run with no lessons skips it. `diagnosing-bugs` calls it in the live session once a fix lands. Called by either skill, retro only lists suggestions in the final report and changes nothing. Typing `/retro` works as before. The skill map describes the automatic retro, and the static check fails if retro's frontmatter and Codex metadata stop agreeing that it is model-invoked.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`c6a2212`](https://github.com/Ballganda/BG-skills/commit/c6a22124e693186ea49780f11249628635e36095) Thanks [@Ballganda](https://github.com/Ballganda)! - `bg-setup` writes a leaner `## Agent skills` block: a list of up to three pointers (`- Issue tracker:`, `- Triage labels:`, `- Domain docs:`) instead of three `###` sections, and only the tracker line carries a summary (host and repo). On a re-run, setup rewrites only the lines with those prefixes, lists any other lines in the block, and asks "Keep these N lines you added?" Kept lines stay unchanged in their own paragraph below the list. An older `###`-style block is converted to the list. No marker comments are added.
+
+- [#97](https://github.com/Ballganda/BG-skills/pull/97) [`ef20364`](https://github.com/Ballganda/BG-skills/commit/ef20364dcbaae4459e13228bd4c9ab8a9ff1c282) Thanks [@Ballganda](https://github.com/Ballganda)! - `bg-setup` writes a `- Replies:` line into the `## Agent skills` block, a rule that shapes every reply to the user: an "Understood:" line, the outcome in one sentence, then bullets of one fact each, with each offer of further work and each of two or more decisions as a numbered item carrying a recommendation. Repos that are already set up get the rule by re-running `/bg-setup`, which adds the line when it is missing and asks before rewriting an edited one.
+
+- [`f9240e3`](https://github.com/Ballganda/BG-skills/commit/f9240e3085d038b1311cdba9d574a1da9831f674) Thanks [@Ballganda](https://github.com/Ballganda)! - `code-review` keeps its smell list in `SMELLS.md` and hands the Standards reviewer its path instead of pasting it. Both axes run as the `reviewer` role with a fresh context window, on the Standards review and Spec review models from `docs/agents/models.md` (Sonnet and the top model by default). Each reviewer reports one line per finding, `hard or judgement | location | rule or spec line | finding`, in place of the old word limits, and the two axes are still reported under separate headings. The static check fails if `code-review` instructs pasting the smell list, drops the finding format, or brings back a word limit.
+
+- [`6e1fc34`](https://github.com/Ballganda/BG-skills/commit/6e1fc344e669d0b36617dc71fb96795803d6909d) Thanks [@Ballganda](https://github.com/Ballganda)! - Each creation-flow skill now ends its closing message with one line about the next step: `/grill` says to stay in the session for `/spec-gen`, `/spec-gen` says to clear or start a new chat before `/ticket-gen` if your context is over 150k, and `/ticket-gen` and `/implement` say to always start a new chat before `/implement` and `/code-review`. The skill map's context advice matches, and the skill map and README name `/grill` as where the creation flow starts. A new `npm run check-skills` static check keeps the boundary lines from drifting.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`76abc55`](https://github.com/Ballganda/BG-skills/commit/76abc5510ba1c06378c7bd8899c19c9f3789d6bc) Thanks [@Ballganda](https://github.com/Ballganda)! - `grill` now ends with one closing question that is also the hand-off: shared understanding reached, ready to turn it into a spec? Type `/spec-gen` when ready. It then waits for you to type it. During the session it writes only `GLOSSARY.md` and ADRs, never invokes `spec-gen`, `ticket-gen`, or `implement`, and answers a mid-session "just build it" with the closing question.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`dcc2710`](https://github.com/Ballganda/BG-skills/commit/dcc27108367d2487532483583120443a2dbf8dcb) Thanks [@Ballganda](https://github.com/Ballganda)! - `grilling` now ends with one explicit closing confirmation, asked as its own question once the frontier is empty. Answers to a round ("yes", "agree all") never end the session; the agent asks the next round instead. Every skill built on it (`grill-me`, `grill`, `triage`, `wayfinder`, `improve-codebase-architecture`) gets the stricter rule.
+
+- [`cc8d31c`](https://github.com/Ballganda/BG-skills/commit/cc8d31c949ec2f00d84a131b80e19c46331aabd2) Thanks [@Ballganda](https://github.com/Ballganda)! - `implement` now drives a bundled Python 3 script for the mechanical steps of a ticket run: integration branch, readiness, worktrees, testing, merging, recording failures, and cleanup, each one command with a one-line result. The skill gets shorter, and a run can resume in a new chat from `status`. Readiness is read from local and GitHub trackers; on other trackers the orchestrator computes it and passes ticket ids to `start`. Without Python 3 the skill tells you to install it and stops. Work described in chat does not use the script.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`9b21514`](https://github.com/Ballganda/BG-skills/commit/9b21514a400700513ffb4a4d15051205c07cace9) Thanks [@Ballganda](https://github.com/Ballganda)! - `implement` now always runs as an orchestrator, even for a single ticket: it never implements in its own context, and hands every unit of work to an implementer subagent started with a fresh context window. It takes a Ticket batch (a label or milestone, the next N ready tickets, or both; default next 1), runs up to 3 implementers at once on one integration branch, merges clean branches itself, and suggests `code-review` rather than running it. Work described in chat with no tickets is a batch of one, handed to a single implementer. `implement-spec` is removed and folded into `implement`; its docs page stays, marked archived.
+
+- [#215](https://github.com/Ballganda/BG-skills/pull/215) [`ffc0499`](https://github.com/Ballganda/BG-skills/commit/ffc04990648bfbf34a99d719bf5c7d505f482929) Thanks [@Ballganda](https://github.com/Ballganda)! - A pull request closes only its spec. `implement` closes each ticket as it merges into the integration branch, with a comment naming the branch and the merge commit, lists the tickets in the draft PR body without closing keywords, updates an open PR for a review-fix batch, and marks the PR ready only when every sub-issue of the spec is closed. `ticket-gen` makes tickets from a review of an open PR sub-issues of that PR's spec. The `bg-setup` tracker templates and this repo's tracker doc gain a Closing work section, and `pr` follows it.
+
+- [`38a03b8`](https://github.com/Ballganda/BG-skills/commit/38a03b8f38d562084aff64a3ae1d0552bda283f7) Thanks [@Ballganda](https://github.com/Ballganda)! - Graduate the **decomp skills** out of `in-progress/` into the **Engineering** bucket, so they ship in the plugin ([#100](https://github.com/Ballganda/BG-skills/issues/100)). The flow `decomp-setup` → `decomp-start` → `decomp-run` is user-invoked; `decomp-identify`, `decomp-spec-gen`, `decomp-ticket-gen`, `decomp-match`, `decomp-reference`, and `decomp-standards` are model-invoked. Each has a docs page under `docs/engineering/`, and `skill-map` routes to the decompilation flow.
+
+- [`d8823bd`](https://github.com/Ballganda/BG-skills/commit/d8823bd6ea7a8346098a55fff52cc348427ea1e3) Thanks [@Ballganda](https://github.com/Ballganda)! - The plugin ships four restricted agents (`implementer`, `explorer`, `reviewer`, `merger`), each with a default model and only the tools its role needs. `implement` starts each subagent by role with a fresh context window and overrides its model from `docs/agents/models.md`: the implementer gets its ticket's tier model (no tier means Standard; no models doc means the defaults). A failed ticket is retried once on the next tier's model, then reported; a failed Hard ticket is not retried. Subagents report in fixed one-line formats instead of a word limit, the implementer's with an optional lesson field, and you can ask the orchestrator to explain any report in plain language. Harnesses without agent definitions get the same roles through a general subagent. The static check fails if an agent loses its model or tool list, or `implement` loses a report format.
+
+- [`35da757`](https://github.com/Ballganda/BG-skills/commit/35da75706d51c2ad8313534ebc067b8cf4be77cd) Thanks [@Ballganda](https://github.com/Ballganda)! - `ticket-gen` assigns each ticket a tier (Mechanical, Standard, Hard) while drafting, shows it in the quiz where you can change it, and writes it into both ticket templates. `bg-setup` asks which model serves each tier (defaults Haiku, Sonnet, top model) and each subagent task (exploration, merging, Standards review, Spec review), offers the harness's smallest, middle and largest models elsewhere, writes `docs/agents/models.md`, and points to it from the `## Agent skills` block. The static check fails if either template loses its tier field or `bg-setup` stops writing the models doc.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`4421652`](https://github.com/Ballganda/BG-skills/commit/4421652993435557764441b6559b214c65f23241) Thanks [@Ballganda](https://github.com/Ballganda)! - Cut token usage in the core workflow skills. `improve-codebase-architecture` drops its Tailwind/Mermaid HTML report for an ID'd markdown candidate list (with a Test seam field) that carries straight into `/spec-gen`. `implement` now works one Ticket batch per run (a label, the next N ready tickets, or both; default next 1), caps implementers at 3, merges clean branches itself, and no longer runs `code-review`: review is its own stage. `spec-gen` writes one user story per distinct behaviour, drops the generic good-test boilerplate, omits empty sections, and explores only the modules it touches. `code-review` checks a fixed list of standards files instead of searching the repo, verifies the diff with `--stat` only, and passes the spec to its sub-agent by reference. `ticket-gen` skips refetching a spec written in the same session, explores only touched modules, compresses its wide-refactor rule and templates, and requires acceptance criteria to be testable checks that never restate What to build.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`dd1b585`](https://github.com/Ballganda/BG-skills/commit/dd1b585d3fb813bf2b3b2d3f0789a4e5d7508cd8) Thanks [@Ballganda](https://github.com/Ballganda)! - `bg-setup` writes leaner `docs/agents/` files, which every engineering skill reads on every run. The tracker seed templates are now conditional: the PR (or MR) triage section is written only when "PRs as a request surface" is on, the Wayfinding section only when `wayfinder` is installed, and setup checks `gh --version` once to write only the matching sub-issue and blocking commands instead of the "2.94+ / older `gh`" pairs. Every tracker operation now sits in one Operations list (create, read, list, sub-issue or parent link, blocking, count open blockers, comment, labels, close), the GitLab template gains the "never file into upstream" guard, and the domain template drops both file-tree diagrams, keeping its reading rules and writing the multi-context layout only in a monorepo. The skill's own prose is compressed with every step and branch kept.
+
+### Patch Changes
+
+- [#1363](https://github.com/mattpocock/skills/pull/1363) [`5ae4816`](https://github.com/Ballganda/BG-skills/commit/5ae481693d13b37d4d2c2c92d0b66d299c93e695) Thanks [@mattpocock](https://github.com/mattpocock)! - `chief-of-staff` now looks for a shared wiki before starting its own. It also runs `retro` on about one in five of its subagents' sessions, the ones where something went wrong first, and acts on the findings itself, and runs `spec-gen`, `ticket-gen` and `implement` for large chunks of work, reading each skill by relative path so they can stay user-invoked.
+
+- [`02fe22d`](https://github.com/Ballganda/BG-skills/commit/02fe22d0f57d0af66fa51fd7053013cf8aa92be3) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the project tool runs the `inventory` and `disasm` adapters itself.
+
+  - **`inventory [--redo]`** runs the full environment check, then the `inventory` adapter with `DECOMP_TARGET` and every `DECOMP_TOOL_<NAME>` set. It exits 6 and writes nothing when the target is not an accepted edition. Once the `decomp-start` tag exists it refuses, naming the redo flow, unless `--redo` is passed.
+  - **`disasm <ticket id>`** fills the expected file and address from the ticket and runs the `disasm` adapter with the same environment, after the cached environment check `check` uses.
+  - **Adapters run only through the project tool.** The layout says so, `decomp-start`, `decomp-match`, and `decomp-reference` call the new commands, and the pipeline check runs the inventory through the tool. An adapter no longer needs a lookup of the machine file.
+
+- [#217](https://github.com/Ballganda/BG-skills/pull/217) [`4185340`](https://github.com/Ballganda/BG-skills/commit/4185340ef87fba79967be8ceec676a587130384f) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the two adapter notices are stated in full once per ticket, then by name (spec [#208](https://github.com/Ballganda/BG-skills/issues/208)).
+
+  - **Name.** The empty-report line gains the name `no-instruction-diff`, written at the start of its sentence as `no-object-identity` is.
+  - **Once per ticket.** The first round of a ticket in which a condition holds states its notice in full; a later round of the same ticket names it. A round without the condition clears its record, so a returning condition is stated in full again. `release` clears both records, and a repeat round or a collected background match follows the same rule.
+  - **Layout and skills.** The layout document describes both forms, `decomp-match` reads a bare name as the earlier notice still holding, and `decomp-setup` names its two upgrade signs by these names.
+
+- [#217](https://github.com/Ballganda/BG-skills/pull/217) [`68822cc`](https://github.com/Ballganda/BG-skills/commit/68822cc2ee2467736d8b87e3b7dad45415c11b84) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a collected background search says why it ended, so the next one that builds nothing explains itself (spec [#206](https://github.com/Ballganda/BG-skills/issues/206), after finding 6 of spec [#186](https://github.com/Ballganda/BG-skills/issues/186)).
+
+  - **End reasons.** A collected report's `end` now tells three cases apart. `stopped`: the collecting call cut the search short while it was working. `error`: it died, and the report's `error` holds the error's text, or says that the process was gone and left no report. `killed`: it would not go within the 10-second stop bound, or it was still alive after its budget plus that bound, and the report then holds `overrun`.
+  - **Seconds against budget.** The report and the kept log's `collected:` line hold `ran_s`, the seconds from the search's start to its collection, and `budget_s`.
+  - **Traceback.** A background search that dies of an error writes a `died of an error:` line to its log, followed by the traceback of an error nothing caught.
+  - **Heartbeat removal.** A call that cannot remove its own heartbeat as it leaves the slot pool still does not fail, but keeps a line with the heartbeat's name and the error. The background search it then starts copies that line into its log at its start.
+  - **Call time.** The summary's counts and the performance record gain `collect_s`: the seconds the call spent collecting the ticket's background search. It sits beside `call_s` and is part of it.
+  - **Closing rule for the finding.** The finding is confirmed when one kept log (`.decomp/search/<ticket id>/background.log`, named by the report's `log`) names a cause. It is closed as not reproduced after 30 collected background searches on the real project with none reporting `tried: 0`. The result is reported on spec [#206](https://github.com/Ballganda/BG-skills/issues/206).
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`906ed60`](https://github.com/Ballganda/BG-skills/commit/906ed605db4227e622c5ef3a5fa30d45f9a189b2) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a background search that built nothing leaves its log, and does not yield to its own caller (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), finding 6).
+
+  - **Kept log.** A collected background report with `tried: 0` names `log`: the search's log is kept as `.decomp/search/<ticket id>/background.log`, in place of the last kept one. A search that tried candidates keeps none.
+  - **What the log holds.** The search writes a line when it starts, when it is ready, when the foreground searches it waits on change, and when it ends. The collecting call adds what it saw: the search's files, its heartbeat's age, whether it was killed, and the foreground heartbeats in the pool.
+  - **Its own caller.** A background search no longer waits on a heartbeat left in the pool under the name of the call that started it. It still yields its slots to every other foreground block.
+  - **Bounded stop.** Stopping a background search waits for its process to be gone for no longer than 10 seconds, then kills its process tree once more and returns what the search had written. No host command the stop runs is waited for past that bound.
+
+- [`8d6bcde`](https://github.com/Ballganda/BG-skills/commit/8d6bcde0bb87c964beb577a33a32fe03f6795648) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a tool with no executable can be pinned by a file.
+
+  - **Banner file**: a tool entry in `toolchain.json` may name `banner_file`, a path relative to the tool's root, in place of `banner_cmd`. `decomp.py` reads the file itself, in whatever encoding it holds, and `doctor` passes when `banner` is a substring of its contents. This pins a platform SDK made of headers without a host-specific command.
+  - **One pin per tool**: `doctor` exits 6 and names the tool when it has both `banner_file` and `banner_cmd`, or neither, and names the file when a banner file is missing.
+  - **Banner command docs**: the provisioning document says manifest commands run through the host shell (`cmd.exe` on Windows) and that `{root}` is a native path continued with the host's separator. Its example banner command now goes through the wrapper, as the rule beside it requires.
+
+- [`47934ee`](https://github.com/Ballganda/BG-skills/commit/47934ee7342234fb7e1be0b49d9851266f0a1820) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a contract change is measured before its tag moves.
+
+  - **Candidate ref**: a branch named `c/<slug>` holds a proposed change to paths a tag freezes. `revalidate --candidate c/<slug>` accepts only such a branch, alone (no `--ref`, no `--header`), skips the frozen check for it, and lets it change any path frozen by the `decomp-setup` or `decomp-start` tag.
+  - **Judged by its own copy**: the tool checks the candidate out in a clean worktree and runs that tree's copy of `decomp.py` there, so the candidate's tool, adapters, manifest, and contract judge it.
+  - **Records nothing**: no ledger line, no status change. Exit 0 when every matched ticket still matches, nonzero with the regressed tickets listed when one does not (a matched ticket the candidate no longer holds is listed too), and 6 when a matched ticket could not be rebuilt on this machine, even when regressions are listed as well. A ticket already `regressed` on the integration branch does not count against the candidate.
+  - **One change flow** in [LAYOUT.md](../skills/engineering/decomp-standards/LAYOUT.md): change on `c/<slug>`, run the candidate revalidation and show the user, merge and move the tag on their go-ahead, then a plain `revalidate` to record the outcome. `decomp-setup`, `decomp-start`, and the provisioning document reference it in place of their own orderings.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`7ac3d2e`](https://github.com/Ballganda/BG-skills/commit/7ac3d2e5eb78b234c17c21d2aac190dfd6a930da) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `contract-keys` reads a contract bullet whatever Markdown emphasis it carries (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), finding 1).
+
+  - **Bullets.** A bold, italic or backtick name or value reads like a plain one, with the colon inside or outside the emphasis (`- **Permuter:** not allowed`, `- **Template search**: allowed`).
+  - **Unchanged.** An old permuter line is still read as the template-search line, and a line that says neither allowed nor not allowed still stops with the same message.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`30e42ec`](https://github.com/Ballganda/BG-skills/commit/30e42ec75d9cb3ec1e1b412073c3d49cb21143c3) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a deadline block finishes its last pass (spec [#186](https://github.com/Ballganda/BG-skills/issues/186)).
+
+  - **Last pass.** When a `search` block reaches its deadline with no more candidates left in the space than it runs workers, it builds them and ends `exhausted`, with no `continues_s` and no background search.
+  - **Bounded.** A hung compile in the last pass is still killed by the hang limit. With more candidates left than workers, the block ends `deadline` as before.
+
+- [#217](https://github.com/Ballganda/BG-skills/pull/217) [`773dec6`](https://github.com/Ballganda/BG-skills/commit/773dec6d78a0cbb9d735a006d5c08b4019e24cbf) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a speed flag's streak is counted over the blocks that could have raised it.
+
+  - **A block that measured nothing is passed over.** For the four measured flags, a block that built fewer than 2 candidates per worker (a cached repeat, a short matching block) neither adds to the streak nor ends it.
+  - **A block of another unit is passed over.** The streak is counted over the same compiler and the same unit, so two writers on two units no longer keep the notice from showing.
+  - **The notice says "in 3 blocks in a row of this unit".** The once-per-streak rule and the threshold of 3 are unchanged.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`0cc84e1`](https://github.com/Ballganda/BG-skills/commit/0cc84e1f17cdfb2eea55f89f043aea8a16c21af4) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a `search` block's regression flags measure what their names say (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), findings 2, 7 and 10).
+
+  - **`slow-compile`** compares a block with earlier blocks of the same compiler and the same unit, once 3 exist, and its notice names the unit's history. A unit with heavier headers no longer sends the user to the antivirus and power settings.
+  - **`io-jitter`** compares the block's p95 compile time with the block's own median. It reads no history.
+  - **`scorer-bound`** counts the diff adapter run with scoring, so a slow adapter is flagged.
+  - **`expander-starved`** counts the workers' wait for a candidate only up to the last candidate handed out. A small space that ends `exhausted` on many workers raises nothing. `idle_frac` in the performance log holds that share.
+
+- [`ef49818`](https://github.com/Ballganda/BG-skills/commit/ef49818ca7f8d656f556c93b6d14a23216554ee2) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills close four gaps found against a working byte-matching project. The guardrail scan now refuses the forms that hide a directive (trigraphs, backslash line continuations, `%:` digraph directives) and holds `__pragma` and `_Pragma` to the pragma allowlist. `toolchain.json` can accept several target editions, recognise one by probes (hashes of chosen byte ranges), name known-wrong editions with a message, and list the functions an edition holds differently; `check` and `verify` exit 6 on those. Projects gain a symbol map (`symbols.json`), guarded from writers and repaired by `decomp-reference`, and [LAYOUT.md](../skills/engineering/decomp-standards/LAYOUT.md) states a default relocation policy that masks a relocated operand only when its target is proven. Provisioning gains host prerequisites checked by `doctor`, unpack steps that run a project script (`{tools}`), one tool wrapper, and a per-unit compiler (`compiler`, `unit_compilers`, `{compiler}`). `scripts/test-decomp.py` tests `decomp.py` against a scratch project.
+
+- [`9c2fed4`](https://github.com/Ballganda/BG-skills/commit/9c2fed4d077a66a0041c3317de315a024365867b) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the guardrail scan follows every include.
+
+  - **Include chain**: the scan covers each project file a source includes, directly or through another header, beside the source or under `include/`, in whatever letter case the name is written. Before, only headers named directly under `include/` were scanned.
+  - **Hidden includes refused**: an `#include` whose file a macro names, an absolute path, and a path that climbs out of the project are guardrail violations.
+  - **`revalidate --header`** rebuilds every ticket that reaches the header through any chain of includes.
+
+- [#217](https://github.com/Ballganda/BG-skills/pull/217) [`95b7d44`](https://github.com/Ballganda/BG-skills/commit/95b7d4463292101bfbad99c2075ea6a72611d655) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): parallel Tickets stop conflicting in the layout reference and the block call. No behaviour of the decomp tool and no fact in the reference changes.
+
+  - **The layout reference** keeps short tables for lookup and gives each command, path and record with detail its own section, where every fact is one bullet on one line. Existing anchors keep their names.
+  - **The skills check** fails when any line of the layout reference is over 300 characters, naming the file, the line and its length.
+  - **The template-search block runner** takes one options value with named fields in place of ten positional arguments, so a new option adds a field and not an edit to every call.
+
+- [`d03e244`](https://github.com/Ballganda/BG-skills/commit/d03e2445c13cb552c2859ced525f0448ac04e42a) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the `link` command and its milestones (spec [#39](https://github.com/Ballganda/BG-skills/issues/39)).
+
+  - **`link`** links the whole binary from the reconstructed source plus raw blocks of the target, compares it with the edition on this machine, and records a `link` event.
+  - **Link milestone.** The contract's Tracking section holds a milestone size beside the revalidation interval, as a percentage or a byte count (`link_milestone` in `decomp.json`), defaulting to 5% of the in-scope bytes with a floor of 16 KB. `report` prints a `milestone:` line: `due` when the in-scope bytes of units fully matched since the last recorded link reach it, never when the link is unavailable.
+  - **`/decomp-run`** runs the link after revalidation when a milestone is due, and always when the state is `finished`. The finish message states the link result, or that a whole-binary link is not available for this target.
+
+- [#134](https://github.com/Ballganda/BG-skills/pull/134) [`74e451e`](https://github.com/Ballganda/BG-skills/commit/74e451eb5936f7b6479096f6326c632d00c2bd23) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): writers and the coordinator stage named paths only, and `verify` says so when a branch carries ticket or ledger files. `decomp-match` and `decomp-run` forbid `git commit -a` and `git add -A`; a `guardrail` rejection for files under `tickets/` or `ledger/` names them as status files committed too broadly.
+
+- [#134](https://github.com/Ballganda/BG-skills/pull/134) [`b4500bb`](https://github.com/Ballganda/BG-skills/commit/b4500bb16f678e29cbf281138c8c2fe2bd9b4fb6) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `decomp.py next` lists ready tickets strictly smallest first (tier, then size, then address), with no started-unit priority and no injected large ticket. `next --first <id> --reason <text>` lists a ready ticket first and records an `out-of-order` event.
+
+- [#217](https://github.com/Ballganda/BG-skills/pull/217) [`644e9ae`](https://github.com/Ballganda/BG-skills/commit/644e9ae8a04bca5dd75ba0185a917d7300359c4c) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a block no longer holds workers for the opening sweep when nothing can be frozen (spec [#210](https://github.com/Ballganda/BG-skills/issues/210)).
+
+  - **No identity, no wait.** When hashing falls back to the function's bytes and the first diffed candidate carried no `function_sha256`, a free worker takes the next candidate of the rest of the space without waiting for the sweep's results.
+  - **Unchanged with identity.** Where objects are repeatable or a diff result carried `function_sha256`, the rest still waits for the sweep and inert choice points are frozen.
+  - **`idle_frac`.** The layout says the wait for the sweep is part of it, and absent when the round has no object identity.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`fdbd66b`](https://github.com/Ballganda/BG-skills/commit/fdbd66bbd3b79d977f626f6a69c42426e9671be6) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): one choice can span two places in a template (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), finding 12).
+
+  - **Paired use.** `PERM_VAR(name, a, b, ...)`, a name with no `@` followed by alternatives, pairs with the earlier `PERM_VAR(@name, ...)` and expands to its own alternative at the index that one picked. It is no choice point: it adds nothing to the space, the limit of 12, or the choice code.
+  - **Refusals.** A paired use with another number of alternatives is refused with both counts, one before its definition as a back reference is, and one with a label, kind, or likelihood.
+  - **Steering.** A steering tag on a paired alternative makes that pick steering, and its line in the winner carries its own `fakematch:` comment.
+  - **`PERM_VAR(@name)`** with no alternatives is refused with a message naming `PERM_VAR(name)` and `PERM_VAR(name, a, b, ...)`.
+  - **Docs.** `decomp-standards`' grammar table and `decomp-match`'s template step name the paired form.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`0ac8bf1`](https://github.com/Ballganda/BG-skills/commit/0ac8bf1560a9f5985ab68726230b4ad71974faf0) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): calibration skips the single-function probe when there is too little to cut (spec [#186](https://github.com/Ballganda/BG-skills/issues/186)).
+
+  - **Skip.** When the bodies of the other marked functions hold fewer characters together than `probe_min_chars`, the probe builds nothing and its calibration record is `skipped`, with the count in its `reason`.
+  - **Threshold.** `probe_min_chars` joins the block constants `local.json` can override. Its default, 2,000 characters, is an estimate and has not been measured.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`9442372`](https://github.com/Ballganda/BG-skills/commit/9442372af30d4904f3ab4ac2952249ebb6a1cbaa) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a repeat round is no round in the performance log or the block ceiling.
+
+  - **Marked in the log.** A repeat's block record carries `repeat: true` and the number of the last counted round, so no two counted rounds share a number.
+  - **Ceiling kept.** A repeat no longer writes the round-end time, so the next block's ceiling runs from the last counted round and an accidental repeat does not shorten it to the floor.
+
+- [`a0f682f`](https://github.com/Ballganda/BG-skills/commit/a0f682f7ced5f3b5ef9a2a18e6dba9ecf2e72462) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): fixes from the review of the toolchain and guardrail work, aimed at targets beyond 32-bit x86 and MSVC.
+
+  - **Guardrail scan**: comments and string literals are set aside before matching, so neither hides code nor trips the scan. Attributes in every spelling (`__attribute__`, `__declspec`, `[[...]]`) are held to a new `attribute_allow` list, naked functions and section placement are refused in GCC, Clang, and Metrowerks spellings too, and token pasting is refused.
+  - **Functions named by key**: a ticket id and expected file use a function's key, by default its address, so overlays, modules, and banks that share an address get distinct tickets. 64-bit addresses and `bank:offset` addresses work, and `PATTERNS.md` accepts their ticket ids.
+  - **Hosts**: a prerequisite or tool entry can be limited to some systems with `hosts`. Commands use `{python}` and `{tools}`, in adapters as well as in the manifest.
+  - **Per-unit compilers**: a compiler this machine lacks stops only the units built with it. `revalidate` no longer accepts a repair when it had to skip a matched ticket.
+  - **Provisioning**: `provision` names a missing host prerequisite, and compares a file already downloaded without silently replacing it.
+  - **Robustness**: tool output in any encoding, locks shared by every worktree, block-comment markers, and git older than 2.31.
+
+- [`4b52c8e`](https://github.com/Ballganda/BG-skills/commit/4b52c8ea2a1bbcfac94b87c67cb9a8545ac47e0a) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): two mismatches found on a real project.
+
+  - **`verify --category none`**: a writer that matched reports `category: none`, and `verify` stopped on it as an unknown category. It now reads `none` as no category.
+  - **Reference lock**: `decomp-run` took the `reference` lock before starting the repair subagent, and `decomp-reference` stops when the lock is already held, so no repair could run. The repair subagent now takes the lock, and the coordinator only releases it.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`aa16867`](https://github.com/Ballganda/BG-skills/commit/aa1686794360d4c331750d161e58f722c8c09315) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` keeps searching between rounds (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Background search.** When a block ends on a plateau or at its deadline with time left under the ceiling, `search` returns its summary, with `continues_s`, and leaves a detached process searching the same template on. It inherits no standard handle, so the call returns at once.
+  - **Reported on the next call.** The next `search` for the ticket stops it and reports it under `background`. When it found a natural match, the call returns that match and drops the new template, with no new attempt.
+  - **Stopping.** `search <id> --stop` and `release` end it with every process it started (its Job Object on Windows, its process tree elsewhere). Its liveness is a heartbeat file.
+  - **Yielding.** A background search starts no build while a foreground block is running on this machine, so the block has its compile slots back within one compile.
+  - **Override.** `"background": 0` under `"search"` in `.decomp/local.json` turns it off.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`6494bc7`](https://github.com/Ballganda/BG-skills/commit/6494bc725377e86c0e7d5385addb3b5f9f220b5e) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` probes three faster ways to build before a ticket's first block, and keeps one only if it is faster and byte-identical (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Single-function build.** The body of every other marked function is cut from the candidate. A match found this way is built once more as the full unit.
+  - **Batching.** An optional `build_batch` adapter compiles 4 to 16 candidates in one compiler call.
+  - **Resolved compiler.** An optional `build_resolve` adapter hands over the compiler's argument list and environment. The probe records whether running it directly is faster and byte-identical. No block uses it: adopting it needs an ADR.
+  - **Records.** Each probe writes one calibration record to `.decomp/perf.jsonl`. The summary's `counts` add `single_function` and `batch`.
+  - **Block constants.** `probe_gain` and `probe_runs` join the overrides in `local.json`.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`2775e36`](https://github.com/Ballganda/BG-skills/commit/2775e36686edaceaa4c91a6261ec880243d65914) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a round's counts say what they measure, and report the whole call (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), finding 11).
+
+  - **`call_s`.** The search summary's `counts` and the block's performance record gain `call_s`, the seconds of the whole `search` call: calibration, probes, and the block. It is never smaller than `wall_s`, which stays the block's seconds alone.
+  - **Layout.** `LAYOUT.md` says that `budget` is the estimate made when sampling began and that `compiled` can pass it, and that `best_score_end` is the block's own best and can be worse than `best_score_start`.
+  - No field is renamed.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`cc9d0fd`](https://github.com/Ballganda/BG-skills/commit/cc9d0fddd58200d8712c49f0678079b79e88415d) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` reads the full template grammar and skips repeated work (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Grammar.** Labels, kinds, likelihoods, `PERM_VAR`, `PERM_ONCE`, `PERM_INT`, `PERM_LINESWAP`, and `PERM_IGNORE`, with limits the tool enforces.
+  - **Sweep.** A round tries the baseline, then each one-choice change, and freezes a choice point no alternative changes (`inert`). The summary adds `effects`.
+  - **Dedupe and cache.** A candidate is built once per round, and scores persist in `.decomp/search-cache.json` across rounds. `first_differ` from the `diff` adapter centres the summary's window.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`cc9d0fd`](https://github.com/Ballganda/BG-skills/commit/cc9d0fddd58200d8712c49f0678079b79e88415d) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` learns across rounds and advises when to stop (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Mutation and crossover.** A later block of a template also builds candidates from the best earlier ones, with a bandit sharing picks between sampling, mutation, and crossover.
+  - **History.** Attempts the ledger recorded raise the likelihood of the kinds that fixed a category before, and the summary's `history` line says so.
+  - **Stop.** The summary's `stop` advises giving up when every choice point is inert or 2 rounds in a row brought no new best score.
+  - **Performance log.** `.decomp/perf.jsonl` records each block and raises regression flags, shown to the user after 3 in a row.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`650c6ba`](https://github.com/Ballganda/BG-skills/commit/650c6ba67880dcdd620b1febb8da5ffc47f644c9) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` runs a template's candidates as a parallel, deadline-driven block (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Workers.** Candidates build on worker threads, one adapter process each, in a scratch folder per worker.
+  - **No shell.** `search` starts the build and diff adapters without the host's shell, and falls back to it for a command that needs one. `check`, `verify`, and `link` keep the shell.
+  - **End reasons.** A block ends on `match`, `abort-buildfail`, `exhausted`, `plateau`, or `deadline`. The deadline has a floor (10 seconds and 200 builds) and a ceiling (the last round's model latency, at most 60 seconds).
+  - **Hangs.** An adapter run that outlasts 10 times the median compile time is killed as a whole process tree (a Job Object on Windows, a process group elsewhere) and counts as a build-fail.
+  - **Overrides.** `"search"` in `.decomp/local.json` overrides any block constant for this machine.
+  - **Summary.** `counts` gains `workers`, `wall_s`, `killed`, and `shell`.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`071e95e`](https://github.com/Ballganda/BG-skills/commit/071e95ebffb3a6da76a51a3abffc8933a791d884) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` samples a template too large for one block, best-first from priors (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Budget.** A block works out how many compiles it fits from its compile rate and deadline. A space that fits is still tried whole, most likely first.
+  - **Sampling.** A larger space is picked one candidate at a time by seeded Thompson sampling over each alternative's likelihood, updated after every scored candidate. At least 20 percent of picks are exploratory and aim at pairs of alternatives not yet tried together. At equal likelihood a natural alternative ranks above a steering one.
+  - **Priors.** An alternative written as the closest matched functions from `similar` are written gets a higher likelihood, beside the writer's own and the project history.
+  - **Slow compilers.** With a budget under 100 compiles, sampling opens with a pairwise covering sample, likeliest first.
+  - **Summary.** `pairs` names up to 3 pairs of alternatives whose joint effect differs from the sum of their single effects. A sampled block's `counts` add `budget`, `pairwise`, `sampled`, and `explored`.
+  - **Block constants.** `budget` and `seed` join the overrides in `local.json`.
+  - **`LAYOUT.md`** documents the sampling, the constants, and the new summary fields.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`22d04c8`](https://github.com/Ballganda/BG-skills/commit/22d04c86adefd04b7b8951f18939040dacc60529) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): a `search` block tunes its own worker count and watches a reference compile (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Tuning.** Every 2 seconds a block compares its unique compiles per second with the tick before. A gain above 5 percent adds a worker; a loss above 10 percent, or a p95 compile time above 2 times the median, takes one back. The count stays between half the starting count and the search's share of the slot pool. A `workers` set in `local.json` is kept as it is.
+  - **Reference compile.** Every 30 seconds the block recompiles the baseline. A run more than 30 percent over the block's first compiles halves the worker count and raises `contention-or-throttle`.
+  - **Starved blocks.** A block the slot pool holds below its worker floor for over half its time raises `starved-by-writers`.
+  - **Performance log.** A block record's `workers_min`, `workers_max`, and `workers_end` now move, and it gains `unit`, `workers_floor`, `starved_frac`, `t_ref_base_ms`, and `t_ref_max_ms`.
+  - **Block constants.** `tune_s`, `tune_gain`, `tune_loss`, `tune_spread`, and `reference_s` join the overrides in `local.json`.
+  - **`LAYOUT.md`** documents the tuning, the reference compile, the constants, and the two flags.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`cc9d0fd`](https://github.com/Ballganda/BG-skills/commit/cc9d0fddd58200d8712c49f0678079b79e88415d) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): searches on one machine share a pool of compile slots (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Pool.** `.decomp/slots/` holds one slot per physical core. A worker holds a slot only while it builds, and a search divides the slots by the active writers.
+  - **Reclaim.** A slot whose holder stops its heartbeat for 30 seconds is taken back.
+  - **Wine.** On Wine hosts a block keeps one wineserver running across its builds.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`a546b0c`](https://github.com/Ballganda/BG-skills/commit/a546b0c805bfa696ae7a6c4fa90583627913229d) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` finds the closest solved functions from the matches ledger.
+
+  - **Fewer files read.** The similar-function bonus takes its candidates from `ledger/matches.jsonl` and reads only those ticket files, so a round no longer reads every ticket of the project. On a trial project with 24,932 tickets that scan was 7.4 s of an 8.4 s cached round. A background search uses the same path.
+  - **Same ranking.** The bonus and its order are unchanged. A matched ticket whose file or expected bytes cannot be read is left out, as is one that has since regressed.
+  - **A ticket marked matched by hand gives no bonus.** Only a match that `audit pass` recorded in the ledger counts.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`5977b50`](https://github.com/Ballganda/BG-skills/commit/5977b50e0b0d014923381b66e039e8ab2b9885c0) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `/decomp-setup` asks the diff adapter for what template search needs (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), findings 3 and 4, project side).
+
+  - **Adapter contract.** The layout document asks for one report line per instruction with its offset, on 32-bit and 64-bit targets alike: a disassembler prints 8-digit or 16-digit addresses by target.
+  - **Setup.** Where the contract allows template search, the diff adapter prints `first_differ` and `function_sha256`. Where it does not, both stay optional.
+  - **Pipeline check.** One new box, ticked only when template search is allowed: for a build known to differ, the diff result carries both fields and the report holds more than its header line.
+  - **Skill upgrade.** It adds the same to an existing project's diff adapter where template search is allowed, as a contract change with its ADR. The signs that it is due are the `search` summary's two notice lines: no object identity, and no instruction diff.
+
+- [#217](https://github.com/Ballganda/BG-skills/pull/217) [`898c1cf`](https://github.com/Ballganda/BG-skills/commit/898c1cf5da2e47b2032d20a87f5e1ea13dc95dd2) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `similar` takes the solved functions from the matches ledger, as `search` does.
+
+  - **Fewer files read.** `similar` reads only the tickets `ledger/matches.jsonl` names and the ticket asked about, so its cost no longer grows with the open tickets. On a trial project with 24,932 tickets the scan was about 7.4 s.
+  - **One answer.** `similar` and the bonus of `search` rank the same functions. The output line, its order and `--n` are unchanged.
+  - **A damaged ticket no longer stops it.** A matched ticket whose file or expected bytes cannot be read is left out. `similar` on a ticket with no expected bytes prints nothing and passes.
+  - **A ticket marked matched by hand is no longer listed.** Only a match that `audit pass` recorded in the ledger counts.
+
+- [`6cb5fe6`](https://github.com/Ballganda/BG-skills/commit/6cb5fe6e2923fb6acd57c651d40ebad4a8260f6b) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `decomp-setup` gains a skill upgrade section.
+
+  - **Skill upgrade**: running `/decomp-setup` on an existing decomp project diffs the project's copy of the project tool against the skill's. When they differ, the project is upgraded as a contract change: an ADR, a fresh copy of the tool, the contract files the newer skills require (the manifest, adapters rewired to the environment variables), and the pipeline check run again, carried through the layout's change flow so the tag moves only after the candidate revalidation and the user's go-ahead. The candidate revalidation is started with the skill's copy of the tool, since an older project's copy has no `--candidate`.
+  - **One trigger**: only the user starts an upgrade. No other skill compares the copies or warns.
+
+- [`48cab59`](https://github.com/Ballganda/BG-skills/commit/48cab59c50cad79bbb5c5b4c4ec8e8a6c5d5f057) Thanks [@Ballganda](https://github.com/Ballganda)! - Add nine in-progress `decomp-*` skills for byte-for-byte binary reconstruction: `decomp-setup` (contract and enforcing project, no decomp), `decomp-identify` (compiler and flags from the binary), `decomp-start` with `decomp-spec-gen` and `decomp-ticket-gen` (inventory, unit specs, function tickets), `decomp-run` (separate writer, tool, and auditor roles, automatic proven-lesson capture), `decomp-match` (one function to an exact match), `decomp-reference` (shared declaration repair under a lock, rejected on any regression), and `decomp-standards` (guardrails, size tiers, mismatch categories, layout). `decomp-setup` ships `decomp.py`, the project tool that alone records matches. Existing skills are unchanged.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`e50acac`](https://github.com/Ballganda/BG-skills/commit/e50acac7ee7d93e0700e05eabeb4b018bb5c3692) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the project tool decides when template search may start (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Check trail.** Every `check` run and every template round appends one record to `.decomp/trail.jsonl` (ticket, result, `differ_bytes`, category, time). It stays on this machine and is never committed.
+  - **`check <id> --category <c>`** takes the writer's mismatch category and refuses one outside the list.
+  - **The gate.** `check`'s JSON gains `search_open` and `search_reason`. Template search opens on a latest category of `register-allocation`, `statement-order`, or `expression-shape`, or after 3 attempts with no fall in `differ_bytes`. It stays closed for TINY tickets and for the stop-or-report categories. `search` refuses with the reason while it is closed.
+  - **`verify --template-round`** marks the attempt as a template round: its evidence file gains the round's best candidate and winning kinds. The fields of `attempts.jsonl` are unchanged.
+  - **`LAYOUT.md`** documents the trail, the gate, the argument, the JSON fields, and the flag.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`3cd75e8`](https://github.com/Ballganda/BG-skills/commit/3cd75e871c75cb9cc775b8d5ba4a833e312f4777) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): `search` reads natural and steering alternatives under the contract's fakematch rule (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Steering tag.** An alternative led by `/* steer: <why> */` is steering. Every other alternative is natural.
+  - **Refusal.** A template holding a steering alternative is refused, with nothing built, when `fakematch` is `forbidden`.
+  - **Natural first.** A natural match ends the round. A match that needs steering keeps the round going for a natural one, then drops each steering choice it does not need.
+  - **Winner.** Each surviving steering line carries a `fakematch: <why>` comment.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`2b7f5b1`](https://github.com/Ballganda/BG-skills/commit/2b7f5b17eec9489d4a479d1bdba3bfccca204c49) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the project tool gains `search`, the first slice of template search (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **`search <id> <template file>`** tries every candidate of a template (the unit's source with `PERM_GENERAL` choice points), each built in a scratch copy of the unit's folder layout, and stops at the first exact match. It prints a JSON summary capped at about 600 tokens: the best choice code, a diff window, counts, and the end reason (`match` or `exhausted`). On a match it writes the winner as plain C outside the tree.
+  - **`search <id> --detail '<choice code>'`** prints one candidate's score and source.
+  - **Refusals.** Exit 6 when `doctor`'s checks fail, and a refusal with the reason when the contract disallows template search. It records nothing: the unit, the ledger, and frozen files are unchanged.
+  - **`LAYOUT.md`** documents the command, the template, and the summary.
+
+- [`21bda12`](https://github.com/Ballganda/BG-skills/commit/21bda126d4816b12780ea051a62d98cf461de423) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills can now build the toolchain environment. `decomp-identify` adds a Toolchain requirements section (each tool's exact version, official source, and whether this machine has it) and offers two routes when one is missing: the user installs it, or the agent does. `decomp-setup` gains a provisioning step ([PROVISION.md](../skills/engineering/decomp-setup/PROVISION.md)) that records every tool in a frozen `toolchain.json`. `decomp.py` gains `provision` (download, compare size and SHA-256, unpack into `.decomp/toolchain/`) and `doctor` (target hash, required files, version banners), and runs the `doctor` checks before every `check`, `verify`, and `revalidate`. Adapters now find the target and tools through `DECOMP_TARGET` and `DECOMP_TOOL_<NAME>`.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`1811634`](https://github.com/Ballganda/BG-skills/commit/1811634e8f11eb60837ba23ba16bce93cffcd8cb) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): template search reads a missing object identity as unknown (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), finding 3).
+
+  - **Counts.** When the compiler's objects differ between two compiles and the diff adapter prints no `function_sha256`, the summary's `unique_objects` and `object_hits` and the performance record's `unique_objects` are `null`, not zero.
+  - **Notice.** That summary carries one `no-object-identity` line: object dedupe and the inert freeze are off, and the fix is a diff adapter that prints `function_sha256`, through `/decomp-setup`'s upgrade.
+  - **Layout document.** It says when the two counts are `null`, and that the plateau rule then rests on the best score alone.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`8d93d2b`](https://github.com/Ballganda/BG-skills/commit/8d93d2b3f1941738be994ad2d5f92db9a0b4fc43) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the `search` summary's diff window no longer hides that text is missing (spec [#186](https://github.com/Ballganda/BG-skills/issues/186), finding 4).
+
+  - **Cut mark.** A report line longer than the window width of 120 characters is cut inside the width and ends in ` ...`. A shorter line is unchanged.
+  - **Empty report.** When the best candidate's report holds fewer than 2 lines, the summary's `notice` says in one line that the diff report holds no instruction diff, and names the diff adapter as the fix.
+
+- [`b62c541`](https://github.com/Ballganda/BG-skills/commit/b62c541de5289560ba43b2128e952966ba54e919) Thanks [@Ballganda](https://github.com/Ballganda)! - `domain-modeling` is about half as long. One behaviour is clarified: a term that clashes with `GLOSSARY.md` is called out even when you handed the naming to the agent, which then says which name it picked. Everything else is unchanged: terms are still challenged and written to `GLOSSARY.md` inline, files are still created lazily, ADRs are still offered only when all three tests hold, and the glossary and ADR format files still load only when an entry or ADR is written.
+
+- [#97](https://github.com/Ballganda/BG-skills/pull/97) [`cb58530`](https://github.com/Ballganda/BG-skills/commit/cb585303d7d3bdd5c4187072da6b243f2486d86d) Thanks [@Ballganda](https://github.com/Ballganda)! - Skills and docs pages say "final reply", not "final report", for the message to the user: `implement`, `retro`, `skill-map` and `diagnosing-bugs`. A subagent's return stays a report. `triage`'s recommend step now opens with the category and state call in one line, then numbered points the maintainer can answer one by one, each with its recommendation.
+
+- [`3f4ae1e`](https://github.com/Ballganda/BG-skills/commit/3f4ae1ea65bd05d5f54d041294e217e2228b975f) Thanks [@Ballganda](https://github.com/Ballganda)! - `grilling` is shorter (2,385 to 1,544 chars) and its rounds are tighter: brief question bodies, one-line recommendations, a recommendation on every question (a best guess where only the user knows), and one opening line per decision the user handed the agent, saying what it chose and why. Measured by the `/grill` eval suite: lower tokens on every case, every grader still passing.
+
+- [#29](https://github.com/Ballganda/BG-skills/pull/29) [`7560ecf`](https://github.com/Ballganda/BG-skills/commit/7560ecf71d75bc4dad568aac329123501308247b) Thanks [@Ballganda](https://github.com/Ballganda)! - `implement`'s chat-work path no longer points its implementer at worktree steps it never set up: the worktree check and the integration-branch merge in step 4 are now marked as applying to Ticket batches only. The README and bucket READMEs drop the upstream author's first-person voice, and the `wait-what` docs page gains its Common questions section.
+
+- [#215](https://github.com/Ballganda/BG-skills/pull/215) [`bafd5e1`](https://github.com/Ballganda/BG-skills/commit/bafd5e199fb7b939b57acc60ba711be2629cacf3) Thanks [@Ballganda](https://github.com/Ballganda)! - `implement` now settles one set of commit attribution lines per run and puts them on every commit: implementer commits, merger commits, and the script's merge commits.
+
+- [#215](https://github.com/Ballganda/BG-skills/pull/215) [`f32cc07`](https://github.com/Ballganda/BG-skills/commit/f32cc07643da413d3bd82b3ef2f876b6aa5c2a38) Thanks [@Ballganda](https://github.com/Ballganda)! - `implement` finds a working Python 3 by trying `python3`, `python`, then `py`, instead of stopping when a broken `python3` alias fails. It also starts the integration branch from the branch a spec builds on when that work is not yet in the default branch: the base is stated with the batch, and `begin` names it in its reply.
+
+- [#1342](https://github.com/mattpocock/skills/pull/1342) [`a496f55`](https://github.com/Ballganda/BG-skills/commit/a496f5513d4a4cf889bc48e189e579f4b0bdf6aa) Thanks [@mattpocock](https://github.com/mattpocock)! - `implement` now uses a fresh implementer subagent for each ticket, instead of reusing an earlier implementer.
+
+- [`e22866c`](https://github.com/Ballganda/BG-skills/commit/e22866cff001c5831920c950e59f73b914aa21db) Thanks [@Ballganda](https://github.com/Ballganda)! - The plugin validation gate is now plain `claude plugin validate .` instead of `--strict`. The maintainer `CLAUDE.md` at the plugin root triggers an expected warning that no longer blocks work. ADR 0002 records why the plugin stays at the repo root.
+
+- [`ebbaedc`](https://github.com/Ballganda/BG-skills/commit/ebbaedc595748518f5046c009f4d9b801950973a) Thanks [@Ballganda](https://github.com/Ballganda)! - The plugin has an icon in the plugin menu: a stick figure beating a dead horse, as flat line art on an off-white square. `scripts/draw-icon.py` draws it with Pillow into `.claude-plugin/icon.png` (1024 px square), and rerunning the script reproduces the committed PNG. The static check fails if the icon is missing, not square, outside 512 to 2048 px on a side, or over 2 MB.
+
+- [`802f095`](https://github.com/Ballganda/BG-skills/commit/802f095759b75af6b4a78ec59b49143460e6627b) Thanks [@Ballganda](https://github.com/Ballganda)! - `retro` takes its mode from the caller (User-typed, Lesson-line, Diagnosing-bugs), with User-typed the default. `implement` resolves the tickets, runs retro if any lesson came back, then writes the final report and cleans up; `diagnosing-bugs` keeps retro inside its done checklist. The static check reads every skill through one shared reader, fails any skill whose frontmatter and Codex metadata disagree on invocation, and fails any skill with no `agents/openai.yaml`. `software-factory` gets Codex metadata that keeps it user-invoked. The skill-map, retro and implement docs pages match their skills again.
+
+- [`f309c1e`](https://github.com/Ballganda/BG-skills/commit/f309c1ea20cd427752b0a638e5bebc669b388c5e) Thanks [@Ballganda](https://github.com/Ballganda)! - New user-facing doc `docs/session-floor.md` explains what makes up a session's starting token count (the harness system prompt, connector tool definitions, and installed skill descriptions, with the split marked as an inference), what to turn off to lower it (unused connectors and plugins), and how to view the context breakdown with `/context`. The doc is linked from the README under a new Guides section.
+
+- [`b893b52`](https://github.com/Ballganda/BG-skills/commit/b893b528afe58d9b50cff0c3c0e42d24daa9629e) Thanks [@Ballganda](https://github.com/Ballganda)! - Shorter skill descriptions, enforced by `check-skills`.
+
+  - **Limits**: a user-invoked skill's description is at most 20 words, a model-invoked one's at most 40. `scripts/check-skills.mjs` fails on any skill over its limit, in every bucket.
+  - **Trimmed**: twelve descriptions shortened. Model-invoked ones still say when to use them.
+
+- [#1316](https://github.com/mattpocock/skills/pull/1316) [`4ae2317`](https://github.com/Ballganda/BG-skills/commit/4ae2317ddb22b046e26455e4f9c9b3aaaf62212d) Thanks [@mattpocock](https://github.com/mattpocock)! - Add `software-factory`, an in-progress user-invoked reference skill: a glossary for designing a software factory (tasks, runs, runners, triggers, and the services they plug into), example tasks grouped by the problem they solve, surveys of the products that fill each slot (ticket trackers, git hosts, runners, observability platforms), and the questions that finish a design. Call it alongside a grilling session.
+
+- [#216](https://github.com/Ballganda/BG-skills/pull/216) [`1299ebc`](https://github.com/Ballganda/BG-skills/commit/1299ebc5ac3dc41bf38033eea1ef2a1d308398c6) Thanks [@Ballganda](https://github.com/Ballganda)! - Decomp skills (in progress): the contract's permuter line becomes a template-search line (spec [#162](https://github.com/Ballganda/BG-skills/issues/162)).
+
+  - **Contract.** "Template search: allowed or not" replaces "Permuter: allowed or not", with an ADR. `decomp.json` gains `template_search` and `fakematch` keys that mirror the contract.
+  - **`doctor`** prints both rules, and names the skill upgrade when a project's `decomp.json` lacks the keys.
+  - **`contract-keys`** prints the keys an upgrade writes, reading an old permuter line as the template-search line.
+  - **Guardrail rule 7** names template-search steering instead of permuter output.
+
 ## 1.3.2
 
 ### Patch Changes
