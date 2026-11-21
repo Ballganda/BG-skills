@@ -48,13 +48,31 @@ A decomp project is its own private git repo. Nothing from the target binary, it
 - `link/`: the linked binary.
 - `trail.jsonl`: the [check trail](#check-trail).
 - `perf.jsonl`: the [performance log](#performance-log).
+- `check/<ticket id>/diff.txt`: the diff report of the ticket's last `check`.
 - `search/<ticket id>/`: the ticket's last template round.
   - It holds the round's template.
   - It holds each candidate's score.
   - It holds what `verify --template-round` records.
   - `background/`: the files of its [background search](#background-search).
   - `background.log`: the log of the last background search that tried nothing.
+  - `winner/<source file name>`: the winning source of the ticket's last round that matched.
+  - `winner-background/<source file name>`: the winning source of the last collected background search that matched.
 - `slots/`: the [slot pool](#slot-pool) every search on this machine shares.
+
+### Temp folders
+
+- No command leaves a folder in the system temp folder.
+- Every temp folder the tool makes sits under one parent there: `decomp-<project folder name>-<8 hex digits>`.
+  - The hex digits are a hash of the main checkout's path, so every worktree of the checkout shares the parent.
+- A command removes the temp folders it made before it exits: on success, a refusal, an error, and an interrupt.
+  - It removes the parent too once that is empty.
+  - A temp worktree leaves git's worktree list as well as the disk.
+- Removal tries again for 2 seconds while a file is held, then leaves the folder and does not fail the command.
+- Every command first removes the entries of the parent that are older than one day.
+  - Those are what a killed command left.
+  - A younger entry may belong to a command that is still running, so it stays.
+- A background search removes its own scratch folder as it exits, since it can outlive the call that started it.
+- What a reader needs after a command is kept under `.decomp/`: the diff report of `check` and a search's winning source.
 
 ## Tags and frozen paths
 
@@ -221,6 +239,7 @@ Commands with detail link to their section below the table.
 
 - `claim` and `release` take or give back a ticket.
 - `release` also ends the ticket's [background search](#background-search) and drops what it found.
+- `release` also removes the ticket's `check` report and its winning sources.
 
 ### check
 
@@ -232,9 +251,11 @@ Commands with detail link to their section below the table.
 - It prints one JSON line with these fields:
   - `result`
   - `differ_bytes`
-  - `report`
+  - `report`: the path of the diff report, `.decomp/check/<ticket id>/diff.txt`
   - `search_open`: whether [the gate](#the-gate) is open for this ticket
   - `search_reason`
+- The report path is one per ticket: each `check` of the ticket replaces the report.
+- The file exists after every `check`, and is empty when the diff did not run (a guardrail refusal, a build failure).
 
 ### search
 
@@ -592,6 +613,7 @@ A block ends on the first of these that holds:
   - It holds `died`: whether the search's process was gone, with no report written, before any kill.
 - Its results join the kept round, so `--detail` serves them until a new round replaces it.
 - When it found a match, the report holds `winner` and `natural`, and `verify --template-round` records that match.
+  - That `winner` is `.decomp/search/<ticket id>/winner-background/<source file name>`.
 - When the match is natural, the call searches nothing.
   - It prints the old template's summary with `end: match`, the `winner`, and `discarded` in the report.
   - It drops the new template and adds no attempt.
@@ -713,7 +735,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - A repeat is no round here.
 - `history`: one line of project history for the ticket's latest category, such as `decl-order fixed register-allocation 7 of 9 times on this compiler` (only when the ledger holds a template round for it).
 - `counts`: the numbers of the round, listed below.
-- `winner`: on a match, the path of the matching candidate as plain C with no macros, in a temporary folder outside the tree.
+- `winner`: on a match, the path of the matching candidate as plain C with no macros: `.decomp/search/<ticket id>/winner/<source file name>`.
+  - The next round of the ticket that matches replaces it.
 - `continues_s`: only when the round left a background search running: the seconds it may run.
 - `repeat`: `true`, only when the round is a repeat.
   - A repeat is a round where every candidate it tried was served from the result cache.
