@@ -15,7 +15,7 @@ Repairs to shared declarations and the symbol map go to one `decomp-reference` s
 
 Run from the decomp project root, on the integration branch. If there is no `decomp-start` tag, tell the user to run `/decomp-start` and stop. Call the Skill tool with `decomp-standards` first. Read `DECOMP.md`'s Models and Tracking sections once.
 
-Every subagent starts with a fresh context window and gets **pointers** (ticket path, worktree path, file paths), never pasted content.
+Every subagent starts with a fresh context window and gets **pointers** (ticket path, worktree path, file paths), never pasted content. A writer's model is its size tier's; a repair runs on the models doc's Reference repair task.
 
 ## The loop
 
@@ -36,7 +36,7 @@ Run `python tools/decomp.py report`. On `EARLY-WARNING`, stop and tell the user 
 
 ### 2. Repair first
 
-If any ticket is `blocked-reference` and no repair is running, start one background subagent. Tell it to call the Skill tool with `decomp-reference`, and give it the blocked tickets' paths. It takes the `reference` lock itself, so do not take it for it: you only release it, below. A gap unblocks many tickets at once, so this goes ahead of new writers.
+If any ticket is `blocked-reference` and no repair is running, start one background subagent with a fresh context window, on the models doc's Reference repair task (default the Standard model, one tier higher after a failed `revalidate`). Tell it to call the Skill tool with `decomp-reference`, and give it the blocked tickets' paths. It takes the `reference` lock itself, so do not take it for it: you only release it, below. A gap unblocks many tickets at once, so this goes ahead of new writers.
 
 When it reports, re-run `revalidate --ref <its branch>` yourself, because its own result does not count. On exit 0: merge the branch, `release <id> --to open` for each ticket it fixed, run `revalidate`, then `unlock reference`. On a regression (exit 5): discard the branch, `unlock reference`, and leave the tickets blocked with a note. On exit 6 with `SKIPPED` lines, this machine could not rebuild every match the repair could break: keep the branch, `unlock reference`, and tell the user it needs a machine that can.
 

@@ -15,7 +15,7 @@ Call the Skill tool with "codebase-design" for the vocabulary (**module**, **int
 - If the user named a direction, scan only there.
 - Otherwise run `git log --oneline -n 50 --name-only` and scan the hot spots first; widen only if changes are scattered.
 
-Read `GLOSSARY.md` and ADRs for the area. Then dispatch one exploration subagent with a fresh context window, scoped to those paths, asking for a report under 400 words of where it hit friction:
+Read `GLOSSARY.md` and ADRs for the area. Then dispatch one exploration subagent with a fresh context window, on the models doc's Interpreting exploration task (default the Standard model, since it judges code with no mechanical check), scoped to those paths, asking for a report under 400 words of where it hit friction:
 
 - one concept spread across many small modules;
 - **shallow** modules (interface nearly as complex as the implementation);

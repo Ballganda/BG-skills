@@ -8,7 +8,7 @@ Two-axis review of the diff between `HEAD` and a fixed point:
 - **Standards**: does the code conform to this repo's documented coding standards?
 - **Spec**: does the code faithfully implement the originating issue / spec?
 
-Each axis runs in its own parallel reviewer subagent with a fresh context window, so neither can mask the other. If no issue tracker is configured, tell the user to run `/bg-setup`.
+Each axis runs in its own parallel reviewer subagent with a fresh context window, Standards on the models doc's Standards review task (default Sonnet) and Spec on its Spec review task (default the top model), so neither can mask the other. If no issue tracker is configured, tell the user to run `/bg-setup`.
 
 ## Process
 
@@ -28,7 +28,7 @@ The Standards axis also uses the **smell baseline** in [SMELLS.md](./SMELLS.md),
 
 ### 4. Spawn both reviewers in parallel
 
-Issue both calls together, in the foreground. Start each as the **reviewer** role with a fresh context window: on Claude Code, the plugin agent `bg-skills:reviewer` with its model overridden at dispatch; on a harness without agent definitions, a general subagent on that model, given the finding format below. Read the models from the models doc (`docs/agents/models.md`, linked from the `## Agent skills` block): Standards gets the Standards review model, Spec the Spec review model. If the repo has no models doc, use the defaults: Standards on Sonnet, Spec on the top model.
+Issue both calls together, in the foreground. Start each as the **reviewer** role with a fresh context window: on Claude Code, the plugin agent `bg-skills:reviewer` with its model overridden at dispatch; on a harness without agent definitions, a general subagent on that model, given the finding format below. Read the models from the models doc (`docs/agents/models.md`, linked from the `## Agent skills` block): Standards runs on the models doc's Standards review task, Spec on its Spec review task. If the repo has no models doc, use the defaults: Standards on Sonnet, Spec on the top model.
 
 Both reviewers report one line per finding, nothing else, with no word limit:
 
