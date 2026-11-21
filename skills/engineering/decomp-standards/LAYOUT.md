@@ -264,6 +264,7 @@ Commands with detail link to their section below the table.
 - A round that ran is one attempt in the check trail, unless it is a repeat (every candidate served from the result cache).
 - It records nothing in the ledger and writes nothing in the tree.
 - It first stops the ticket's [background search](#background-search) and reports what that found.
+  - A call that then prints no summary prints `{"background": <its report>}` alone on standard output.
 - `search <id> --stop` stops the ticket's background search, with every process under it.
 - `--stop` prints one JSON line: `{"background": <its report>}`, or `null` when the ticket has none.
 - The results of a stopped search join the kept round.
@@ -498,7 +499,15 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 
 - At the end of a round the tool keeps each choice point's beliefs as likelihoods, in the ticket's search folder (`learned.json`).
 - They are the starting beliefs above moved by that round's results.
+- They are scaled so that the largest of a choice point is 1, and rounded to 6 places.
+- **Floor:** no likelihood a round learned is kept below 0.01, so an alternative that hurt every round goes last and is still tried.
+- **Frozen:** a choice point that is inert when the round ends learns nothing from that round.
+  - Its entry holds the likelihoods it began the round with: what the last round learned, or the writer's.
+  - Every candidate after the sweep holds its first alternative, so the results say nothing about that alternative.
+- A choice point that was free learns from every candidate of the round.
 - A choice point the next template **keeps** starts from those likelihoods in place of the writer's.
+- **Reading:** a kept likelihood that is zero, negative, not a number, or not finite is read as the floor, 0.01.
+  - So a `learned.json` an older tool wrote a zero into stops no search.
 - A choice point is kept when it has the same label, and the same kind, alternatives, likelihoods, and steering tags as the writer wrote them.
 - A choice point that is new or edited starts from its priors.
 - A round that scored no baseline keeps the earlier ones.
@@ -595,6 +604,12 @@ A block ends on the first of these that holds:
   - It keeps a line with the heartbeat's name and the error.
   - The background search it then starts copies that line into its log, at its start.
 - The next `search` call for the ticket stops it and reports it under `background`.
+- A call that collected it and then prints no summary still prints the report.
+  - It is one JSON line on standard output, `{"background": <its report>}`, the shape `search <id> --stop` prints.
+  - This covers a refusal (a closed gate, an unreadable template, no choice point, a misspelt block constant, a forbidden steering alternative).
+  - It also covers an error nothing caught.
+  - The error message and the exit code are as they would be without the line.
+  - The search's files are gone by then, so no later call could print the report.
   - `end`: how it ended: a block's end reason when it ended by itself, or one of the three below.
   - `stopped`: the call cut it short while it was working.
   - `killed`: it would not go within the stop's bound, or it was still alive after its budget plus that bound.

@@ -3846,6 +3846,7 @@ def reduce_steering(template, seeds, result, boost=None):
 # with_learned and learned_weights, hands carried_parents to run_block, and asks stop_advice last.
 
 LEARNED = "learned.json"  # a ticket's learned likelihoods by choice label, in its search folder
+LEARNED_FLOOR = 0.01  # the least likelihood a round learns: the orders divide by one and take its logarithm
 PARENTS = 4  # the best distinct objects mutation and crossover start from
 MUTATE_COUNTS = (1, 2)  # choice points one mutation changes: one of these
 CHILD_TRIES = 24  # draws a mutation or crossover makes for a candidate not tried before
@@ -3871,18 +3872,30 @@ def read_learned(state):
     return data if isinstance(data, dict) else {}
 
 
+def kept_likelihood(w):
+    """A kept likelihood as read: the floor when it is zero, negative, not a number, or not finite."""
+    if isinstance(w, bool) or not isinstance(w, (int, float)):
+        return LEARNED_FLOOR
+    try:
+        w = float(w)
+    except OverflowError:
+        return LEARNED_FLOOR
+    return w if math.isfinite(w) and w > 0 else LEARNED_FLOOR
+
+
 def with_learned(template, learned):
     """The template with each kept choice point's likelihoods replaced by what the last round learned.
 
     A choice point is kept when its label is in learned and the signature of what the writer wrote
     for it is the same; one that is new or was edited keeps the writer's likelihoods, its priors.
+    Each is read through kept_likelihood, so a file an older tool wrote a zero into stops no search.
     """
     parts = []
     for p in template.parts:
         got = learned.get(p.label) if isinstance(p, Choice) else None
         if isinstance(got, dict) and got.get("sig") == choice_sig(p) and isinstance(got.get("weights"), list) \
                 and len(got["weights"]) == len(p.alternatives):
-            p = p._replace(likelihoods=[float(w) for w in got["weights"]])
+            p = p._replace(likelihoods=[kept_likelihood(w) for w in got["weights"]])
         parts.append(p)
     return Template(parts)
 
@@ -3894,6 +3907,9 @@ def learned_weights(template, results, written):
     of the choice point's) weighing PRIOR_WEIGHT results, moved by how far each scored candidate holding
     it fell below the baseline's differing bytes (toward helps) or rose above (toward hurts); a
     candidate that did not build counts as the worst. A choice point no result varies keeps its priors.
+    Scaled to the largest of the choice point, which is 1, none is kept below LEARNED_FLOOR.
+    A choice point that ended the round frozen as inert learns nothing: every later candidate holds
+    its first alternative without varying it, so its entry holds the likelihoods it began the round with.
     Each is signed as written (the template as the writer wrote it, before with_learned). Empty when
     the baseline was not scored.
     """
@@ -3908,13 +3924,16 @@ def learned_weights(template, results, written):
         gain = -1.0 if d is None or d < 0 else (base - d) / max(base, d, 1)
         for i, pick in enumerate(template.vector(r["seed"])):
             (helped if gain > 0 else hurt)[i][pick] += abs(gain)
-    out = {}
+    out, frozen = {}, set(inert_choices(template, results))
     for i, (c, weights) in enumerate(zip(written.choices, likelihoods(template))):
+        if c.label in frozen:
+            out[c.label] = {"sig": choice_sig(c), "weights": list(weights)}
+            continue
         if not any(helped[i]) and not any(hurt[i]):
             continue
         prior = [w / sum(weights) for w in weights]
         mean = [(PRIOR_WEIGHT * p + helped[i][a]) / (PRIOR_WEIGHT + helped[i][a] + hurt[i][a]) for a, p in enumerate(prior)]
-        out[c.label] = {"sig": choice_sig(c), "weights": [round(m / max(mean), 6) for m in mean]}
+        out[c.label] = {"sig": choice_sig(c), "weights": [max(LEARNED_FLOOR, round(m / max(mean), 6)) for m in mean]}
     return out
 
 
@@ -5064,12 +5083,18 @@ def call_seconds(called, counts):
 
 
 def cmd_search(a):
-    """`search`. An error that ends a background search is told to it first, so that its report names it."""
+    """`search`. An error that ends a background search is told to it first, so that its report names it.
+
+    A call that collected a background search and ends with no summary prints that search's report
+    here, as `search --stop` does: the search's files are gone, so nothing could print it later.
+    """
     try:
         return search_call(a)
     except BaseException as err:
         if Background.current:
             Background.current.died(err)
+        if search_call.owed is not None:
+            print(json.dumps({"background": search_call.owed}), flush=True)
         raise
 
 
@@ -5093,6 +5118,7 @@ def search_call(a):
     collect_s = round(time.perf_counter() - collecting, 2)  # collect_s: stopping the background search and taking in its results
     if found and found["natural"]:
         return print(json.dumps(found["summary"]))
+    search_call.owed = found and found["report"]  # until the summary is printed: see cmd_search
     is_open, reason = gate(t)
     if not is_open:
         die(f"template search is closed for {t['id']}: {reason}; nothing was built.")
@@ -5206,8 +5232,12 @@ def search_call(a):
         out["continues_s"] = budget  # the search goes on in the background this long; the next call reports it
     out["counts"]["call_s"] = call_seconds(called, counts)  # taken again: the summary's covers the work after the record
     print(json.dumps(out))
+    search_call.owed = None
     if not repeat:  # a repeat is no round: the next block's ceiling is measured from the last counted round
         (state / "ended").write_text(str(time.time()), encoding="utf-8")
+
+
+search_call.owed = None  # the report of the background search the call collected, while no summary has shown it
 
 
 def search_detail(t, code):
