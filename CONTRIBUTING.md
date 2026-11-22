@@ -34,7 +34,7 @@ Also run `npm run test:decomp` (the same as `python scripts/test-decomp.py`) whe
 
 No CI runs these checks, so the author runs them. Before a pull request merges, its author runs `npm run check` and the full `npm run test:decomp` on the branch tip, on their own machine, and the pull request's Evidence names the machine and the result.
 
-On Windows, never pass script text (Python, Node or shell) through a shell heredoc: Git Bash rewrites backslashes and quotes inside it, so the script fails or edits the wrong text. Write the script to a file with the file-writing tool and run that file. To edit source that holds backslash escapes, use the edit tool, not a script. A script that rewrites a file opens it with newline translation off, for reading and for writing (in Python, `open(path, newline="")`), so line endings stay as they were.
+On Windows, never pass script text (Python, Node or shell) through a shell heredoc: Git Bash rewrites backslashes and quotes inside it, so the script fails or edits the wrong text. Write the script to a file with the file-writing tool and run that file. To edit source that holds backslash escapes, use the edit tool, not a script. A script that rewrites a file opens it with newline translation off, for reading and for writing (in Python, `open(path, newline="")`), so line endings stay as they were. In a new worktree, read a file before the first edit of it, and use the POSIX shell for piped output.
 
 ## Releasing
 
