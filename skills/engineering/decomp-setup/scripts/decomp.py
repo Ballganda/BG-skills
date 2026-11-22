@@ -4095,8 +4095,8 @@ def learned_weights(template, results, written):
     it fell below the baseline's differing bytes (toward helps) or rose above (toward hurts); a
     candidate that did not build counts as the worst. A choice point no result varies keeps its priors.
     Scaled to the largest of the choice point, which is 1, none is kept below LEARNED_FLOOR.
-    A choice point that ended the round frozen as inert learns nothing: every later candidate holds
-    its first alternative without varying it, so its entry holds the likelihoods it began the round with.
+    A choice point that ended the round frozen as inert learns nothing in that round: it is tried again
+    against each new object, and its entry holds the likelihoods it began the round with.
     Each is signed as written (the template as the writer wrote it, before with_learned). Empty when
     the baseline was not scored.
     """

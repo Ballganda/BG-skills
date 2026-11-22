@@ -22,16 +22,19 @@ a case builds from a short-form folder would not equal the path the tool prints 
 the same file.
 
 Template search is bounded by wall-clock time, so a case must hold on a machine many
-times slower than yours: it never asserts an outcome that a deadline, a ceiling or a
-timeout can change (a match found, an exhausted space reached) unless its subject is
-that deadline, and then its name says so. Assert an exhaustive result only on a space
-small enough to finish many times over: wide(n) has 2**n candidates. Set the time a
-round is given, never inherit it from the seconds since the last round: call
-forget_latency(p) before the next round.
+times slower or many times faster than yours: it never asserts an outcome that a
+deadline, a ceiling or a timeout can change (a match found, an exhausted space
+reached) unless its subject is that deadline, and then its name says so. When an
+outcome depends on whether something fits a time bound, the fake adapters' fixed
+waits decide it by a wide margin, never the time a tool takes to start. Assert an
+exhaustive result only on a space small enough to finish many times over: wide(n)
+has 2**n candidates. Set the time a round is given, never inherit it from the seconds
+since the last round: call forget_latency(p) before the next round.
 
-A case's scratch project is built once, when the case creates it. Many cases assert on the exact
-shape of a log or summary line, so a change to a field of one needs a search of the suite for the
-old shape first.
+Each case creates one scratch project (the Project class), built once when the case
+creates it. The helper wide(n) allows at most 12 choice points. Many cases assert on
+the exact shape of a log or summary line, so a change to a field of one needs a search
+of the suite for the old shape first.
 """
 import ast
 import hashlib
