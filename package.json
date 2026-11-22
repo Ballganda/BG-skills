@@ -11,8 +11,9 @@
   "scripts": {
     "changeset": "changeset",
     "version": "changeset version && node scripts/sync-plugin-version.mjs",
+    "release": "node scripts/release.mjs",
     "check-plugin-version": "node scripts/sync-plugin-version.mjs --check",
-    "check": "npm run check-skills && npm run test:check-skills && npm run test:implement && npm run test:decomp-runner && npm run test:decomp-list && npm run test:replies-line",
+    "check": "npm run check-skills && npm run test:check-skills && npm run test:implement && npm run test:decomp-runner && npm run test:decomp-list && npm run test:replies-line && npm run test:release",
     "test:decomp": "python scripts/test-decomp.py",
     "test:decomp-runner": "python scripts/test-decomp-runner.py",
     "test:decomp-list": "python scripts/test-decomp.py --list",
@@ -20,6 +21,7 @@
     "check-skills": "node scripts/check-skills.mjs",
     "test:check-skills": "node scripts/test-check-skills.mjs",
     "test:replies-line": "node scripts/test-replies-line.mjs",
+    "test:release": "node scripts/test-release.mjs",
     "test:eval-login": "node scripts/test-eval-login.mjs",
     "test:eval-replies": "node scripts/test-eval-replies.mjs",
     "test:eval-regrade": "node scripts/test-eval-regrade.mjs",
