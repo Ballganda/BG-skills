@@ -35,3 +35,13 @@ Also run `npm run test:decomp` (the same as `python scripts/test-decomp.py`) whe
 No CI runs these checks, so the author runs them. Before a pull request merges, its author runs `npm run check` and the full `npm run test:decomp` on the branch tip, on their own machine, and the pull request's Evidence names the machine and the result.
 
 On Windows, never pass script text (Python, Node or shell) through a shell heredoc: Git Bash rewrites backslashes and quotes inside it, so the script fails or edits the wrong text. Write the script to a file with the file-writing tool and run that file. To edit source that holds backslash escapes, use the edit tool, not a script. A script that rewrites a file opens it with newline translation off, for reading and for writing (in Python, `open(path, newline="")`), so line endings stay as they were.
+
+## Releasing
+
+Releases are cut locally, by the maintainer, from main. No CI workflow runs them.
+
+Run `npm run release`. It versions with the pending changesets, commits the result as "chore: version skills" (no co-author line), tags it `v` plus the new version, pushes main and the tag, and publishes a GitHub release whose notes are the new version's section of `CHANGELOG.md`. It needs the `gh` CLI signed in, and a token for the changelog generator.
+
+Run `npm run release -- --dry-run` first: it prints the version it would cut, the changesets it would consume and its steps, and changes nothing. `--skip-publish` does everything but the GitHub release.
+
+It refuses, names the cause, exits non-zero and changes nothing when the checkout is not on main, is dirty, is not level with `origin/main`, or has no pending changeset. A failure after the commit names the failed step and the commands that finish the release by hand.
