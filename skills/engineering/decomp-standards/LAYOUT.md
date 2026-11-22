@@ -264,6 +264,7 @@ Commands with detail link to their section below the table.
 - A round that ran is one attempt in the check trail, unless it is a repeat (every candidate served from the result cache).
 - It records nothing in the ledger and writes nothing in the tree.
 - It first stops the ticket's [background search](#background-search) and reports what that found.
+  - A call that then prints no summary prints `{"background": <its report>}` alone on standard output.
 - `search <id> --stop` stops the ticket's background search, with every process under it.
 - `--stop` prints one JSON line: `{"background": <its report>}`, or `null` when the ticket has none.
 - The results of a stopped search join the kept round.
@@ -280,6 +281,7 @@ Commands with detail link to their section below the table.
   - `result`.
   - `differ_bytes`.
   - `kinds`: the kinds of the choice points where that candidate leaves the baseline.
+  - A match by the baseline records no kind, so `kinds` is empty.
   - `category`: the trail's category the round worked on.
   - `unix`.
 - The fields of `attempts.jsonl` are unchanged.
@@ -395,6 +397,7 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 
 - The first argument may be `@label kind` (for `PERM_LINESWAP`, a first line).
 - The label names the choice point and must be unique.
+- A label holds letters and underscores only, with no digits; a label with a digit is refused.
 - The label defaults to `A`, `B`, and on, in file order.
 - The kind is one of `decl-order`, `stmt-order`, `loop-form`, `temp-type`, `signedness`, `width`, `operator`, `expression-shape`, `branch-order`, `inlining`, `other`.
 - The kind defaults to `other`, and to `stmt-order` for `PERM_LINESWAP`.
@@ -433,7 +436,16 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - A round tries the baseline first, then every one-choice-changed candidate, then the rest of the space.
 - Each group goes most likely first (with several workers, candidates are handed out in that order and finish in any).
 - When the rest does not fit the block's budget, it is sampled instead (see [Sampling](#sampling)).
-- A choice point whose alternatives all give the baseline's object is **inert**: it is frozen at its first alternative and not varied afterwards.
+- A choice point whose alternatives all give the baseline's object is **inert**: it is frozen at its first alternative.
+  - The freeze is a guess made at the baseline, so it is tried again wherever the code changes.
+  - The first time a candidate gives an object the block has not seen, the block owes one retry per other alternative of every choice point then frozen.
+  - A retry is that candidate with the one choice point set to the one alternative, and nothing else changed.
+  - Owed retries are handed out before the next candidate of the rest of the space, in the order the objects appeared.
+  - A retry that gives that candidate's object again leaves the choice point frozen.
+  - A retry that gives anything else (another object, a build failure, a guardrail refusal) unfreezes the choice point for the rest of the block.
+  - The candidates that vary an unfrozen choice point join the rest of the space, and the retries still owed for it are dropped.
+  - A retry is a candidate like any other: it counts in `compiled` and toward the budget, the deadline and the plateau.
+  - A choice point is not tried again against a candidate whose object the block has already seen.
 - The round stops at the first exact match that uses only natural alternatives.
 - A match that needs steering is kept while the rest of the block looks for a natural one.
 - When the block ends without a natural match, the match with the fewest steering choices is reduced further.
@@ -473,6 +485,8 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - The block's budget is the compiles it is expected to fit: its compile rate over the one-change sweep, times the seconds its deadline leaves.
 - A block served wholly from the cache has no rate, and tries the whole space.
 - Sampling applies when the candidates left after the sweep, inert choice points frozen, outnumber the budget left.
+  - It is judged again when a choice point is unfrozen, which then is free for the sampler, mutation and crossover.
+  - Owed retries are handed out before the sampler's next pick.
 - Then the tool picks them one at a time, each from every result in so far.
 - Each alternative holds a belief that it helps.
   - It starts at the alternative's share of its choice point's likelihoods (history and closeness included).
@@ -496,7 +510,15 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 
 - At the end of a round the tool keeps each choice point's beliefs as likelihoods, in the ticket's search folder (`learned.json`).
 - They are the starting beliefs above moved by that round's results.
+- They are scaled so that the largest of a choice point is 1, and rounded to 6 places.
+- **Floor:** no likelihood a round learned is kept below 0.01, so an alternative that hurt every round goes last and is still tried.
+- **Frozen:** a choice point that is inert when the round ends learns nothing from that round.
+  - Its entry holds the likelihoods it began the round with: what the last round learned, or the writer's.
+  - Every candidate after the sweep holds its first alternative, so the results say nothing about that alternative.
+- A choice point that was free learns from every candidate of the round.
 - A choice point the next template **keeps** starts from those likelihoods in place of the writer's.
+- **Reading:** a kept likelihood that is zero, negative, not a number, or not finite is read as the floor, 0.01.
+  - So a `learned.json` an older tool wrote a zero into stops no search.
 - A choice point is kept when it has the same label, and the same kind, alternatives, likelihoods, and steering tags as the writer wrote them.
 - A choice point that is new or edited starts from its priors.
 - A round that scored no baseline keeps the earlier ones.
@@ -554,6 +576,8 @@ A **template** is the unit's whole source file, `@decomp` marker included, with 
 - Every 30 seconds the block recompiles its reference candidate, the baseline, in a folder of its own, holding a compile slot like any build.
 - Its base is the median of the block's first 2 × workers compile times.
 - When the block built nothing before it, the base is the first reference compile.
+- Under batching a compile time is a call's time shared among its candidates, so the base is the first reference compile instead.
+  - It is made as the block begins, and a failed one gives no base: the next that passes becomes it.
 - A reference compile more than 30 percent over the base halves the worker count, down to the floor.
 - It also raises `contention-or-throttle` in the [performance log](#performance-log).
 
@@ -563,9 +587,12 @@ A block ends on the first of these that holds:
 
 - `match`: a candidate matches exactly with natural alternatives only.
   - A block that ends another way while it holds a match that needs steering also reports `match`, with that match reduced.
-- `abort-buildfail`: more than half of the first 2 × workers builds failed. Fix the template.
+- `abort-buildfail`: more than half of the first 2 × workers builds failed. Fix the template: the summary's `failure` and `build_failed` say what failed.
 - `exhausted`: every candidate was tried, or more than 90 percent of the last 100 candidates repeated a source already tried.
   - A block that finished its last pass (see `deadline`) ends here.
+  - It is reported only when no retry of a frozen choice point is owed (see [A round](#a-round)).
+  - So every candidate was tried, or was left out by a freeze that held against every object the block found.
+  - A block whose deadline or plateau comes with retries owed ends on that reason.
 - `plateau`: the last 200 scored candidates, and no fewer than a quarter of all scored in the block, brought no new best score and no new object.
   - It is no new best score alone when the round has no object identity: see [Result cache](#result-cache).
 - `deadline`: the block ran for 10 seconds and built 200 candidates, or reached its ceiling first.
@@ -573,26 +600,42 @@ A block ends on the first of these that holds:
   - A block with the `budget` constant set also ends here once it built that many candidates.
   - The last pass: when the deadline comes with no more candidates left in the space than the block runs workers, the block does not end here.
   - It hands them out, waits for them, and ends `exhausted`, so it leaves no background search.
+  - Owed retries count among the candidates left.
+  - A last pass that brings a new retry or unfreezes a choice point does not build what that adds, and ends `deadline`.
   - Plateau and repeats do not end a last pass.
-  - A match and a hung compile's kill still apply, so the overrun is one compile, or the hang limit at most.
+  - A match and a hung compile's kill still apply, so the overrun is the compile in hand plus the last pass, or the hang limit at most.
+  - Under batching a worker starts no batch once the deadline has come, unless it is in the last pass.
+  - So the overrun is one batch: its compiler call and the diffs of its candidates.
 
 ### Background search
 
 - When a block ends on `plateau` or `deadline` with time left under the ceiling and candidates untried, `search` prints its summary, with `continues_s`.
 - It leaves a detached process searching the same template on for that many seconds.
 - That process builds only what the round has not tried.
+- Its block freezes, retries and unfreezes by the same rule (see [A round](#a-round)), judged from the results the round already holds.
 - It ends on a match, its time, or the end of the space.
 - It is no attempt.
 - It yields to foreground blocks.
   - No foreground search counts it as a writer.
   - It starts no build while any foreground search on this machine has a fresh heartbeat in the pool.
-  - A block has its slots back within one compile.
+  - A block has its slots back within one compile, or within one batch under batching.
+  - It starts no build once its time has come or it was stopped, whether it waits on the foreground or holds a slot: a build in hand runs to its end.
+  - A search whose time ended while foreground searches were beating starts no build and ends with the line `ended: deadline, waited its whole budget on the foreground: <their names>, no build started`.
+  - Its report then holds `waited_on_foreground: true`, and no other report holds that field.
+  - Its `tried` is 0, so its log is kept (see below).
+- Under batching it starts no batch once its time has come or it was stopped.
 - The call that started it is the one exception: that call left the pool before it started the search.
 - So a heartbeat still under its name is one it failed to remove, and the search does not wait on it.
 - A call that cannot remove its own heartbeat as it leaves the pool does not fail.
   - It keeps a line with the heartbeat's name and the error.
   - The background search it then starts copies that line into its log, at its start.
 - The next `search` call for the ticket stops it and reports it under `background`.
+- A call that collected it and then prints no summary still prints the report.
+  - It is one JSON line on standard output, `{"background": <its report>}`, the shape `search <id> --stop` prints.
+  - This covers a refusal (a closed gate, an unreadable template, no choice point, a misspelt block constant, a forbidden steering alternative).
+  - It also covers an error nothing caught.
+  - The error message and the exit code are as they would be without the line.
+  - The search's files are gone by then, so no later call could print the report.
   - `end`: how it ended: a block's end reason when it ended by itself, or one of the three below.
   - `stopped`: the call cut it short while it was working.
   - `killed`: it would not go within the stop's bound, or it was still alive after its budget plus that bound.
@@ -602,6 +645,7 @@ A block ends on the first of these that holds:
   - `ran_s`: the seconds from its start to its collection.
   - `budget_s`: the seconds it was given.
   - `tried`.
+  - `waited_on_foreground`: `true`, only when the search started no build because foreground searches were beating until its time ended.
   - `best`: the fewest differing bytes, then the lowest seed, among the candidates it tried, named in the old template's choice codes.
 - When `tried` is 0, the report also holds `log`.
   - The search's log is kept as `.decomp/search/<ticket id>/background.log`, in place of the last kept one.
@@ -650,6 +694,7 @@ Each number above is a default.
 - `probe_gain`: 0.05; the share by which a calibration probe's mode must be faster to be kept.
 - `probe_runs`: 2; the builds a probe times of each mode, of which the fastest counts.
 - `probe_min_chars`: 2000; the least body text, in characters, the single-function probe must be able to cut to run; an estimate, not measured.
+- `probe_cost_frac`: 0.5; the share of the block's ceiling that the batching and resolved-compiler probes may cost together; 0 switches both off.
 - `tune_s`: 2; the tuning tick; 0 keeps the starting worker count.
 - `tune_gain`: 0.05.
 - `tune_loss`: 0.1.
@@ -667,6 +712,22 @@ Each number above is a default.
 - Each probe writes one calibration record to the [performance log](#performance-log).
 - The answers are kept in the result cache until something the cache key covers changes.
 - Those are the source outside the target function, the `build_batch` or `build_resolve` command, or anything else the cache key covers.
+- An answer reached under the cost bound is kept like any other, under the same key.
+- The probes run again when the key changes, not when a later block has a longer ceiling.
+
+#### The cost bound
+
+- The batching and resolved-compiler probes of one calibration share one bound, in seconds.
+- The bound is `probe_cost_frac` times the ceiling of the block the call is about to run.
+- That ceiling is the time since the ticket's last round, never more than `ceiling_s`.
+- Before each batching size and before the resolved-compiler probe, `search` predicts that step's cost.
+- A step whose predicted cost, added to what the two probes have used, is over the bound is not run.
+- The single-function probe and the double compile that settles the hashing are outside the bound.
+- The reference time is one single build of the baseline.
+- A batching size of n candidates is predicted at n times the best time per candidate so far, which starts at the reference time.
+- The resolved-compiler probe is predicted at the reference time times one more than `probe_runs`.
+- Diff runs are not predicted.
+- The baseline's single build and its byte identity are taken once per calibration, and both probes use them.
 
 #### Single-function build
 
@@ -694,6 +755,13 @@ Each number above is a default.
 - One compiler call builds 4, then 8, then 16 copies of the baseline.
 - A size is kept while every object equals the single build's and the time per candidate keeps falling.
 - A size that changes the bytes drops batching.
+- The first size that is not faster by `probe_gain` ends the probe.
+- Under `function` hashing one diff run per size compares the last object of the batch with the single build's function bytes.
+- A batch that changed the bytes of another position passes the probe; `check` and `verify` build singly, so no wrong match follows.
+- Under `object` hashing every object's file hash is compared, with no diff run.
+- A size that does not fit the [cost bound](#the-cost-bound) is not tried, and neither are the larger ones.
+- The best size proven so far is kept, and the record's `reason` names the size not tried, its predicted cost and the bound.
+- When the first size does not fit, the outcome is `skipped` and nothing is built for it.
 - A worker then takes up to that many candidates at a time, builds the unseen ones in one call, and diffs each as before.
 - A candidate whose object is missing after the call is a build-fail.
 - It is skipped without the adapter.
@@ -701,6 +769,8 @@ Each number above is a default.
 #### Resolved compiler
 
 - It needs a `build_resolve` adapter.
+- It is skipped when its predicted cost does not fit what is left of the [cost bound](#the-cost-bound).
+- The record's `reason` then holds the predicted cost and the bound.
 - The probe runs the compiler from the argument list and environment the adapter hands over, with no adapter and no wrapper in between.
 - It records `eligible` when that is faster and byte-identical.
 - It is measured only: no block builds this way, because it departs from the wrapper rule, and adopting it needs an ADR.
@@ -713,15 +783,27 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `end`: why the block ended (see [How a block ends](#how-a-block-ends)).
 - `best`: the closest candidate's `code` and `differ_bytes`, or `null` when none was scored.
 - `window`: 7 lines of the best candidate's diff report (no match only).
-  - When the `diff` adapter reports `first_differ`, the window is centred on the first report line holding that offset, with 3 lines of context each side.
+  - When the `diff` adapter reports `first_differ`, the window is centred on the report line whose own offset is the greatest one not above it, with 3 lines of context each side.
+  - Of several lines with that offset, the first in the report is the centre.
+  - Without `first_differ`, with no line offset, or with every line offset above it, the window is the report's first lines.
   - Otherwise, or when no line holds it, it is the report's first lines.
   - A report line longer than 120 characters is cut inside that width and ends in ` ...`, so a line without the mark is whole.
   - When the report holds fewer than 2 lines, `notice` gains one line.
   - In full, that line starts with `no-instruction-diff:`, says the diff report holds no instruction diff, and says the fix is the `diff` adapter (see its contract under [Adapters](#adapters)).
   - Once the ticket has read it in full, the line is the name `no-instruction-diff` alone (see [Adapter notices](#adapter-notices)).
-- `failure`: the end of the first failure log (only when none was scored).
+- `failure`: the end of the first failure log.
+  - It is given when no candidate was scored, and on every `abort-buildfail` end, scored baseline or not.
+- `build_failed`: only on an `abort-buildfail` end, one row per choice point with a one-change candidate that failed to build.
+  - A row is `"<label>: <n> of <m> alternatives failed to build"`: `n` of the choice point's one-change candidates failed, `m` were tried.
+  - Rows go most failures first, then by label, at most 8.
+  - The key is absent when no one-change candidate failed.
+  - The cap drops its rows after those of `window`, `next` and `effects`, and shortens `failure` last.
 - `effects`: the choice points that change the score, at most 8, largest first, each with its alternatives' change in differing bytes against the baseline (`{"B": {"B1": -2}}`).
-- `inert`: the labels of the frozen choice points.
+- `inert`: the choice points still frozen when the round ended, each as `"<label>: <n> of <m> objects"`.
+  - `m` is the round's distinct objects, and `n` is how many of them the freeze was tried against and held, the baseline's included.
+  - `n` is below `m` only when the block ended with retries owed.
+  - A choice point is safe to leave out of the next round when `n` equals `m`, and is worth another round when it does not.
+  - A choice point unfrozen during the block is not listed: it is a free choice point when the round ends.
 - `next`: the next two closest candidates, each as the choices where it differs from the best, then its `differ_bytes`.
 - `pairs`: at most 3 pairs of alternatives whose joint effect differs from the sum of their single effects, largest first, such as `B2+D2: -6 bytes`.
   - Negative means they help more together than apart.
@@ -729,11 +811,16 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - It is the mean `differ_bytes` of those holding both, less those holding only one, less those holding only the other, plus those holding neither.
   - It appears only when a pair shows one.
 - `stop`: advice to stop.
-  - It is given when every choice point is inert (no alternative changes the object).
-  - It is given after 2 template rounds in a row that brought no new best score.
+  - It is given when every choice point is inert (no alternative changes the object) and every `inert` entry holds all of the round's objects.
+  - It is given after 2 template rounds that brought no new best score, counted over the ticket's check trail from the round just ended back.
   - A round brings a new best score when it is lower in `differ_bytes` than every earlier attempt on the ticket, checks included.
+  - Only the records after the ticket's last `bytes-match` record are read.
+  - A round with no new best score adds one, and a round with one ends the count.
+  - A `check` with no new best score is passed over, and a `check` with one ends the count.
+  - A round that ends `match` carries no `stop`.
   - A repeat is no round here.
 - `history`: one line of project history for the ticket's latest category, such as `decl-order fixed register-allocation 7 of 9 times on this compiler` (only when the ledger holds a template round for it).
+  - A match by the baseline records no kind, so the history counts nothing for it.
 - `counts`: the numbers of the round, listed below.
 - `winner`: on a match, the path of the matching candidate as plain C with no macros: `.decomp/search/<ticket id>/winner/<source file name>`.
   - The next round of the ticket that matches replaces it.
@@ -745,6 +832,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
   - A round that builds even one candidate is not a repeat.
 - `background`: only when the call collected a background search: its report (see [Background search](#background-search)), with `log` when it tried nothing.
   - The cap never drops `background`.
+  - The cap applies to the whole printed line, `background`, `repeat` and `continues_s` included: the other parts give way, in the order above.
+  - The same holds for the summary a collected natural match prints.
 
 #### Counts
 
@@ -754,10 +843,17 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `guardrail`.
 - `src_dedupe_hits`: candidates whose source was already seen this round, never built twice.
 - `cache_hits`: candidates served from the result cache without building.
-- `object_hits`: built, but the diff skipped because the object or function bytes were already scored.
+- `object_hits`: built, but the object or function bytes were already scored.
+  - Under `object` hashing a hit skips the diff.
+  - Under `function` hashing the diff adapter still runs on a hit, since the function's bytes are known only from its output; a hit then means only that those bytes were already scored.
 - `unique_objects`: distinct objects scored.
 - `hashing`: `object`, or `function` when the compiler's objects differ between two compiles of one source.
 - `workers`: the count the block started with.
+  - It is the cores divided by the active writers, unless `workers` is set.
+  - At its first heartbeat the search counts the writers again.
+  - A higher count becomes its starting count: `workers` is cut to the cores divided by it when above that, and the tuner's floor follows.
+  - A lower count changes nothing, and neither does a block that ends before its first heartbeat.
+  - A set `workers` is never cut.
 - `wall_s`: the block's seconds: the time candidates were tried, without the calibration before it.
 - `call_s`: the seconds of the whole `search` call, from its start to the summary.
   - It covers calibration, probes, and the block.
@@ -771,6 +867,8 @@ The summary is one JSON line, capped at about 600 tokens, that never holds candi
 - `single_function`: whether candidates were built as the single-function source.
 - `batch`: candidates per compiler call; 1 is no batching.
 - `writers_active`: searches running on this machine when the round started, this one included.
+  - A higher count at the search's first heartbeat replaces it, so two searches started together report the same count.
+  - A set `workers` still corrects `writers_active`.
 - `slots`: the pool's size.
 - `slots_reclaimed`: slots taken back from a search that stopped beating.
 - A block that sampled adds these:
@@ -859,6 +957,7 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `wall_s`: the seconds of the block alone, or of the calibration alone.
 - `t_ref_ms`: the median of the block's reference compiles.
   - Without one, it is the first passing compile of the block, or of the calibration.
+  - Under batching it is always a single build's time, so `null` without a reference compile.
 
 #### A probe's calibration record
 
@@ -866,14 +965,21 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `outcome`: `kept`, `dropped`, or `skipped`.
   - `eligible` stands in place of `kept` for the resolved compiler, which is never used.
 - `reason`.
+- A `skipped` record is written once per ticket, probe and reason: the log already holding one says the same.
+  - A skip for another reason is written, and so is every record with another outcome.
 - `t_ref_ms`: a build the usual way.
 - `t_probe_ms`: the probed mode, per candidate.
 - `identical`: where bytes were compared.
 - For batching: `batch`, the size kept (1 for none), and `sizes_ms`, per candidate, by size tried.
+- `predicted_s` and `bound_s`, for a probe cut short or skipped for cost.
+  - `predicted_s` is what the two probes had used plus the predicted cost of the step that did not fit.
+  - `bound_s` is the cost bound; the step did not run because `predicted_s` is above it.
 - The double compile's record holds no `probe`.
 
 #### A block record
 
+- Every number is rounded where it is written: milliseconds to 2 places, seconds and shares to 3.
+  - That covers the median and p95 compile times.
 - `unit`, `round`, `block`.
 - `repeat`: `true` on the record of a repeat, a round served wholly from the result cache; a counted round's record has no such field.
   - A repeat's `round` is the number of the last counted round, the one it repeated.
@@ -898,6 +1004,7 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 - `best_score_end`: the `differ_bytes` of this block's own best candidate; `null` when none was scored.
   - It is the block's best, not the ticket's, so it can be worse than `best_score_start`.
 - `t_to_best_s`, `end_reason`, `model_latency_s`, `writers_active`.
+  - `writers_active` is the corrected count (see the summary's `writers_active`).
 - The `flags` it raised and those it `shown`.
 - `unique_objects` is `null` when the round had no object identity (see [Result cache](#result-cache)).
 
@@ -905,6 +1012,10 @@ Two notices in the summary's `notice` list come from the `diff` adapter: `no-obj
 
 - Flags compare a block with the earlier blocks of its own unit, taken from the last 20 block records of the same compiler: another unit's headers say nothing about this one's speed.
 - `slow-compile`: raised when compiles per worker-second are down 30 percent or more against the median of those blocks, once 3 exist, so a unit's first blocks raise nothing.
+  - A block that killed one or more compiles raises no `slow-compile`: a hang is not a slow machine.
+  - In the streak such a block is passed over, like a block that could not measure.
+  - Its rate is left out of the medians later blocks are compared with.
+  - The other flags are unchanged.
 - The next three read the block alone.
 - `io-jitter`: its p95 compile time is above 3 times its own median compile time.
 - `expander-starved`: `idle_frac` is above 20 percent.
@@ -1007,7 +1118,11 @@ Every change to a path a tag freezes (a contract change, a skill upgrade, an inv
   - `{symbols}` is the path of the symbol map in the tree being built.
   - The JSON may also carry `first_differ`, the byte offset of the first difference (optional, a non-negative integer).
   - `search` uses `first_differ` to break ties and to place the diff window, and everything else ignores it.
-  - The report holds one line per instruction, each with its offset in the function as a whole number (hex, `0x` optional, or decimal), on 32-bit and 64-bit targets alike.
+  - The report holds one line per instruction, each leading with its offset in the function as a whole number (hex, `0x` optional, or decimal), on 32-bit and 64-bit targets alike.
+  - Only the number a line leads with is its offset: after nothing but white space and punctuation (a diff mark, `+`, `0x`, a bracket). No other number on the line is read, and a line led by a word has none.
+  - `0x` makes the reading certain. Without it the report is read as hex when any line's offset holds a hex letter, and as decimal otherwise.
+  - `first_differ` may fall inside an instruction, such as in an operand or a displacement.
+  - A report that prints both sides of a differing instruction may give both lines the same offset.
   - A disassembler prints 8-digit or 16-digit addresses by target, so an adapter that parses its output reads both widths.
   - A report of a header line alone is a fault in the adapter.
   - `first_differ` and `function_sha256` stay optional where the contract does not allow template search.

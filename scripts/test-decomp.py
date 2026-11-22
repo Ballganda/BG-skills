@@ -2128,10 +2128,81 @@ def test_search_summary_stays_under_the_cap_and_holds_no_source(base):
     expect("WRONG" not in r.stdout and "int f" not in r.stdout, "the summary holds no candidate source", r)
 
 
+def long_effects(points=8, alternatives=12):
+    """A template whose effects table has long rows: long labels, and each alternative changes the score."""
+    rows = []
+    for i in range(points):
+        label = "@effect_of_choice_point_" + chr(97 + i) * 12
+        alts = [f"int WRONG_{chr(97 + i)}{chr(97 + k)}; " * (k + 1) for k in range(alternatives)]  # k + 1 wrong lines each
+        rows.append("PERM_GENERAL(" + ", ".join([label] + alts) + ")")
+    return MARK + "int f(void) { int WRONG_now; " + " ".join(rows) + " return 1; }\n"
+
+
+def test_search_summary_holds_the_whole_background_report_and_stays_under_the_cap(base):
+    p = search_project(base)
+    tune(p, workers=1, deadline_s=1, ceiling_s=30, background=1)
+    try:
+        r, out = search(p, long_effects(alternatives=11))  # long labels make the background report's best code long
+        expect(out is not None and out.get("continues_s"), f"the search goes on in the background: {out}", r)
+        expect(wait_for(lambda: background_tried(p) >= 2), "the background search builds candidates")
+        tune(p, workers=4, deadline_s=8, ceiling_s=30)
+        forget_latency(p)
+        r, out = search(p, long_effects(alternatives=7))
+        line = r.stdout.splitlines()[0]
+        found = out.get("background") if out else None
+        expect(found is not None and found["end"] == "stopped" and "best" in found, f"the call collected the background search: {out}", r)
+        expect(len(line) <= 600 * 4, f"the printed line, background report included, is {len(line)} characters", r)
+        expect(out.get("effects"), f"the rows the cap keeps are still there: {out}", r)
+    finally:
+        stop_background(p)
+
+
 def test_search_reports_the_build_failure_when_no_candidate_builds(base):
     r, out = search(search_project(base), MATCHING.replace("return 1;", "SYNTAX_ERROR"))
     expect(out is not None and out["end"] == "abort-buildfail" and out["best"] is None, "no candidate is the best", r)
     expect(2 <= out["counts"]["build_fail"] <= 6 and "C2143" in out["failure"], "the summary carries the compiler's error", r)
+
+
+BROKEN_A = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, SYNTAX_ERROR a1;, SYNTAX_ERROR a2;, SYNTAX_ERROR a3;) "
+                   "PERM_GENERAL(int WRONG_b0;, int WRONG_b1; int WRONG_b2;) return 1; }\n")
+
+
+def test_search_summary_of_an_abort_buildfail_names_the_failure_and_the_choice_point(base):
+    p = search_project(base)
+    tune(p, workers=2, buildfail_frac=0.2)
+    r, out = search(p, BROKEN_A)
+    expect(out is not None and out["end"] == "abort-buildfail" and out["best"] is not None, f"a scored baseline: {out}", r)
+    expect("C2143" in out.get("failure", ""), f"the summary carries the compiler's error: {out}", r)
+    expect(out.get("window"), f"and still the window: {out}", r)
+    rows = out.get("build_failed", [])
+    expect(len(rows) == 1 and rows[0].startswith("A: ") and rows[0].endswith(" alternatives failed to build"),
+           f"one row, for the choice point whose alternatives failed: {rows}", r)
+    expect(len(rows[0].split()) == 8 and int(rows[0].split()[1]) <= int(rows[0].split()[3]) <= 3,
+           f"it holds the failed and tried counts: {rows}", r)
+
+
+def test_search_summary_holds_no_failure_or_build_failed_when_the_block_ends_another_way(base):
+    p = search_project(base)
+    tune(p, buildfail_frac=0.99)
+    r, out = search(p, BROKEN_A)
+    expect(out is not None and out["end"] != "abort-buildfail" and out["counts"]["build_fail"] > 0,
+           f"some builds failed but the block did not abort: {out}", r)
+    expect("failure" not in out and "build_failed" not in out, f"neither key is given: {out}", r)
+
+
+def test_an_abort_buildfail_summary_with_long_rows_stays_under_the_cap_and_keeps_failure(base):
+    tool = load_tool()
+    template = tool.parse_template(wide(12))
+    n = len(template.choices)
+    results = [{"seed": 0, "code": "x", "result": "differ", "differ_bytes": 8, "object": "o"}]
+    for i in range(n):
+        vector = [1 if j == i else 0 for j in range(n)]
+        results.append({"seed": template.seed(vector), "code": "x", "result": "build-fail", "differ_bytes": None, "object": None})
+    best = {"seed": 0, "score": tool.Score("differ", 8, ""), "window": ["x" * 118] * 7, "failure": "C2143 " * 200}
+    tool.SUMMARY_TOKENS = 200
+    out = tool.summary(template, "abort-buildfail", best, {"space": 4096}, None, results)
+    expect(len(json.dumps(out)) <= 200 * tool.TOKEN_CHARS, f"the summary is {len(json.dumps(out))} characters")
+    expect(out.get("failure", "").endswith("C2143 "), f"failure is kept: {out}")
 
 
 def test_search_detail_returns_one_candidates_source_and_score(base):
@@ -2359,6 +2430,73 @@ def test_search_window_is_centred_on_the_first_difference_with_three_lines_of_co
     expect(first > 20, "the centre is the offset of the first difference, not the report's start", r)
 
 
+# A fake diff whose report is the "lines" of its third argument, a JSON object, and whose first_differ is its "first" (if any).
+SEARCH_AT_DIFF_PY = """import json, sys
+n = open(sys.argv[1]).read().count("WRONG")
+spec = json.load(open(sys.argv[3]))
+open(sys.argv[2], "w").write("".join(line + chr(10) for line in spec["lines"]))
+out = dict(match=n == 0, differ_bytes=2 * n)
+if "first" in spec:
+    out["first_differ"] = spec["first"]
+print(json.dumps(out))
+"""
+
+
+def window_of(base, lines, first=None):
+    """The summary's window for a report of these lines and a first_differ (none when first is None)."""
+    spec = {"lines": lines} if first is None else {"lines": lines, "first": first}
+    p = search_project(base, files={"tools/search_diff.py": SEARCH_AT_DIFF_PY, "tools/report.json": json.dumps(spec)},
+                       config={"diff": PY + ' "{tools}/search_diff.py" "{obj}" "{report}" "{tools}/report.json"'})
+    r, out = search(p, NEVER)
+    expect(out is not None, "search should run", r)
+    return r, out["window"]
+
+
+STEPS = [0, 3, 4, 7, 12, 14, 19, 21, 26, 30, 33, 38, 44, 47, 52, 55, 60, 64]  # uneven instruction offsets
+UNEVEN = [f"  +0x{o:x}: mov rdx,qword ptr [rcx+58h]" for o in STEPS]
+
+
+def test_search_window_is_centred_on_the_instruction_holding_the_first_differing_byte(base):
+    r, window = window_of(base, ["header: f", *UNEVEN], 0x2e)  # the instruction at +0x2c, 2 bytes in
+    expect(len(window) == 7 and window[3] == "  +0x2c: mov rdx,qword ptr [rcx+58h]", f"the 4th line is the instruction's: {window}", r)
+
+
+def test_search_window_ignores_a_jump_target_that_equals_first_differ(base):
+    lines = [UNEVEN[0], "  +0x3: je 000000000000002e", *UNEVEN[2:]]
+    r, window = window_of(base, lines, 0x2e)
+    expect(window[3] == "  +0x2c: mov rdx,qword ptr [rcx+58h]", f"the 4th line is the instruction's: {window}", r)
+
+
+def test_search_window_is_not_centred_on_a_header_count(base):
+    lines = ["differ_bytes 29", *[f"{o:04d} mov eax, 1" for o in range(0, 40, 4)]]
+    r, window = window_of(base, lines, 29)
+    expect(window[3] == "0028 mov eax, 1", f"the 4th line is the instruction at 28: {window}", r)
+
+
+def test_search_window_is_centred_on_the_first_of_two_lines_of_one_offset(base):
+    lines = [f"  +0x{o:x}: nop" for o in range(0, 10)] + ["- +0x14: mov eax, 1", "+ +0x14: mov ecx, 1"] + \
+           [f"  +0x{o:x}: nop" for o in range(0x16, 0x20)]
+    r, window = window_of(base, lines, 0x15)
+    expect(window[3] == "- +0x14: mov eax, 1" and window[4] == "+ +0x14: mov ecx, 1", f"the 4th line is the first of the two: {window}", r)
+
+
+def test_search_window_is_centred_on_the_last_line_when_first_differ_is_past_it(base):
+    r, window = window_of(base, UNEVEN, 500)
+    expect(window == UNEVEN[-4:], f"the window is centred on the last instruction line: {window}", r)
+
+
+def test_search_window_is_the_first_lines_when_every_offset_is_above_first_differ(base):
+    lines = [f"  +0x{o:x}: nop" for o in range(0x10, 0x30)]
+    r, window = window_of(base, lines, 4)
+    expect(window == lines[:7], f"the report's first lines: {window}", r)
+
+
+def test_search_window_is_the_first_lines_when_the_report_has_no_offsets(base):
+    lines = [f"mov eax, {n}" for n in range(20)]
+    r, window = window_of(base, lines, 4)
+    expect(window == lines[:7], f"the report's first lines: {window}", r)
+
+
 def test_search_without_first_differ_keeps_the_first_lines_and_the_old_order(base):
     r, out = search(search_project(base), SAME_BYTES)
     expect(out is not None and out["best"] == {"code": "A0", "differ_bytes": 2},
@@ -2503,8 +2641,9 @@ def test_search_freezes_a_choice_the_compiler_ignores(base):
     template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_b2;) "
                        "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) return 1; }\n")
     r, out = search(p, template)
-    expect(out is not None and out["inert"] == ["B"], f"the ignored choice should be inert: {out}", r)
-    expect(out["counts"]["compiled"] == 4, "the inert choice is not varied after the one-change candidates", r)
+    expect(out is not None and out["inert"] == ["B: 2 of 2 objects"], f"the ignored choice should be inert: {out}", r)
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 6,
+           f"after the sweep of 4 the inert choice is only tried again, twice, against the one new object: {out}", r)
     expect(out["effects"] == [{"A": {"A1": 2}}], f"the effect table lists only choices that change the score: {out['effects']}", r)
     expect("stop" not in out, "a search with a live choice carries no stop advice", r)
 
@@ -2512,9 +2651,86 @@ def test_search_freezes_a_choice_the_compiler_ignores(base):
 def test_search_advises_stopping_when_every_choice_is_inert(base):
     template = MARK + "int f(void) { int WRONG_k; PERM_GENERAL(int IGNORED_x;, int IGNORED_y;) return 1; }\n"
     r, out = search(sweep_project(base), template)
-    expect(out is not None and out["inert"] == ["A"] and out["effects"] == [], f"every choice is inert: {out}", r)
+    expect(out is not None and out["inert"] == ["A: 1 of 1 objects"] and out["effects"] == [], f"every choice is inert: {out}", r)
     expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 2 and "stop searching" in out["stop"],
            "the summary should carry stop advice", r)
+
+
+# A fake compiler that logs each compile's tag_ words in order. Its object holds a word with _h in it (the
+# helper's) only when the source holds tag_b1 (the body that calls the helper), and never a word with _u in it.
+REACH_BUILD_PY = """import re, sys
+text = open(sys.argv[1]).read()
+open(LOG, "a").write(" ".join(re.findall(r"tag_\\w+", text)) + chr(10))
+text = re.sub(r"\\w+_u\\w*", "", text)
+if "tag_b1" not in text:
+    text = re.sub(r"\\w+_h\\w*", "", text)
+open(sys.argv[2], "w").write(text)
+"""
+REACHED = ("PERM_GENERAL(@body, int tag_b0; int WRONG_b;, int tag_b1;{left}) "
+           "PERM_GENERAL(@hloop loop-form, int tag_h0; int WRONG_h;, int tag_h1;{left})")
+UNREAD = in_function("PERM_GENERAL(" + ", ".join(f"int tag_a{i}; int WRONG_a{i};" for i in range(3)) + ") "
+                     + " ".join("PERM_GENERAL(" + ", ".join(f"int tag_u{c}{i};" for i in range(3)) + ")" for c in "pq"))
+
+
+def reach_search(base, template, **constants):
+    """sampled_search with the compiler above. Returns (process, summary, the candidates built, in order)."""
+    build = REACH_BUILD_PY.replace("LOG", repr(str(Path(base) / "order.log")))
+    return sampled_search(base, template, files={"tools/search_build.py": build}, **constants)
+
+
+def test_search_tries_a_frozen_choice_again_once_a_candidate_reaches_its_code_and_finds_the_match(base):
+    r, out, order = reach_search(base, in_function(REACHED.format(left="")))
+    expect(out["end"] == "match" and out["best"] == {"code": "body1 hloop1", "differ_bytes": 0},
+           f"the candidate the freeze at the baseline would hide is the match: {out}", r)
+    expect(out["counts"]["compiled"] == 4 and order[3] == "tag_b1 tag_h1", f"it is the fourth candidate built: {order}", r)
+    expect(out["inert"] == [], f"the retry changed the object, so the choice point is unfrozen: {out['inert']}", r)
+
+
+def test_search_with_a_frozen_choice_unfrozen_by_its_retry_and_no_match_ends_exhausted_with_the_space_built(base):
+    r, out, order = reach_search(base, in_function(REACHED.format(left=" int WRONG_left;")))
+    expect(out["end"] == "exhausted" and out["counts"]["compiled"] == 4 and sorted(order) == sorted(set(order)),
+           f"all 4 candidates are built: {out}", r)
+    expect(out["inert"] == [] and "stop" not in out, f"no choice point stays frozen: {out}", r)
+
+
+def test_search_tries_each_frozen_choice_once_per_alternative_against_each_new_object_and_no_further(base):
+    r, out, order = reach_search(base, UNREAD)
+    c = out["counts"]
+    expect(out["end"] == "exhausted" and c["space"] == 27 and c["compiled"] == 15,
+           f"7 in the sweep, then 4 retries for each of the 2 new objects: {out}", r)
+    both = [line for line in order if "tag_up0" not in line and "tag_uq0" not in line]
+    expect(not both, f"no candidate varies both frozen choice points: {both}", r)
+    expect(out["inert"] == ["B: 3 of 3 objects", "C: 3 of 3 objects"] and c["unique_objects"] == 3,
+           f"each freeze held against every object: {out['inert']}", r)
+    retries = [line.split()[0] for line in order[7:]]
+    expect(retries == ["tag_a1"] * 4 + ["tag_a2"] * 4, f"the retries come in the order the objects appeared: {order[7:]}", r)
+
+
+def test_search_with_retries_owed_at_its_budget_ends_deadline_and_inert_says_what_was_not_tried(base):
+    r, out, order = reach_search(base, UNREAD, budget=9)
+    c = out["counts"]
+    expect(out["end"] == "deadline" and c["compiled"] == 9, f"the budget ends the block with 6 retries owed: {out}", r)
+    held = [int(entry.split(": ")[1].split()[0]) for entry in out["inert"]]
+    expect(len(held) == 2 and min(held) < c["unique_objects"] == 3 and all(e.endswith(" of 3 objects") for e in out["inert"]),
+           f"an entry holds fewer objects than the block found: {out['inert']}", r)
+    expect("stop" not in out, f"no stop advice: {out}", r)
+
+
+def test_search_samples_an_unfrozen_choice_with_a_budget_too_small_for_the_space(base):
+    template = in_function(
+        "PERM_GENERAL(@body, int tag_b0; int WRONG_b;, int tag_b1; int WRONG_c;) "
+        "PERM_GENERAL(@hloop loop-form, " + ", ".join(f"int tag_h{i}; int WRONG_h{i};" for i in range(3)) + ") "
+        + " ".join("PERM_GENERAL(" + ", ".join(f"int tag_{c}{i}; int WRONG_{c}{i};" for i in range(3)) + ")" for c in "wxyz"))
+    r, out, order = reach_search(base, template, budget=40)
+    c = out["counts"]
+    expect(out["end"] == "deadline" and c["space"] == 486 and c["compiled"] == 40 and c["sampled"] > 0,
+           f"the space is sampled up to the budget: {out}", r)
+    expect(sorted(line.count("0") for line in order[:12]) == [5] * 11 + [6]
+           and order[12] == "tag_b1 tag_h1 tag_w0 tag_x0 tag_y0 tag_z0",
+           f"after the sweep of 12 comes the retry against the first new object: {order[:13]}", r)
+    later = [line for line in order[13:] if "tag_h0" not in line]
+    expect(later and out["inert"] == [], f"the unfrozen choice point is varied by later candidates: {order[13:]}", r)
+    expect(len(set(order)) == 40, f"no candidate is built twice: {order}", r)
 
 
 def test_search_effect_table_lists_at_most_eight_choices_and_names_the_next_two(base):
@@ -2564,8 +2780,8 @@ def test_search_compiles_alternatives_with_identical_source_once(base):
     p, builds = counting_project(base)
     r, out = search(p, TWINS)
     expect(out is not None and out["counts"]["space"] == 4, "the template has four candidates", r)
-    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 1,
-           f"the twin is seen once, and the freeze of its inert choice skips the fourth: {out['counts']}", r)
+    expect(out["counts"]["compiled"] == 2 and out["counts"]["src_dedupe_hits"] == 2,
+           f"the twin is seen at the baseline and again in the retry of its inert choice, and never built: {out['counts']}", r)
     expect(out["counts"]["unique_objects"] == 2 and out["counts"]["hashing"] == "object", "two distinct objects", r)
 
 
@@ -3164,7 +3380,9 @@ def sampled_search(base, template, files=None, config=None, **constants):
     log = Path(base) / "order.log"
     p = search_project(base, config=config or {},
                        files=dict({"tools/search_build.py": ORDER_BUILD_PY.replace("LOG", repr(str(log)))}, **(files or {})))
-    tune(p, workers=1, **constants)  # one worker builds in the order the candidates come
+    # One worker builds in the order the candidates come. No reference compile and a ceiling far above any run:
+    # the budget alone ends the block, and the order log holds candidates only, however slow the machine is.
+    tune(p, **dict({"workers": 1, "reference_s": 0, "ceiling_s": 3600}, **constants))
     r, out = search(p, template)
     expect(out is not None, "search should print a summary", r)
     return r, out, log.read_text().splitlines()[-out["counts"]["compiled"]:]
@@ -3520,6 +3738,43 @@ def test_search_starts_with_the_cores_divided_by_the_active_writers(base):
     expect(out is not None and out["counts"]["workers"] == 5, f"a set worker count is kept: {out}", r)
 
 
+def search_beside_a_newcomer(p, template):
+    """Search while a second foreground search joins the pool after this one did. Returns (process, summary)."""
+    import threading
+    got = {}
+    runner = threading.Thread(target=lambda: got.update(done=search(p, template)))
+    runner.start()
+    wait_for(lambda: any(f.name != "555-new.writer" for f in slot_folder(p).glob("*.writer")), 30)
+    writer(p, "555-new", -3600)  # fresh for the rest of the case
+    runner.join()
+    return got["done"]
+
+
+def newcomer_project(base, **search_settings):
+    """4 cores, a compiler that takes 0.3 s, and a heartbeat every second: the block outlasts the first one."""
+    build = PY + ' "{tools}/wait_build.py" "{source}" "{obj}" "{tools}/built.log"'
+    p = search_project(base, config={"build": build}, files={"tools/wait_build.py": WAIT_BUILD_PY})
+    tune(p, **dict({"cores": 4, "slot_heartbeat_s": 1.0}, **search_settings))
+    return p
+
+
+def test_search_counts_the_writers_again_at_its_first_heartbeat_and_cuts_its_workers(base):
+    p = newcomer_project(base)
+    r, out = search_beside_a_newcomer(p, wide(5))
+    c = out["counts"] if out else {}
+    expect(c.get("writers_active") == 2 and c.get("workers") == 2,
+           f"a writer that joined after this search counts, and 4 cores start 2 workers each: {c}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["kind"] == "block" and rec["writers_active"] == 2, f"the block record holds the corrected count: {rec}", r)
+
+
+def test_search_with_a_fixed_worker_count_corrects_only_its_writer_count(base):
+    p = newcomer_project(base, workers=3)
+    r, out = search_beside_a_newcomer(p, wide(5))
+    c = out["counts"] if out else {}
+    expect(c.get("writers_active") == 2 and c.get("workers") == 3, f"a set worker count is kept: {c}", r)
+
+
 def test_core_count_falls_back_to_the_logical_count_when_the_platform_call_fails(base):
     # The one case that reaches into the tool: no command line can make the platform's call fail.
     import importlib.util
@@ -3620,6 +3875,62 @@ def test_search_raises_slow_compile_for_a_block_30_percent_slower_per_worker(bas
     seed_perf(p, 3, compiled=1, wall_s=1000.0)  # a median so slow the next block is faster than it
     fresh(p, NEVER)
     expect("slow-compile" not in perf_log(p)[-1]["flags"], "a block faster than the median raises nothing", r)
+
+
+def unrounded(value):
+    """The numbers of a record (nested ones too) that differ from themselves rounded to 3 places."""
+    if isinstance(value, dict):
+        return [x for v in value.values() for x in unrounded(v)]
+    return [value] if isinstance(value, float) and round(value, 3) != value else []
+
+
+def test_search_writes_every_number_of_a_block_record_rounded(base):
+    p = search_project(base)
+    tune(p, workers=2)
+    for _ in range(3):  # an even count of compile times: the median is the mean of two rounded values
+        r, out = fresh(p, wide(3))
+        rec = perf_log(p)[-1]
+        expect(rec["kind"] == "block" and rec["compiled"] % 2 == 0, f"a block with an even count of compiles: {rec}", r)
+        expect(unrounded(rec) == [], f"every number is rounded to 3 places: {unrounded(rec)} in {rec}", r)
+
+
+HANG_TEMPLATE = MARK + "int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, int HANG;) return 1; }\n"
+
+
+def hang_project(base):
+    beat = Path(base) / "beat"
+    build = PY + f' "{{tools}}/hang_build.py" "{{source}}" "{{obj}}" "{beat.as_posix()}"'
+    p = search_project(base, config={"build": build}, files={"tools/hang_build.py": HANG_BUILD_PY})
+    tune(p, workers=1, hang_floor_s=2, hang_start_s=10)
+    return p
+
+
+def test_search_raises_no_slow_compile_for_a_block_that_killed_a_hung_compile(base):
+    p = hang_project(base)
+    r, out = search(p, wide(2))
+    seed_perf(p, 3)  # 1,000,000 compiles per worker-second
+    r, out = fresh(p, wide(2))
+    expect("slow-compile" in perf_log(p)[-1]["flags"], f"a block without a kill raises it: {perf_log(p)[-1]}", r)
+    r, out = fresh(p, HANG_TEMPLATE)
+    rec = perf_log(p)[-1]
+    expect(rec["killed"] == 1 and rec["compiled"] >= 2, f"the block killed the hang and measured: {rec}", r)
+    expect("slow-compile" not in rec["flags"], f"a block that killed a compile raises no slow-compile: {rec}", r)
+    seed_perf(p, 4, killed=1, compiled=1, wall_s=1000000.0)  # more such blocks than fast ones would pull the median down
+    r, out = fresh(p, wide(2))
+    expect("slow-compile" in perf_log(p)[-1]["flags"], f"the rate of a block with a kill is left out of the median: {perf_log(p)[-1]}", r)
+
+
+def test_search_passes_over_a_block_with_a_kill_in_a_slow_compile_streak(base):
+    p = search_project(base)
+    tune(p, workers=1)
+    search(p, NEVER)
+    seed_perf(p, 12)
+    seed_perf(p, 2, flags=["slow-compile"])
+    seed_perf(p, 1, killed=2, flags=[])  # a hang says nothing about speed: it neither adds nor ends the streak
+    r, out = fresh(p, NEVER)
+    got = [n for n in out.get("notice", []) if n.startswith("slow-compile")]
+    expect(len(got) == 1 and got[0].startswith("slow-compile in 3 blocks in a row of this unit"),
+           f"two flagged blocks, a block with a kill, then a slow block show the notice: {out.get('notice')}", r)
 
 
 def test_search_shows_a_flag_raised_three_blocks_in_a_row_once(base):
@@ -3827,8 +4138,18 @@ def test_search_still_waits_for_the_sweep_when_object_identity_exists_and_freeze
     template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;) "
                        "PERM_GENERAL(int WRONG_d;, int WRONG_d; /* the same bytes */) return 1; }\n")
     r, out = search(p, template)
-    expect(out is not None and out["inert"] == ["B"] and out["counts"]["compiled"] == 3,
-           f"the choice whose alternatives give the baseline's hash is frozen, and only the sweep (3 of the 4) is built: {out}", r)
+    expect(out is not None and out["inert"] == ["B: 2 of 2 objects"] and out["counts"]["compiled"] == 4,
+           f"the choice whose alternatives give the baseline's hash is frozen, and its retry holds against the other object: {out}", r)
+
+
+def test_search_with_no_object_identity_builds_the_whole_space_and_lists_no_inert_choice(base):
+    p, builds = counting_project(base, stamp=True, sha=False)
+    template = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;) "
+                       "PERM_GENERAL(int WRONG_d;, int WRONG_d; /* the same bytes */, int WRONG_d; /* again */) return 1; }\n")
+    r, out = search(p, template)
+    expect(out is not None and out["end"] == "exhausted" and out["counts"]["compiled"] == 6 == out["counts"]["space"],
+           f"nothing is frozen, so all 6 candidates are built: {out}", r)
+    expect(out["inert"] == [] and "stop" not in out, f"no choice point is listed as inert: {out}", r)
 
 
 def test_search_raises_no_expander_starved_for_a_block_of_24_candidates_with_no_object_identity(base):
@@ -4018,7 +4339,9 @@ def batch_project(base, per_call, per_source):
     p = search_project(base, config={"build": PY + f' "{{tools}}/slow_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
                                      "build_batch": batch},
                        files={"tools/batch_build.py": BATCH_BUILD_PY, "tools/slow_build.py": WAIT_BUILD_PY})
-    tune(p, workers=1)
+    # The reference interval and the ceiling are far above any run: no periodic reference compile adds a single
+    # build, and the probes' share of the ceiling never runs out, however slow the machine is.
+    tune(p, workers=1, reference_s=3600, ceiling_s=3600)
     return p, lambda: log.read_text().splitlines()
 
 
@@ -4032,7 +4355,7 @@ def test_search_keeps_batching_that_is_faster_and_byte_identical(base):
            and out["counts"]["batch"] == 16, f"the batched round finds the match: {out}", r)
     expect([x for x in calls() if x.startswith("batch")] == ["batch 4", "batch 8", "batch 16", "batch 5", "batch 7"],
            f"after the probe, the sweep is one compiler call and the rest another: {calls()}", r)
-    expect(calls().count("single") == 6,  # the gate's check, the double compile, and the probes' three reference builds
+    expect(calls().count("single") == 7,  # the gate's check, the double compile, the probes' three reference builds, and the block's base
            f"no candidate of the block was built singly: {calls()}", r)
     expect(out["counts"]["compiled"] == 12 and out["counts"]["build_fail"] == 4,
            f"a candidate that fails in a batch fails alone: {out['counts']}", r)
@@ -4048,6 +4371,112 @@ def test_search_drops_batching_that_is_slower(base):
     expect([x for x in calls() if x.startswith("batch")] == ["batch 4"], f"no block build is batched: {calls()}", r)
 
 
+# Fake compilers that log when each batch call starts and ends, and each single build. A single build
+# sleeps `normal` seconds, or `slow` once `after` batch calls have started (the probe's included).
+TIMED_BATCH_PY = """import os, sys, time
+objdir, log, per_call, per_source = sys.argv[1:5]
+sources = sys.argv[5:]
+open(log, "a").write("batch start %.3f %d" % (time.time(), len(sources)) + chr(10))
+time.sleep(float(per_call) + float(per_source) * len(sources))
+for s in sources:
+    open(os.path.join(objdir, os.path.splitext(os.path.basename(s))[0] + ".obj"), "w").write(open(s).read())
+open(log, "a").write("batch end %.3f" % time.time() + chr(10))
+"""
+TIMED_SINGLE_PY = """import os, sys, time
+src, obj, log, normal, after, slow = sys.argv[1:7]
+started = sum(x.startswith("batch start") for x in open(log).read().splitlines()) if os.path.exists(log) else 0
+open(log, "a").write("single" + chr(10))
+time.sleep(float(slow) if started >= int(after) else float(normal))
+open(obj, "w").write(open(src).read())
+"""
+
+
+def timed_batch_project(base, per_call, per_source, single, after=10 ** 6, slow=0, **search):
+    """A batching project whose calls log their times. Returns (project, batch starts, batch ends), the lists read on call."""
+    log = Path(base) / "calls.log"
+    batch = PY + f' "{{tools}}/timed_batch.py" "{{objdir}}" "{log.as_posix()}" {per_call} {per_source} {{sources}}'
+    build = PY + f' "{{tools}}/timed_single.py" "{{source}}" "{{obj}}" "{log.as_posix()}" {single} {after} {slow}'
+    p = search_project(base, config={"build": build, "build_batch": batch},
+                       files={"tools/timed_batch.py": TIMED_BATCH_PY, "tools/timed_single.py": TIMED_SINGLE_PY})
+    tune(p, **search)
+
+    def times(what):
+        lines = [x.split() for x in log.read_text().splitlines()] if log.exists() else []
+        return [float(x[2]) for x in lines if x[:2] == ["batch", what]]
+    return p, lambda: times("start"), lambda: times("end")
+
+
+# A batch call and a single build take 0.8 s, and 4 workers share a pool of slots: the reference compile
+# (every half second) is compared with a single build, which takes as long as one batch call.
+def batched_block(base, after=10 ** 6, slow=0, **search):
+    p, starts, ends = timed_batch_project(base, 0.8, 0, 0.8, after, slow,
+                                          **dict({"cores": 4, "slots": 8, "tune_s": 60, "reference_s": 0.5, "deadline_s": 5}, **search))
+    r, out = search_template(p)
+    return p, r, out
+
+
+def search_template(p):
+    return search(p, wide(12))
+
+
+def test_search_keeps_the_workers_of_a_batched_block_on_a_quiet_machine(base):
+    p, r, out = batched_block(base)
+    expect(out is not None and out["end"] == "deadline" and out["counts"]["batch"] == 16, f"the block batches: {out}", r)
+    rec = perf_log(p)[-1]
+    expect(rec["t_ref_max_ms"] is not None, f"the block lasts past a reference compile: {rec}", r)
+    expect(rec["t_ref_base_ms"] >= 800, f"the base is a single build's time, not a candidate's share of a call: {rec}", r)
+    expect("contention-or-throttle" not in rec["flags"], f"a reference compile as long as the base is no contention: {rec}", r)
+    expect(rec["workers_end"] == rec["workers_max"], f"the workers are kept: {rec}", r)
+
+
+def test_search_flags_contention_in_a_batched_block_when_single_builds_slow(base):
+    p, r, out = batched_block(base, after=6, slow=3)  # a single build takes 3 s once the block has made a few batch calls
+    rec = perf_log(p)[-1]
+    expect(out is not None and rec["t_ref_base_ms"] >= 800, f"the base is a single build's time: {rec}", r)
+    expect("contention-or-throttle" in rec["flags"], f"a single build several times longer than the base is flagged: {rec}", r)
+    expect(rec["workers_end"] < rec["workers_max"], f"the workers are shed: {rec}", r)
+
+
+def test_search_records_a_single_builds_time_as_a_batched_blocks_reference(base):
+    p, r, out = batched_block(base, reference_s=30, deadline_s=2)  # the reference interval is never reached
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["counts"]["batch"] == 16 and rec["t_ref_ms"] >= 800,
+           f"a short block records one single build's time, not a candidate's share: {rec}", r)
+    p, r, out = batched_block(sub(base, "off"), reference_s=0, deadline_s=2)
+    rec = perf_log(p)[-1]
+    expect(out is not None and out["counts"]["batch"] == 16 and rec["t_ref_ms"] is None,
+           f"with the reference off there is no reference time: {rec}", r)
+
+
+def test_search_starts_no_batch_after_its_deadline(base):
+    # Two workers and one slot: the second worker holds a batch of its own while the first one's call outlasts the deadline.
+    p, starts, ends = timed_batch_project(base, 0, 0.5, 1.0, workers=2, slots=1, reference_s=0, deadline_s=1)
+    r, out = search(p, wide(12))
+    expect(out is not None, "a summary", r)
+    probed = len(probes(p)["batching"]["sizes_ms"])
+    expect(out is not None and out["end"] == "deadline", f"the block ends on its deadline: {out}", r)
+    expect(len(starts()) - probed == 1, f"one batch call is made in the block: {starts()} after {probed} in the probe", r)
+    expect(out["counts"]["compiled"] <= 4, f"no more than one batch is built: {out['counts']}", r)
+
+
+def test_a_background_search_starts_no_batch_after_its_time(base):
+    # A call takes 3 s. The foreground block ends after one; the background search has 1.5 s or so, which end
+    # during its first call while its second worker waits for the slot.
+    p, starts, ends = timed_batch_project(base, 0, 0.75, 1.5, workers=2, slots=1, reference_s=0, deadline_s=0.5,
+                                          ceiling_s=4.8, background=1, probe_cost_frac=100)  # the probes are not under test
+    try:
+        r, out = search(p, wide(12))
+        returned = time.time()
+        expect(out is not None and out.get("continues_s"), f"a search goes on in the background: {out}", r)
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search ends by itself")
+        later = [t for t in starts() if t > returned]
+        first_end = min(t for t in ends() if t > returned)
+        expect(later and all(t < first_end for t in later),
+               f"no batch call starts after the one in hand ended: {later} {first_end}", r)
+    finally:
+        stop_background(p)
+
+
 def test_search_records_each_probe_and_skips_those_the_adapters_do_not_support(base):
     p = search_project(base)
     r, out = search(p, MATCHING)
@@ -4058,6 +4487,33 @@ def test_search_records_each_probe_and_skips_those_the_adapters_do_not_support(b
     expect("build_resolve" in got["resolved-compiler"]["reason"] and "build_batch" in got["batching"]["reason"],
            f"each skip gives its reason: {got}", r)
     expect(out is not None and out["counts"]["single_function"] is False and out["counts"]["batch"] == 1, "the round runs", r)
+
+
+def test_search_records_a_skipped_probe_once_per_ticket_and_reason(base):
+    p = search_project(base)
+    for n in range(3):  # a changed text outside the target function probes again, and every probe skips for the same reason
+        r, out = search(p, f"int outside{n};\n" + NEVER)
+        expect(out is not None, "the round runs", r)
+    skipped = [(x["probe"], x["reason"]) for x in perf_log(p) if x["kind"] == "calibration" and x.get("outcome") == "skipped"]
+    expect(len(skipped) == 3 and {s[0] for s in skipped} == {"single-function", "batching", "resolved-compiler"},
+           f"one skipped record per probe and reason, not one per round: {skipped}", r)
+
+
+def test_search_records_a_skipped_probe_again_when_its_reason_changes(base):
+    p, forms = form_project(base, TARGET_DIFF_PY, probe_min_chars=None)
+    search(p, TWO_FUNCTIONS)
+    search(p, "int outside;\n" + TWO_FUNCTIONS)
+    r, out = search(p, TWO_FUNCTIONS.replace("SLOW_BODY;", "SLOW_BODY; int pad;"))  # the text it would cut is longer
+    reasons = [x["reason"] for x in perf_log(p) if x.get("probe") == "single-function"]
+    expect(len(reasons) == 2 and reasons[0] != reasons[1], f"a skip for another reason is a new record: {reasons}", r)
+
+
+def test_search_records_a_probe_that_is_not_skipped_every_time_it_runs(base):
+    p, forms = form_project(base, TARGET_DIFF_PY)
+    search(p, TWO_FUNCTIONS)
+    r, out = search(p, "int outside;\n" + TWO_FUNCTIONS)
+    outcomes = [x["outcome"] for x in perf_log(p) if x.get("probe") == "single-function"]
+    expect(outcomes == ["kept", "kept"], f"an outcome that is not a skip is recorded every time: {outcomes}", r)
 
 
 def resolve_project(base, *more):
@@ -4087,6 +4543,113 @@ def test_search_drops_a_resolved_compiler_that_changes_the_bytes(base):
     got = probes(p).get("resolved-compiler", {})
     expect(got.get("outcome") == "dropped" and got.get("identical") is False, f"other bytes drop the mode: {got}", r)
     expect(out is not None and out["end"] == "match", f"the round runs: {out}", r)
+
+
+# The cost bound of the batching and resolved-compiler probes. One project holds both adapters and one log of
+# every adapter call, in order: the compiler stamps its objects, so objects differ and the function is hashed.
+STAMPED_BUILD_PY = """import sys, time
+src, obj, log = sys.argv[1:4]
+text = open(src).read()
+open(log, "a").write("single" + chr(10))
+time.sleep(float(sys.argv[4]) if len(sys.argv) > 4 else 0.3)
+open(obj, "w").write(text + chr(10) + "STAMP " + str(time.time_ns()))
+"""
+LOGGED_DIFF_PY = """import hashlib, json, re, sys
+body = "".join(re.sub(r"/[*].*?[*]/|STAMP .*", "", open(sys.argv[1]).read(), flags=re.S).split())
+open(sys.argv[3], "a").write("diff" + chr(10))
+open(sys.argv[2], "w").write("report" + chr(10))
+n = body.count("WRONG")
+print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+"""
+
+
+def bounded_project(base, per_call=0.3, single=0.3, **limits):
+    """A project with both optional adapters and the probes' block constants `limits`. Returns (project, the adapter log).
+
+    `single` is the wait of one single build and `per_call` the wait of one batch call, both in seconds.
+    """
+    log = Path(base) / "adapters.log"
+    batch = PY + f' "{{tools}}/batch_build.py" "{{objdir}}" "{log.as_posix()}" {per_call} 0 {{sources}}'
+    p = search_project(base, config={"build": PY + f' "{{tools}}/stamped_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}" {single}',
+                                     "diff": PY + f' "{{tools}}/logged_diff.py" "{{obj}}" "{{report}}" "{log.as_posix()}"',
+                                     "build_batch": batch,
+                                     "build_resolve": PY + ' "{tools}/resolve.py" "' + log.as_posix() + '"'},
+                       files={"tools/batch_build.py": BATCH_BUILD_PY, "tools/stamped_build.py": STAMPED_BUILD_PY,
+                              "tools/logged_diff.py": LOGGED_DIFF_PY, "tools/resolve.py": RESOLVE_PY,
+                              "tools/direct_build.py": DIRECT_BUILD_PY})
+    tune(p, workers=1, **limits)
+    log.unlink(missing_ok=True)  # less the gate's check
+    return p, lambda: log.read_text().splitlines() if log.exists() else []
+
+
+def test_search_skips_both_probes_for_cost_when_the_bound_is_under_four_builds(base):
+    p, calls = bounded_project(base, ceiling_s=0.4)  # a bound of 0.2 s, a single build takes 0.3 s
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    for name in ("batching", "resolved-compiler"):
+        rec = got.get(name, {})
+        expect(rec.get("outcome") == "skipped" and "cost" in rec.get("reason", "") and rec.get("predicted_s", 0) > rec.get("bound_s", 1),
+               f"the {name} probe is skipped for cost, with the two numbers: {rec}", r)
+    expect(not any(x.startswith(("batch", "resolved")) for x in calls()), f"neither adapter was called: {calls()}", r)
+    expect(out is not None and out["end"] == "match" and out["counts"]["batch"] == 1, f"the block runs unbatched: {out}", r)
+
+
+def test_search_switches_both_probes_off_with_a_cost_share_of_zero(base):
+    p, calls = bounded_project(base, probe_cost_frac=0)
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    expect(got["batching"]["outcome"] == "skipped" and got["resolved-compiler"]["outcome"] == "skipped",
+           f"both probes are skipped: {got}", r)
+    expect(not any(x.startswith(("batch", "resolved")) for x in calls()), f"neither adapter was called: {calls()}", r)
+    expect(out is not None and out["end"] == "match", f"the block runs: {out}", r)
+
+
+def test_search_diffs_one_object_per_batching_size_under_function_hashing(base):
+    p, calls = bounded_project(base)
+    r, out = search(p, MATCHING)
+    got = probes(p)
+    expect(got["batching"]["outcome"] == "kept" and got["batching"]["batch"] == 16 and got["resolved-compiler"]["outcome"] == "eligible",
+           f"a generous bound runs every size and the resolved compiler: {got}", r)
+    lines = calls()
+    last = max(i for i, x in enumerate(lines) if x.startswith("resolved"))
+    probing = lines[:last + 2]  # the resolved compiler's object is diffed right after its last run
+    expect(probing[-1] == "diff" and probing.count("diff") <= 3 + 1 + 1,
+           f"one diff per size (3), one for the single build, one for the resolved compiler's object: {probing}", r)
+    expect(sum(x.startswith("batch") for x in probing) == 3, f"three batch calls: {probing}", r)
+
+
+def test_search_keeps_the_batch_size_it_proved_when_the_next_one_does_not_fit(base):
+    # The waits of the fake adapters decide each outcome, not start-up time (a tool start adds s to every call, 0 to 2 s):
+    # u = 1.6 + s is the reference build, v = 5.6 + s the batch call of 4, the bound 15.5 s, and the probe runs 7.
+    # A batch of 4 predicts 4u = 6.4 + 4s <= 15.5 for any s up to 2. A batch of 8 predicts u + v + 2v = 18.4 + 4s > 15.5
+    # (a time per candidate of v/4 < u keeps 4 as faster). The resolved compiler predicts u + v + 8u = 20 + 10s > 15.5.
+    p, calls = bounded_project(base, per_call=5.6, single=1.6, ceiling_s=31, probe_runs=7)
+    r, out = search(p, MATCHING)
+    got = probes(p)["batching"]
+    expect(got["outcome"] == "kept" and got["batch"] == 4 and set(got["sizes_ms"]) == {"4"} and "batch of 8" in got["reason"]
+           and got["predicted_s"] > got["bound_s"], f"the probe keeps 4 and says why it stopped: {got}", r)
+    expect(not any(x in ("batch 8", "batch 16") for x in calls()), f"no larger batch was built: {calls()}", r)
+    expect(probes(p)["resolved-compiler"]["outcome"] == "skipped", f"the resolved compiler no longer fits: {probes(p)}", r)
+
+
+def test_search_refuses_a_misspelt_probe_cost_share(base):
+    p = search_project(base)
+    tune(p, probe_cost_fraction=0.5)
+    r, out = search(p, MATCHING)
+    expect(r.returncode == 1 and out is None and "probe_cost_fraction" in r.stderr and "probe_cost_frac" in r.stderr,
+           "a misspelt override is named with the ones that exist", r)
+
+
+def test_search_does_not_probe_again_for_the_same_text_outside_the_function(base):
+    p, calls = bounded_project(base)
+    search(p, MATCHING)
+    before, records = len(calls()), len(perf_log(p))
+    r, out = search(p, MATCHING)
+    later = calls()[before:]
+    expect(out is not None and not any(x.startswith(("batch", "resolved")) for x in later),
+           f"no probe adapter ran for the second call: {later}", r)
+    expect(not [x for x in perf_log(p)[records:] if x.get("probe") in ("batching", "resolved-compiler")],
+           f"and no probe record was written: {perf_log(p)[records:]}", r)
 
 
 # ---------- template search: self-tuning workers and the reference compile ----------
@@ -4279,6 +4842,59 @@ def test_search_second_round_resets_an_edited_label_to_its_priors(base):
            f"A keeps what it learned and the edited B is back at uniform priors, in template order: {got}", r)
 
 
+def series_template(n):
+    """Round n of one template: A is ignored by the compiler, and every alternative of B and of C scores worse than the baseline.
+
+    B1 is far worse and is held by five candidates, so its belief falls by about half a round.
+    """
+    return in_function(
+        f"/* round {n} */ " + "int WRONG_k; " * 10
+        + "PERM_GENERAL(int IGNORED_x;, int IGNORED_y;, int IGNORED_z;) "
+        + "PERM_GENERAL(int ok_b;, " + "int WRONG_b; " * 100 + ") "
+        + "PERM_GENERAL(int ok_c;, int WRONG_c1;, int WRONG_c2;, int WRONG_c3;, int WRONG_c4;)")
+
+
+def series_round(p, n):
+    """Run round n of the series, given the time of a first round. Returns (process, summary, the kept likelihoods by label)."""
+    state = p.root / ".decomp" / "search" / TID
+    if (state / "ended").exists():
+        forget_latency(p)
+    r, out = search(p, series_template(n))
+    expect(r.returncode == 0 and out is not None and "end" in out, f"round {n} should exit 0 and print a summary: {out}", r)
+    kept = json.loads((state / "learned.json").read_text(encoding="utf-8"))
+    return r, out, {label: entry["weights"] for label, entry in kept.items()}
+
+
+def test_search_rounds_keep_every_learned_likelihood_above_zero_and_a_frozen_choice_learns_nothing(base):
+    p = sweep_project(base)
+    tune(p)
+    began = [1.0, 1.0, 1.0]  # the frozen choice point's: the writer gave none
+    for n in range(1, 11):
+        r, out, kept = series_round(p, n)
+        seen = out["counts"]["unique_objects"]
+        expect(out["end"] == "exhausted" and out["inert"] == [f"A: {seen} of {seen} objects"],
+               f"round {n}: the ignored choice point ends frozen, its freeze held against every object: {out}", r)
+        expect(sorted(kept) == ["A", "B", "C"], f"round {n}: every choice point has kept likelihoods: {kept}", r)
+        for label, weights in kept.items():
+            expect(min(weights) >= 0.01 and max(weights) == 1, f"round {n}: {label} is within the floor and 1: {weights}", r)
+        expect(kept["A"] == began, f"round {n}: the frozen choice point keeps what it began the round with: {kept['A']}", r)
+        expect(kept["B"][1] < 1 and all(w < 1 for w in kept["C"][1:]), f"round {n}: the free choice points learn: {kept}", r)
+    expect(kept["B"] == [1.0, 0.01], f"the alternative that always hurt ends on the floor: {kept}", r)
+
+
+def test_search_reads_a_kept_likelihood_of_zero_as_the_floor(base):
+    p = sweep_project(base)
+    tune(p)
+    series_round(p, 1)
+    path = p.root / ".decomp" / "search" / TID / "learned.json"
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    kept["B"]["weights"] = [0.0, 0.0]
+    kept["C"]["weights"] = [0.0, -1.0, "x", None, 1.0]
+    path.write_text(json.dumps(kept), encoding="utf-8")
+    r, out, kept = series_round(p, 2)
+    expect(all(min(w) >= 0.01 for w in kept.values()), f"the round keeps likelihoods within the floor: {kept}", r)
+
+
 def test_search_mutation_and_crossover_only_combine_the_written_alternatives(base):
     r, out, order = two_rounds(base, grid(6), first=grid(6), budget=60)
     arms = out["counts"].get("arm_picks")
@@ -4349,6 +4965,40 @@ def test_search_advises_stopping_after_two_rounds_with_no_new_best_score(base):
     expect("repeat" not in out, f"a round that built its candidates is no repeat: {out}", r)
     r, out = search(p, MATCHING)
     expect(out is not None and out["end"] == "match" and "stop" not in out, f"a round that matches carries none: {out}", r)
+
+
+def test_search_stop_advice_counts_flat_rounds_across_a_check_that_scores_no_better(base):
+    p = search_project(base)
+    search(p, NEVER)
+    r, out = search(p, wide(2))
+    expect(out is not None and "2 rounds" in out.get("stop", ""), f"two flat rounds: {out}", r)
+    check_with(p, 9, "--category", "register-allocation")
+    r, out = search(p, wide(3))
+    expect(out is not None and out.get("stop", "").startswith("3 rounds"), f"the check is passed over: {out}", r)
+
+
+def test_search_stop_advice_restarts_after_a_check_that_scores_lower_than_every_earlier_attempt(base):
+    p = search_project(base, source=MARK + "int f(void) { " + "int WRONG; " * 2 + "return 1; }\n")  # 4 bytes
+    r, out = search(p, NEVER)
+    expect(out is not None and out["best"]["differ_bytes"] == 4, f"the rounds score no better than the check: {out}", r)
+    r, out = search(p, wide(2))
+    expect(out is not None and "2 rounds" in out.get("stop", ""), f"two flat rounds: {out}", r)
+    check_with(p, 1, "--category", "register-allocation")
+    r, out = search(p, wide(3))
+    expect(out is not None and "stop" not in out, f"a new best by hand restarts the count: {out}", r)
+
+
+def test_search_stop_advice_counts_from_the_last_match_on(base):
+    p = search_project(base)
+    search(p, NEVER)
+    search(p, wide(2))
+    r, out = search(p, MATCHING)
+    expect(out is not None and out["end"] == "match" and "stop" not in out, f"a matching round holds none: {out}", r)
+    check_with(p, 1, "--category", "register-allocation")
+    r, out = search(p, wide(3))
+    expect(out is not None and "stop" not in out, f"the first flat round after the match: {out}", r)
+    r, out = search(p, wide(4))
+    expect(out is not None and out.get("stop", "").startswith("2 rounds"), f"the second says 2 rounds: {out}", r)
 
 
 # ---------- template search: a round with nothing new ----------
@@ -4465,7 +5115,7 @@ def test_search_repeat_starts_no_background_search(base):
 
 # A fake compiler that takes 0.3 s and logs when each build starts and ends, with the TAG_ word its
 # source holds. On a candidate holding HANG it first starts a grandchild that keeps adding to a
-# heartbeat file for up to 30 seconds, then hangs.
+# heartbeat file for up to 12 minutes, then hangs for 15.
 BG_BUILD_PY = """import os, re, subprocess, sys, time
 src, obj, folder = sys.argv[1:4]
 text = open(src).read()
@@ -4475,9 +5125,9 @@ def note(what):
     open(os.path.join(folder, "builds.log"), "a").write("%s %s %.3f%s" % (tag, what, time.time(), chr(10)))
 note("start")
 if "HANG" in text:
-    code = "import sys, time" + chr(10) + "for i in range(300):" + chr(10) + "    open(sys.argv[1], 'a').write('x')" + chr(10) + "    time.sleep(0.1)"
+    code = "import sys, time" + chr(10) + "for i in range(7200):" + chr(10) + "    open(sys.argv[1], 'a').write('x')" + chr(10) + "    time.sleep(0.1)"
     subprocess.Popen([sys.executable, "-c", code, os.path.join(folder, "beat")])
-    time.sleep(60)
+    time.sleep(900)
 time.sleep(0.3)
 open(obj, "w").write(text)
 note("end")
@@ -4485,6 +5135,11 @@ note("end")
 # The sweep builds the baseline, then each alternative in turn: the one that hangs is the fourth build.
 HANGING = MARK + ("int f(void) { PERM_GENERAL(int WRONG_a;, int WRONG_b; int WRONG_c;, "
                   "int WRONG_d; int WRONG_e; int WRONG_f;, int HANG;) return 1; }\n")
+
+
+# The search's hang limit, floor and start, above the fake hang's 15 minutes: a search left in the hang stays
+# there until a case stops it, however late that comes.
+HANG_LIMIT = {"hang_floor_s": 3600, "hang_start_s": 3600}
 
 
 def background_project(base, folder=None, **search):
@@ -4563,6 +5218,48 @@ def test_the_next_search_reports_what_the_background_search_found(base):
         stop_background(p)
 
 
+def expect_collected_report(p, r, code, word):
+    """A refused call that had collected a background search: one JSON line holding the report, the refusal as it was."""
+    lines = r.stdout.splitlines()
+    expect(len(lines) == 1, f"standard output holds one line: {r.stdout!r}", r)
+    out = json.loads(lines[0])
+    found = out.get("background")
+    expect(list(out) == ["background"] and isinstance(found, dict), f"the line holds the report alone: {out}", r)
+    expect(found["end"] in ("stopped", "exhausted") and found["tried"] >= 2 and "differ_bytes" in found.get("best", {}),
+           f"it is the search's report: {found}", r)
+    expect(r.returncode == code and word in r.stderr, f"the refusal and its exit code are unchanged: {r.stderr!r}", r)
+    expect(not background_folder(p).exists(), "the background search's files are cleared away")
+    r, found = stop_background(p)
+    expect(r.returncode == 0 and found is None, f"the search is reported once: {found}", r)
+
+
+def test_a_search_refused_for_no_choice_point_still_prints_the_background_report_it_collected(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: background_tried(p) >= 2), "the background search should build candidates")
+        r, out = search(p, STUCK)
+        expect_collected_report(p, r, 1, "choice point")
+    finally:
+        stop_background(p)
+
+
+def test_a_search_refused_for_a_misspelt_constant_still_prints_the_background_report_it_collected(base):
+    p = background_project(base)
+    try:
+        r, out = search(p, wide(3))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        # The search ends by itself first: stopping a live one reads the block constants, and is refused before it collects.
+        expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search should end by itself")
+        tune(p, deadline=1)
+        r, out = search(p, NEVER)
+        expect_collected_report(p, r, 1, "deadline_s")
+    finally:
+        tune(p)
+        stop_background(p)
+
+
 def test_a_natural_match_found_in_the_background_is_returned_and_the_new_template_dropped(base):
     p = background_project(base)
     try:
@@ -4589,7 +5286,7 @@ def test_a_natural_match_found_in_the_background_is_returned_and_the_new_templat
 
 def hung_background(base):
     """A project whose background search is stuck in a compile that hangs. Returns (project, the grandchild's heartbeat)."""
-    p = background_project(base)
+    p = background_project(base, **HANG_LIMIT)
     beat = Path(base) / "bg" / "beat"
     r, out = search(p, HANGING)
     expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
@@ -4619,7 +5316,7 @@ def test_search_stop_ends_the_background_search_and_its_children(base):
 
 
 def test_release_ends_the_background_search_and_its_children(base):
-    p = background_project(base)
+    p = background_project(base, **HANG_LIMIT)
     r = p.run("claim", TID, "--by", "w1")
     expect(r.returncode == 0, "claim should pass", r)
     beat = Path(base) / "bg" / "beat"
@@ -4723,6 +5420,64 @@ def test_a_background_search_that_built_nothing_leaves_its_log(base):
         expect(found is not None and found["tried"] == 0 and found.get("log"), f"it should have built nothing: {r.stdout}", r)
         last = kept_log(p).read_text(encoding="utf-8", errors="replace")
         expect("4343-beef" in last and "4242-feed" not in last, f"the new log replaces the last kept one: {last}", r)
+    finally:
+        stop_background(p)
+
+
+def run_waiting_background_search(base, workers):
+    """A background search with a short time, left waiting on another search's foreground heartbeat that stays fresh.
+
+    Returns (project, the builds folder, when the starting call returned, the collected report, the call's result)."""
+    folder = Path(base) / "bg"
+    p = background_project(base, folder, workers=workers, slots=workers, ceiling_s=4)
+    writer(p, "4242-feed", -600)
+    path = p.base / "template.c"
+    path.write_text(wide(8).replace("int f(void) {", "int f(void) { /* TAG_one */"), encoding="utf-8")
+    r = p.run("search", TID, str(path))
+    returned = time.time()
+    out = json.loads(r.stdout.splitlines()[0]) if r.stdout.startswith("{") else None
+    expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+    expect(wait_for(lambda: (background_folder(p) / "done.json").exists()), "the background search ends by itself", r)
+    r, found = stop_background(p)
+    return p, folder, returned, found, r
+
+
+def a_background_search_that_waited_its_whole_budget(base, workers):
+    p, folder, returned, found, r = run_waiting_background_search(base, workers)
+    try:
+        expect(found is not None and found["end"] == "deadline" and found["tried"] == 0
+               and found.get("waited_on_foreground") is True, f"it reports that it waited its whole budget: {found}", r)
+        expect(found.get("log") and Path(found["log"]).exists(), f"the report names a log that exists: {found}", r)
+        log = Path(found["log"]).read_text(encoding="utf-8", errors="replace")
+        waiting = log.find("waiting on the foreground: 4242-feed")
+        ended = log.find("ended: deadline, waited its whole budget on the foreground: 4242-feed, no build started")
+        expect(0 <= waiting < ended, f"the log holds the waiting line, then the ended line: {log}", r)
+        later = [t for t in build_starts(folder, "one") if t > returned]
+        expect(not later, f"no build of the background search started: {later}", r)
+    finally:
+        stop_background(p)
+
+
+def test_a_background_search_starts_no_build_after_its_time_and_says_it_waited_on_the_foreground(base):
+    a_background_search_that_waited_its_whole_budget(base, 1)
+
+
+def test_a_background_search_with_several_workers_starts_no_build_after_its_time(base):
+    a_background_search_that_waited_its_whole_budget(base, 3)
+
+
+def test_a_background_search_whose_foreground_clears_before_its_time_builds_and_reports_no_wait(base):
+    p = background_project(base, ceiling_s=30)
+    try:
+        beat = writer(p, "4242-feed", -600)
+        r, out = search(p, wide(8))
+        expect(out is not None and out.get("continues_s"), f"the search should go on in the background: {out}", r)
+        expect(wait_for(lambda: waits_on(p, "4242-feed")), "the background search should wait on the foreground block")
+        beat.unlink()
+        expect(wait_for(lambda: background_tried(p) >= 2), "once the foreground is clear the background search builds")
+        r, found = stop_background(p)
+        expect(found is not None and found["tried"] >= 2 and "waited_on_foreground" not in found and "log" not in found,
+               f"it reports what it tried and no wait: {found}", r)
     finally:
         stop_background(p)
 
