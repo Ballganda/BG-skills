@@ -21,7 +21,7 @@ So `.claude-plugin/plugin.json` lists the promoted skills as an **explicit `skil
 ## Invariants this creates
 
 - Every promoted skill has an entry in `.claude-plugin/plugin.json`'s `skills` array, and no unpromoted skill does.
-- `plugin.json`'s `version` tracks `package.json`'s. Managed routes reinstall only when that field changes. `npm run version` keeps it in step by running `scripts/sync-plugin-version.mjs`, and the Release workflow runs `npm run version`. `marketplace.json` has no `version` field, so it can't drift.
+- `plugin.json`'s `version` tracks `package.json`'s. Managed routes reinstall only when that field changes. `npm run version` keeps it in step by running `scripts/sync-plugin-version.mjs`, and a release runs `npm run version`. `marketplace.json` has no `version` field, so it can't drift.
 
 ## Root layout and the validation gate
 
