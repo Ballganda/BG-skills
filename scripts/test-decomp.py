@@ -4551,7 +4551,7 @@ STAMPED_BUILD_PY = """import sys, time
 src, obj, log = sys.argv[1:4]
 text = open(src).read()
 open(log, "a").write("single" + chr(10))
-time.sleep(0.3)
+time.sleep(float(sys.argv[4]) if len(sys.argv) > 4 else 0.3)
 open(obj, "w").write(text + chr(10) + "STAMP " + str(time.time_ns()))
 """
 LOGGED_DIFF_PY = """import hashlib, json, re, sys
@@ -4563,11 +4563,14 @@ print(json.dumps({"match": n == 0, "differ_bytes": 2 * n, "function_sha256": has
 """
 
 
-def bounded_project(base, per_call=0.3, **limits):
-    """A project with both optional adapters and the probes' block constants `limits`. Returns (project, the adapter log)."""
+def bounded_project(base, per_call=0.3, single=0.3, **limits):
+    """A project with both optional adapters and the probes' block constants `limits`. Returns (project, the adapter log).
+
+    `single` is the wait of one single build and `per_call` the wait of one batch call, both in seconds.
+    """
     log = Path(base) / "adapters.log"
     batch = PY + f' "{{tools}}/batch_build.py" "{{objdir}}" "{log.as_posix()}" {per_call} 0 {{sources}}'
-    p = search_project(base, config={"build": PY + f' "{{tools}}/stamped_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}"',
+    p = search_project(base, config={"build": PY + f' "{{tools}}/stamped_build.py" "{{source}}" "{{obj}}" "{log.as_posix()}" {single}',
                                      "diff": PY + f' "{{tools}}/logged_diff.py" "{{obj}}" "{{report}}" "{log.as_posix()}"',
                                      "build_batch": batch,
                                      "build_resolve": PY + ' "{tools}/resolve.py" "' + log.as_posix() + '"'},
@@ -4616,7 +4619,11 @@ def test_search_diffs_one_object_per_batching_size_under_function_hashing(base):
 
 
 def test_search_keeps_the_batch_size_it_proved_when_the_next_one_does_not_fit(base):
-    p, calls = bounded_project(base, per_call=1.0, ceiling_s=5)  # a bound of 2.5 s: a batch of 4 fits, then 8 does not
+    # The waits of the fake adapters decide each outcome, not start-up time (a tool start adds s to every call, 0 to 2 s):
+    # u = 1.6 + s is the reference build, v = 5.6 + s the batch call of 4, the bound 15.5 s, and the probe runs 7.
+    # A batch of 4 predicts 4u = 6.4 + 4s <= 15.5 for any s up to 2. A batch of 8 predicts u + v + 2v = 18.4 + 4s > 15.5
+    # (a time per candidate of v/4 < u keeps 4 as faster). The resolved compiler predicts u + v + 8u = 20 + 10s > 15.5.
+    p, calls = bounded_project(base, per_call=5.6, single=1.6, ceiling_s=31, probe_runs=7)
     r, out = search(p, MATCHING)
     got = probes(p)["batching"]
     expect(got["outcome"] == "kept" and got["batch"] == 4 and set(got["sizes_ms"]) == {"4"} and "batch of 8" in got["reason"]
