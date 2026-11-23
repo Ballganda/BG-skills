@@ -1,5 +1,11 @@
 # bg-skills
 
+## 2.0.2
+
+### Patch Changes
+
+- [#258](https://github.com/Ballganda/BG-skills/pull/258) [`ef7964a`](https://github.com/Ballganda/BG-skills/commit/ef7964a70498826d127700f4af851dd7a10c6c60) Thanks [@Ballganda](https://github.com/Ballganda)! - The release command refuses, naming `npm ci`, when the dependencies are not installed, and its dry run warns of it.
+
 ## 2.0.1
 
 ### Patch Changes
