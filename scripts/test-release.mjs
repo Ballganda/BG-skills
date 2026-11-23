@@ -85,6 +85,14 @@ class Scratch {
     });
   }
 
+  // Runs with the default version command (the variable unset); the scratch
+  // repository has no node_modules.
+  runDefault(...args) {
+    const env = { ...process.env };
+    delete env.RELEASE_VERSION_COMMAND;
+    return spawnSync(process.execPath, [RELEASE, ...args], { cwd: this.root, encoding: "utf8", env });
+  }
+
   state() {
     return [this.git("rev-parse", "HEAD"), this.git("status", "--porcelain"), this.git("tag"),
       this.git("--git-dir", this.remote, "tag"), readdirSync(join(this.root, ".changeset")).join(",")].join("|");
@@ -182,4 +190,28 @@ test("a failure after the commit names the step and the command that finishes it
   assert.ok(r.stderr.includes("git tag v1.2.4"), r.stderr);
   assert.ok(r.stderr.includes("git push origin main v1.2.4"), r.stderr);
   assert.equal(s.git("log", "-1", "--format=%B"), COMMIT_MESSAGE);
+}));
+
+test("with the default version command and no installed dependencies, a real run refuses and names npm ci", () => withScratch((s) => {
+  const before = s.state();
+  const r = s.runDefault("--skip-publish");
+  assert.notEqual(r.status, 0, r.stdout);
+  assert.match(r.stderr, /release refused: .*dependencies are not installed.*npm ci/);
+  assert.equal(s.state(), before, "a refusal changes nothing");
+}));
+
+test("with the default version command and no installed dependencies, a dry run warns and changes nothing", () => withScratch((s) => {
+  const before = s.state();
+  const r = s.runDefault("--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /1\.2\.4/);
+  assert.match(r.stdout, /one\.md/);
+  assert.match(r.stdout, /warning: a real run would refuse: the dependencies are not installed.*npm ci/i);
+  assert.equal(s.state(), before);
+}));
+
+test("with the version command replaced, a dry run does not warn of missing dependencies", () => withScratch((s) => {
+  const r = s.run("--dry-run");
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!/npm ci/.test(r.stdout + r.stderr));
 }));

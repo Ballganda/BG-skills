@@ -44,4 +44,4 @@ Run `npm run release`. It versions with the pending changesets, commits the resu
 
 Run `npm run release -- --dry-run` first: it prints the version it would cut, the changesets it would consume and its steps, and changes nothing. `--skip-publish` does everything but the GitHub release.
 
-It refuses, names the cause, exits non-zero and changes nothing when the checkout is not on main, is dirty, is not level with `origin/main`, or has no pending changeset. A failure after the commit names the failed step and the commands that finish the release by hand.
+It refuses, names the cause, exits non-zero and changes nothing when the checkout is not on main, is dirty, is not level with `origin/main`, has no pending changeset, or (with the default version command) has no installed dependencies, in which case run `npm ci`. The dry run warns of that last cause and still exits zero. A failure after the commit names the failed step and the commands that finish the release by hand.
