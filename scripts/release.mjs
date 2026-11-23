@@ -6,7 +6,9 @@
 //   npm run release -- --skip-publish   do everything but the GitHub release
 //
 // It refuses (naming the cause, changing nothing) unless the checkout is on
-// main, clean, level with origin/main, and holds a pending changeset.
+// main, clean, level with origin/main, and holds a pending changeset, and (with
+// the default version command) has its dependencies installed. A dry run
+// warns of that last cause instead of refusing.
 //
 // RELEASE_VERSION_COMMAND names the command that does the versioning. It
 // defaults to `npm run version` (changesets, then the plugin manifest sync).
@@ -16,12 +18,13 @@
 // never run in a test.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const COMMIT_MESSAGE = "chore: version skills";
-const VERSION_COMMAND = process.env.RELEASE_VERSION_COMMAND || "npm run version";
+const DEFAULT_VERSION_COMMAND = "npm run version";
+const VERSION_COMMAND = process.env.RELEASE_VERSION_COMMAND || DEFAULT_VERSION_COMMAND;
 const dryRun = process.argv.includes("--dry-run");
 const skipPublish = process.argv.includes("--skip-publish");
 
@@ -60,6 +63,13 @@ if (git("rev-parse", "HEAD") !== git("rev-parse", "origin/main")) {
 const changesets = pendingChangesets();
 if (changesets.length === 0) refuse("no pending changeset in .changeset/");
 
+// The default version command needs the changesets command installed; a
+// replacement may need nothing, so the check is skipped for it.
+const missingDependencies =
+  VERSION_COMMAND === DEFAULT_VERSION_COMMAND && !existsSync(join("node_modules", "@changesets", "cli"));
+const MISSING_DEPENDENCIES = "the dependencies are not installed (run `npm ci`)";
+if (missingDependencies && !dryRun) refuse(MISSING_DEPENDENCIES);
+
 // The version a dry run would cut: the highest bump among the changesets.
 function nextVersion() {
   const rank = { patch: 0, minor: 1, major: 2 };
@@ -90,6 +100,7 @@ if (dryRun) {
   console.log(`  4. push: git push origin main v${version}`);
   console.log(`  5. ${skipPublish ? "publish (skipped by --skip-publish)" : "publish"}: ${publishCommand(version)}`);
   console.log("     notes: the new version's section of CHANGELOG.md");
+  if (missingDependencies) console.log(`Warning: a real run would refuse: ${MISSING_DEPENDENCIES}.`);
   process.exit(0);
 }
 
