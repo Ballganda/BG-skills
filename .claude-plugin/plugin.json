@@ -1,6 +1,6 @@
 {
   "name": "bg-skills",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Agent skills for real engineering: grilling, spec/ticket flows, TDD, code review, domain modelling and more. Plug-and-play, not vibe coding.",
   "author": {
     "name": "Ballganda",

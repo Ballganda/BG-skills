@@ -1,5 +1,11 @@
 # bg-skills
 
+## 2.0.1
+
+### Patch Changes
+
+- [#255](https://github.com/Ballganda/BG-skills/pull/255) [`e6727f0`](https://github.com/Ballganda/BG-skills/commit/e6727f0c9f3e736d3c1753a20f7acf684b99b63a) Thanks [@Ballganda](https://github.com/Ballganda)! - Releases are cut locally and CI no longer runs them. `npm run release` refuses unless the checkout is on a clean main level with the remote and a changeset is pending; it then versions, commits "chore: version skills", tags, pushes and publishes the GitHub release. `npm run release -- --dry-run` shows what it would do first. The contributor guide has a section on releasing.
+
 ## 2.0.0
 
 ### Major Changes
